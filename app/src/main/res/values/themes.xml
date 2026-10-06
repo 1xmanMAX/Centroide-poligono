@@ -1,8 +1,10 @@
 <resources>
-    <style name="Theme.EscanerProMax" parent="android:Theme.Material.NoActionBar">
+    <!-- Tema de ventana claro: evita el destello oscuro al arrancar en tema claro. -->
+    <style name="Theme.EscanerProMax" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowBackground">@color/brand_bg</item>
+        <item name="android:colorAccent">@color/brand_primary</item>
     </style>
 
     <style name="Theme.EscanerProMax.Splash" parent="Theme.SplashScreen">

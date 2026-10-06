@@ -9,7 +9,6 @@ import org.opencv.core.Scalar
 import org.opencv.imgproc.Imgproc
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.roundToInt
 
 /** Evaluación rápida de la captura (nitidez, brillo, reflejos) a ~640 px. */
 object QualityAnalyzer {
@@ -19,32 +18,53 @@ object QualityAnalyzer {
     fun analyze(bitmap: Bitmap): QualityReport {
         val w = bitmap.width; val h = bitmap.height
         if (w < 8 || h < 8) return report(0.0, 0.0, 0.0)
-        val s = min(1.0, WORK_SIDE.toDouble() / max(w, h))
-        val small = if (s < 1.0) Bitmap.createScaledBitmap(bitmap, max(1, (w * s).roundToInt()), max(1, (h * s).roundToInt()), true) else bitmap
-        val rgba = Cv.toRgba(small)
-        if (small !== bitmap) small.recycle()
+        // Reducción sin aliasing (el bilineal x6 inflaba la varianza del Laplaciano con ruido de texto)
+        val rgba = Cv.toRgbaScaled(bitmap, WORK_SIDE).first
         val g = Mat()
         Imgproc.cvtColor(rgba, g, Imgproc.COLOR_RGBA2GRAY)
         rgba.release()
         try { return analyzeGray(g) } finally { g.release() }
     }
 
-    /** Variante para la cámara en vivo a partir del plano Y (no asigna Bitmaps). */
+    // Buffers reutilizados entre frames de la cámara (evita un ByteArray y un Mat nuevos por frame)
+    private val lumaLock = Any()
+    private var lumaBytes = ByteArray(0)
+    private var lumaFull: Mat? = null
+    private var lumaRoi: Mat? = null
+    private var lumaSmall: Mat? = null
+
+    /**
+     * Variante para la cámara en vivo a partir del plano Y (no asigna Bitmaps y reutiliza sus buffers).
+     * Si el mismo frame ya pasó por [DocumentDetector.detectLive], es más barato [DocumentDetector.analyzeLastFrame].
+     */
     fun analyzeLuma(yPlane: java.nio.ByteBuffer, width: Int, height: Int, rowStride: Int): QualityReport {
         if (width < 8 || height < 8 || rowStride < width) return report(0.0, 0.0, 0.0)
-        val need = rowStride * height
-        val bytes = ByteArray(need)
-        val dup = yPlane.duplicate(); dup.rewind()
-        dup.get(bytes, 0, min(dup.remaining(), need))
-        val full = Mat(height, rowStride, CvType.CV_8UC1)
-        full.put(0, 0, bytes)
-        val roi = full.submat(0, height, 0, width)
-        val small = Mat()
-        try {
-            Cv.downscale(roi, small, WORK_SIDE)
+        synchronized(lumaLock) {
+            val need = rowStride * height
+            if (lumaBytes.size != need) lumaBytes = ByteArray(need)
+            val dup = yPlane.duplicate(); dup.rewind()
+            dup.get(lumaBytes, 0, min(dup.remaining(), need))
+            var full = lumaFull
+            if (full == null || full.rows() != height || full.cols() != rowStride || lumaRoi?.cols() != width) {
+                lumaRoi?.release(); full?.release()
+                full = Mat(height, rowStride, CvType.CV_8UC1)
+                lumaFull = full
+                lumaRoi = full.submat(0, height, 0, width)
+            }
+            full.put(0, 0, lumaBytes)
+            val small = lumaSmall ?: Mat().also { lumaSmall = it }
+            Cv.downscale(lumaRoi!!, small, WORK_SIDE)
             return analyzeGray(small)
-        } finally {
-            small.release(); roi.release(); full.release()
+        }
+    }
+
+    /** Libera los buffers de [analyzeLuma] (al cerrar la cámara). */
+    fun releaseLiveBuffers() {
+        synchronized(lumaLock) {
+            lumaRoi?.release(); lumaRoi = null
+            lumaFull?.release(); lumaFull = null
+            lumaSmall?.release(); lumaSmall = null
+            lumaBytes = ByteArray(0)
         }
     }
 

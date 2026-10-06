@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -116,7 +117,7 @@ private data class PdfInfo(val name: String, val size: Long, val pages: Int?, va
 
 private enum class CompressMode { LEVEL, TARGET }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun CompressPdfScreen(container: AppContainer, initialUri: Uri?, onBack: () -> Unit) {
     val context = LocalContext.current
@@ -163,6 +164,10 @@ fun CompressPdfScreen(container: AppContainer, initialUri: Uri?, onBack: () -> U
 
     val pickPdf = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { picked ->
         if (picked != null) {
+            // Permiso persistente: el Uri se restaura tras la muerte del proceso (rememberSaveable).
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(picked, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
             job?.cancel()
             uri = picked
         }
@@ -261,25 +266,29 @@ fun CompressPdfScreen(container: AppContainer, initialUri: Uri?, onBack: () -> U
         snackbarHost = { SnackbarHost(snackbar) },
     ) { inner ->
         val current = info
+        // [inner] ya incluye las barras del sistema (insets por defecto del Scaffold): no se añade
+        // navigationBarsPadding otra vez (daba doble margen inferior).
         if (uri == null) {
-            Box(
+            Column(
                 Modifier
                     .fillMaxSize()
-                    .padding(inner),
-                contentAlignment = Alignment.Center,
+                    .padding(inner)
+                    .consumeWindowInsets(inner),
+                horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                EmptyState(
-                    title = "Elige un PDF",
-                    message = "Comprime cualquier PDF de tu teléfono manteniendo el texto legible. También puedes compartir un PDF desde otra app hacia ESCÁNER PRO MAX.",
-                    actionLabel = null,
-                )
+                // El estado vacío ocupa el espacio libre y el botón va debajo: nunca se solapan.
+                Box(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()), contentAlignment = Alignment.Center) {
+                    EmptyState(
+                        title = "Elige un PDF",
+                        message = "Comprime cualquier PDF de tu teléfono manteniendo el texto legible. También puedes compartir un PDF desde otra app hacia ESCÁNER PRO MAX.",
+                        actionLabel = null,
+                    )
+                }
                 GradientButton(
                     text = "Elegir PDF",
                     onClick = openPicker,
                     icon = Icons.Rounded.FileOpen,
                     modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .navigationBarsPadding()
                         .padding(20.dp)
                         .fillMaxWidth(),
                 )
@@ -288,10 +297,10 @@ fun CompressPdfScreen(container: AppContainer, initialUri: Uri?, onBack: () -> U
             Modifier
                 .fillMaxSize()
                 .padding(inner)
+                .consumeWindowInsets(inner)
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp)
-                .padding(bottom = 24.dp)
-                .navigationBarsPadding(),
+                .padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             FileCard(info = current, loading = loadingInfo, onChange = openPicker, enabled = job == null)
@@ -610,6 +619,15 @@ private fun ResultCard(
                         ),
                     )
                     Text("de tamaño ahorrado", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (result.rasterized) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Las páginas se convirtieron en imágenes: el texto ya no se podrá seleccionar ni buscar.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = brand.warning,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        )
+                    }
                 }
                 Spacer(Modifier.height(20.dp))
                 SizeBar("Antes", result.originalBytes, 1f, MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f))

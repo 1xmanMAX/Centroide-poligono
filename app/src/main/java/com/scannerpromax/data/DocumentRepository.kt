@@ -693,7 +693,9 @@ class DocumentRepository(
 
     private fun deletePageFiles(dir: File, pageId: String) {
         SUBDIRS.forEach { sub ->
-            File(dir, sub).listFiles()?.forEach { f -> if (f.name.startsWith(pageId)) f.delete() }
+            val d = File(dir, sub)
+            d.listFiles()?.forEach { f -> if (f.name.startsWith(pageId)) f.delete() }
+            BitmapIO.cleanupTempFiles(d)
         }
     }
 
@@ -764,6 +766,8 @@ class DocumentRepository(
         val loadedDocs = withContext(Dispatchers.IO) {
             root.mkdirs()
             root.listFiles()?.filter { it.isDirectory }?.mapNotNull { dir ->
+                // Temporales '.*.tmp' de escrituras interrumpidas (doc.json.tmp no empieza por '.', se conserva).
+                SUBDIRS.forEach { BitmapIO.cleanupTempFiles(File(dir, it)) }
                 readDoc(dir) ?: run {
                     // Carpeta huérfana (documento borrado mientras se procesaba una página): sin doc.json no se
                     // puede recuperar nada. Nada puede crear documentos antes de terminar la carga, así que es seguro.

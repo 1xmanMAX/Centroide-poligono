@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.RectF
@@ -35,7 +36,6 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -47,16 +47,23 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -70,6 +77,7 @@ import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.automirrored.filled.ReceiptLong
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Badge
+import androidx.compose.material.icons.filled.BlurOn
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -85,12 +93,14 @@ import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Slideshow
 import androidx.compose.material.icons.filled.TouchApp
+import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -122,16 +132,24 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.min
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.withStarted
 import coil.compose.AsyncImage
 import com.scannerpromax.data.AppSettings
 import com.scannerpromax.di.AppContainer
@@ -139,6 +157,9 @@ import com.scannerpromax.domain.Document
 import com.scannerpromax.domain.FilterType
 import com.scannerpromax.domain.PageEdits
 import com.scannerpromax.domain.ScanMode
+import com.scannerpromax.ui.components.GradientButton
+import com.scannerpromax.ui.components.LoadingOverlay
+import com.scannerpromax.ui.theme.brand
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -157,6 +178,13 @@ import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.max
 
+/**
+ * Ámbito de PROCESO para el procesamiento de capturas: si la pantalla se destruye (recreación de la
+ * actividad, salir con trabajos pendientes) las fotos ya hechas terminan de procesarse y se guardan en
+ * su documento en vez de perderse. Solo "Descartar" cancela estos trabajos de forma explícita.
+ */
+private val captureScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
 // =================================================================================================
 // Punto de entrada: permiso de cámara
 // =================================================================================================
@@ -173,6 +201,17 @@ fun CameraScreen(
     var granted by remember { mutableStateOf(context.hasCameraPermission()) }
     var permanentlyDenied by rememberSaveable { mutableStateOf(false) }
     var askedOnce by rememberSaveable { mutableStateOf(false) }
+
+    // La cámara trabaja en vertical (como todos los escáneres): la vista previa, la guía del DNI y el
+    // cuadrilátero se calculan para esa orientación. Se restaura la orientación al salir.
+    DisposableEffect(Unit) {
+        val activity = context.findActivity()
+        val previous = activity?.requestedOrientation
+        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        onDispose {
+            if (activity != null && previous != null) activity.requestedOrientation = previous
+        }
+    }
 
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
         granted = ok
@@ -227,8 +266,7 @@ private fun PermissionScreen(
     onBack: () -> Unit,
 ) {
     BackHandler(onBack = onBack)
-    val primary = MaterialTheme.colorScheme.primary
-    val secondary = MaterialTheme.colorScheme.secondary
+    val brand = MaterialTheme.brand
     val pulse = rememberInfiniteTransition(label = "pulse")
     val glow by pulse.animateFloat(
         initialValue = 0.85f, targetValue = 1.08f,
@@ -238,11 +276,8 @@ private fun PermissionScreen(
     Box(
         Modifier
             .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    listOf(MaterialTheme.colorScheme.background, primary.copy(alpha = 0.18f), MaterialTheme.colorScheme.background),
-                ),
-            )
+            .background(MaterialTheme.colorScheme.background)
+            .background(brand.backdrop)
             .statusBarsPadding()
             .navigationBarsPadding(),
     ) {
@@ -258,14 +293,14 @@ private fun PermissionScreen(
                         .size(150.dp)
                         .graphicsLayer { scaleX = glow; scaleY = glow; alpha = 0.35f }
                         .clip(CircleShape)
-                        .background(Brush.radialGradient(listOf(primary, Color.Transparent))),
+                        .background(Brush.radialGradient(listOf(brand.gradientStart, Color.Transparent))),
                 )
                 Box(
                     Modifier
                         .size(104.dp)
-                        .shadow(18.dp, CircleShape, ambientColor = primary, spotColor = primary)
+                        .shadow(18.dp, CircleShape, ambientColor = brand.glow, spotColor = brand.glow)
                         .clip(CircleShape)
-                        .background(Brush.linearGradient(listOf(primary, secondary))),
+                        .background(brand.gradient),
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(Icons.Filled.CameraAlt, null, tint = Color.White, modifier = Modifier.size(48.dp))
@@ -291,7 +326,7 @@ private fun PermissionScreen(
             PermissionBullet(Icons.Filled.Lock, "Todo se procesa en tu teléfono: nada se sube a internet")
             PermissionBullet(Icons.Filled.TouchApp, "Toca la pantalla para enfocar y usa el flash con poca luz")
             Spacer(Modifier.height(32.dp))
-            GradientPillButton(
+            GradientButton(
                 text = if (permanentlyDenied) "Abrir ajustes" else "Permitir cámara",
                 icon = Icons.Filled.CameraAlt,
                 onClick = if (permanentlyDenied) onOpenSettings else onRequest,
@@ -329,6 +364,9 @@ private fun PermissionBullet(icon: ImageVector, text: String) {
 // Cámara
 // =================================================================================================
 
+/** Alto reservado para los controles bajo la vista previa (modos + obturador). */
+private val CONTROLS_HEIGHT = 178.dp
+
 @Composable
 private fun CameraContent(
     container: AppContainer,
@@ -338,16 +376,18 @@ private fun CameraContent(
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
+    val appContext = context.applicationContext
     val lifecycleOwner = LocalLifecycleOwner.current
     val haptics = LocalHapticFeedback.current
     val density = LocalDensity.current
-    val primary = MaterialTheme.colorScheme.primary
-    val secondary = MaterialTheme.colorScheme.secondary
+    val brand = MaterialTheme.brand
+    val gradStart = brand.gradientStart
+    val gradEnd = brand.gradientEnd
 
     val settings by container.settings.settings.collectAsState(initial = AppSettings())
     val engine = remember { CameraEngine(context.applicationContext, container.pageProcessor.detector, container.deviceTier) }
     val processor = remember { CaptureProcessor(container) }
-    // Ámbito propio con SupervisorJob: un fallo al procesar una página no cancela el resto.
+    // Ámbito de la pantalla (animaciones, captura). El procesamiento va en [captureScope].
     val workScope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
     val previewView = remember {
         PreviewView(context).apply {
@@ -375,7 +415,8 @@ private fun CameraContent(
     val shutterFlash = remember { Animatable(0f) }
     val smoothed = rememberSmoothedQuad()
 
-    val tooDark by engine.tooDark.collectAsState()
+    val quality by engine.quality.collectAsState()
+    val tooDark = quality.tooDark
     val hasFlash by engine.hasFlash.collectAsState()
     val ready by engine.ready.collectAsState()
     val cameraError by engine.error.collectAsState()
@@ -384,36 +425,40 @@ private fun CameraContent(
     }.collectAsState(initial = null)
     val pageCount = doc?.pages?.size ?: 0
 
-    fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+    fun toast(msg: String) = Toast.makeText(appContext, msg, Toast.LENGTH_SHORT).show()
+
+    /** Recicla el bitmap de un anverso pendiente que ya no se va a usar. */
+    fun recycleFront(d: Deferred<Result<Bitmap>>?) {
+        d ?: return
+        captureScope.launch { runCatching { d.await().getOrNull()?.recycle() } }
+    }
 
     DisposableEffect(engine) {
         engine.bind(lifecycleOwner, previewView, flash)
         onDispose {
             engine.release()
             workScope.cancel()
+            // Los trabajos de procesamiento NO se cancelan: terminan en segundo plano y guardan sus páginas.
+            recycleFront(idFront)
+            idFront = null
         }
     }
     LaunchedEffect(flash) { engine.setFlash(flash) }
     LaunchedEffect(mode) {
         engine.detectionEnabled = mode != ScanMode.PHOTO
         stableProgress = 0f
-        if (mode != ScanMode.ID_CARD) idFront = null
     }
 
     suspend fun ensureDoc(m: ScanMode): String = docMutex.withLock {
         currentDocId ?: container.documents.create(m).id.also { currentDocId = it }
     }
 
-    fun extraEdits(m: ScanMode) = PageEdits(
-        quad = null,
-        filter = settings.defaultFilter.takeIf { it != FilterType.ORIGINAL } ?: FilterType.MAGIC,
-        autoRemoveLines = settings.autoRemoveLines,
-        autoDeskew = m == ScanMode.BOOK,
-    )
+    fun extraEdits(m: ScanMode) = CaptureProcessor.composedEdits(m, settings)
+    fun cardFilter(): FilterType? = CaptureProcessor.cardFilter(settings)
 
-    /** Lanza un trabajo de procesamiento en segundo plano (no bloquea la cámara). */
+    /** Lanza un trabajo de procesamiento en segundo plano (no bloquea la cámara y sobrevive a la pantalla). */
     fun launchJob(block: suspend () -> Unit) {
-        val job = workScope.launch {
+        val job = captureScope.launch {
             pendingJobs++
             try {
                 block()
@@ -426,6 +471,7 @@ private fun CameraContent(
             }
         }
         jobs += job
+        job.invokeOnCompletion { captureScope.launch { jobs.remove(job) } }
     }
 
     fun guideNormalized(): RectF? {
@@ -435,13 +481,26 @@ private fun CameraContent(
         return map.viewRectToNormalized(idCardGuideRect(vw, vh))
     }
 
-    fun captureNow() {
+    /** Centro del cuadrilátero suavizado en coordenadas de la vista (para enfocar antes de la autocaptura). */
+    fun quadCenterInView(): Offset? {
+        if (viewSize.width <= 0 || viewSize.height <= 0 || smoothed.alpha < 0.3f) return null
+        val map = FrameMapping.fillCenter(viewSize.width.toFloat(), viewSize.height.toFloat(), smoothed.frameW, smoothed.frameH)
+        val p = smoothed.points
+        val cx = (p[0] + p[2] + p[4] + p[6]) / 4f
+        val cy = (p[1] + p[3] + p[5] + p[7]) / 4f
+        return map.toView(cx, cy)
+    }
+
+    fun captureNow(auto: Boolean = false) {
         if (capturing || finishing || !ready) return
         capturing = true
-        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
         val m = mode
         val guide = if (m == ScanMode.ID_CARD) guideNormalized() else null
+        val focusTarget = if (auto) quadCenterInView() else null
         workScope.launch {
+            // Autocaptura: enfocar en el documento y esperar al AF (las cámaras baratas "cazan" el foco).
+            if (focusTarget != null) engine.focusAndWait(previewView, focusTarget.x, focusTarget.y)
+            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
             launch {
                 shutterFlash.snapTo(0.8f)
                 shutterFlash.animateTo(0f, tween(320))
@@ -450,6 +509,7 @@ private fun CameraContent(
             try {
                 engine.capture(file, previewView)
             } catch (c: CancellationException) {
+                file.delete()
                 throw c
             } catch (t: Throwable) {
                 capturing = false
@@ -463,15 +523,16 @@ private fun CameraContent(
                 ScanMode.BOOK -> launchJob { processor.addBook(ensureDoc(m), file, extraEdits(m)) }
                 ScanMode.ID_CARD -> {
                     val front = idFront
+                    val filter = cardFilter()
                     if (front == null) {
-                        idFront = workScope.async { runCatching { processor.cropCardSide(file, guide) } }
+                        idFront = captureScope.async { runCatching { processor.cropCardSide(file, guide, filter) } }
                     } else {
                         idFront = null
                         launchJob {
                             val f = front.await().getOrThrow()
                             var b: Bitmap? = null
                             try {
-                                b = processor.cropCardSide(file, guide)
+                                b = processor.cropCardSide(file, guide, filter)
                                 processor.addIdCard(ensureDoc(m), f, b, extraEdits(m))
                             } finally {
                                 f.recycle(); b?.recycle()
@@ -479,7 +540,7 @@ private fun CameraContent(
                         }
                     }
                 }
-                else -> launchJob { processor.addStandard(ensureDoc(m), file) }
+                else -> launchJob { processor.addStandard(ensureDoc(m), file, m) }
             }
         }
     }
@@ -498,6 +559,16 @@ private fun CameraContent(
         }
     }
 
+    /** Cambia de modo. Si hay un anverso de DNI pendiente, se guarda como una sola cara (no se pierde). */
+    fun changeMode(m: ScanMode) {
+        if (m == mode) return
+        if (idFront != null) {
+            skipBack()
+            toast("Anverso guardado como tarjeta de una cara")
+        }
+        mode = m
+    }
+
     fun finish() {
         if (finishing) return
         finishing = true
@@ -506,14 +577,12 @@ private fun CameraContent(
             jobs.toList().joinAll()
             val id = currentDocId
             val hasPages = id != null && (container.documents.get(id)?.pages?.isNotEmpty() == true)
-            finishing = false
-            when {
-                id != null && (hasPages || !createdHere) -> onFinished(id)
-                id != null && createdHere -> {
-                    runCatching { container.documents.delete(id) }
-                    onBack()
-                }
-                else -> onBack()
+            if (id != null && !hasPages && createdHere) runCatching { container.documents.delete(id) }
+            // Si la app pasó a segundo plano mientras se procesaba, se espera a volver antes de navegar
+            // (antes la navegación se descartaba y la cámara quedaba abierta con el documento a medias).
+            lifecycleOwner.lifecycle.withStarted {
+                finishing = false
+                if (id != null && (hasPages || !createdHere)) onFinished(id) else onBack()
             }
         }
     }
@@ -522,6 +591,8 @@ private fun CameraContent(
         val id = currentDocId
         val pending = jobs.toList()
         pending.forEach { it.cancel() }
+        recycleFront(idFront)
+        idFront = null
         if (id != null && createdHere) {
             // Borrar cuando terminen de cancelarse los trabajos (fuera del ciclo de vida de la pantalla).
             CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
@@ -532,29 +603,55 @@ private fun CameraContent(
         onBack()
     }
 
-    val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(50)) { uris ->
-        if (uris.isNotEmpty()) {
-            capturedThisSession += uris.size
-            val m = mode
-            launchJob { container.documents.addPagesFromUris(ensureDoc(m), uris) }
-        }
-    }
-
-    BackHandler {
+    /** Lógica única de cierre (botón Cerrar y gesto/botón Atrás del sistema). */
+    fun requestClose() {
         when {
             finishing -> Unit
             createdHere && (pageCount > 0 || pendingJobs > 0 || idFront != null) -> showDiscard = true
-            !createdHere && capturedThisSession > 0 -> finish()
-            else -> {
-                if (createdHere && currentDocId != null) discard() else onBack()
-            }
+            !createdHere && (capturedThisSession > 0 || pendingJobs > 0) -> finish()
+            createdHere && currentDocId != null -> discard() // documento vacío (p. ej. falló la 1.ª captura)
+            else -> onBack()
         }
     }
+
+    val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(50)) { uris ->
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        capturedThisSession += uris.size
+        val m = mode
+        when (m) {
+            // Libro: cada foto de la galería se divide en dos páginas, igual que con la cámara.
+            ScanMode.BOOK -> uris.forEach { uri ->
+                launchJob { processor.addBook(ensureDoc(m), processor.copyToCaptureFile(uri), extraEdits(m)) }
+            }
+            // DNI: las imágenes se toman de dos en dos (anverso + reverso); si sobra una, va sola.
+            ScanMode.ID_CARD -> {
+                if (idFront != null) skipBack()
+                val filter = cardFilter()
+                uris.chunked(2).forEach { pair ->
+                    launchJob {
+                        var f: Bitmap? = null
+                        var b: Bitmap? = null
+                        try {
+                            f = processor.cropCardSide(processor.copyToCaptureFile(pair[0]), null, filter)
+                            b = pair.getOrNull(1)?.let { processor.cropCardSide(processor.copyToCaptureFile(it), null, filter) }
+                            processor.addIdCard(ensureDoc(m), f, b, extraEdits(m))
+                        } finally {
+                            f?.recycle(); b?.recycle()
+                        }
+                    }
+                }
+            }
+            else -> launchJob { container.documents.addPagesFromUris(ensureDoc(m), uris, mode = m) }
+        }
+    }
+
+    BackHandler { requestClose() }
 
     // ---------------------------------------------------------------- autocaptura
     val autoCapture by rememberUpdatedState(settings.autoCapture)
     val modeState by rememberUpdatedState(mode)
     val busy by rememberUpdatedState(capturing || finishing || !ready)
+    val blurryState by rememberUpdatedState(quality.blurry)
     val framesNeeded = if (container.deviceTier.isLowRam || container.deviceTier.cores <= 4) 8 else 14
     LaunchedEffect(engine) {
         var prev: LiveDetection? = null
@@ -567,143 +664,65 @@ private fun CameraContent(
                 now >= cooldownUntil && det.confidence >= 0.55f && normalizedArea(det) >= 0.12f
             stable = if (!eligible) 0 else if (prev != null && maxCornerShift(prev!!, det!!) < 0.022f) stable + 1 else 1
             prev = det
+            // Con imagen borrosa no se completa la cuenta: se espera a que el usuario sujete firme.
+            if (blurryState && stable >= framesNeeded - 1) stable = framesNeeded - 1
             stableProgress = (stable.toFloat() / framesNeeded).coerceIn(0f, 1f)
             if (stable >= framesNeeded) {
                 stable = 0
                 stableProgress = 0f
                 cooldownUntil = now + 2_500L
-                captureNow()
+                captureNow(auto = true)
             }
         }
     }
 
     // ---------------------------------------------------------------- UI
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
-        AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
+    val hint = when {
+        mode == ScanMode.ID_CARD && idFront != null -> "Paso 2 de 2 · Gira la tarjeta y encuadra el REVERSO"
+        mode == ScanMode.ID_CARD -> "Paso 1 de 2 · Encuadra el ANVERSO dentro del marco"
+        tooDark && hasFlash && flash == FlashSetting.OFF -> "Poca luz · toca aquí para encender la linterna"
+        tooDark -> "Poca luz · busca una zona más iluminada"
+        mode != ScanMode.PHOTO && quality.blurry && stableProgress > 0.05f -> "Imagen borrosa · sujeta firme el móvil"
+        mode != ScanMode.PHOTO && quality.glare -> "Reflejo · inclina un poco el móvil"
+        stableProgress > 0.05f -> "No te muevas… capturando"
+        else -> modeHint(mode)
+    }
 
-        Box(
-            Modifier
-                .fillMaxSize()
-                .onSizeChanged { viewSize = it }
-                .pointerInput(Unit) {
-                    detectTapGestures { off ->
-                        engine.focusAt(previewView, off.x, off.y)
-                        focusPoint = off
-                        focusKey++
-                    }
-                }
-                .pointerInput(Unit) {
-                    // Deslizar horizontalmente sobre la vista previa cambia de modo.
-                    var total = 0f
-                    val threshold = with(density) { 70.dp.toPx() }
-                    detectHorizontalDragGestures(
-                        onDragStart = { total = 0f },
-                        onHorizontalDrag = { change, amount -> total += amount; change.consume() },
-                        onDragEnd = {
-                            val modes = ScanMode.entries
-                            val idx = modes.indexOf(modeState)
-                            if (abs(total) > threshold) {
-                                val next = if (total < 0) idx + 1 else idx - 1
-                                if (next in modes.indices) mode = modes[next]
-                            }
-                        },
-                    )
-                },
-        ) {
-            DetectionOverlay(smoothed, mode, stableProgress, primary, secondary)
-            FocusRing(focusPoint, focusKey, secondary)
-        }
-
-        if (shutterFlash.value > 0f) {
-            Box(Modifier.fillMaxSize().graphicsLayer { alpha = shutterFlash.value }.background(Color.White))
-        }
-
-        // ------------------------------------------------ barra superior
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.55f), Color.Transparent)))
-                .statusBarsPadding()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            RoundIconButton(Icons.Filled.Close, "Cerrar", onClick = {
-                when {
-                    createdHere && (pageCount > 0 || pendingJobs > 0 || idFront != null) -> showDiscard = true
-                    !createdHere && capturedThisSession > 0 -> finish()
-                    else -> onBack()
-                }
-            })
-            Spacer(Modifier.weight(1f))
-            AutoCaptureToggle(
-                enabled = settings.autoCapture,
-                visible = mode != ScanMode.PHOTO,
-                onToggle = {
-                    val newValue = !settings.autoCapture
-                    workScope.launch { container.settings.update { it.copy(autoCapture = newValue) } }
-                    toast(if (newValue) "Captura automática activada" else "Captura automática desactivada")
-                },
-            )
-            Spacer(Modifier.width(8.dp))
-            if (hasFlash) {
-                val icon = when (flash) {
-                    FlashSetting.OFF -> Icons.Filled.FlashOff
-                    FlashSetting.AUTO -> Icons.Filled.FlashAuto
-                    FlashSetting.ON -> Icons.Filled.FlashOn
-                    FlashSetting.TORCH -> Icons.Filled.FlashlightOn
-                }
-                RoundIconButton(
-                    icon, flash.label,
-                    highlighted = flash != FlashSetting.OFF,
-                    onClick = {
-                        flash = FlashSetting.entries[(flash.ordinal + 1) % FlashSetting.entries.size]
-                        toast(flash.label)
-                    },
-                )
-            }
-        }
-
-        // ------------------------------------------------ panel inferior
-        Column(
-            Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.55f), Color.Black.copy(alpha = 0.85f))))
-                .navigationBarsPadding()
-                .padding(bottom = 12.dp, top = 28.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            val hint = when {
-                mode == ScanMode.ID_CARD && idFront != null -> "Paso 2 de 2 · Gira la tarjeta y encuadra el REVERSO"
-                mode == ScanMode.ID_CARD -> "Paso 1 de 2 · Encuadra el ANVERSO dentro del marco"
-                tooDark && hasFlash && flash == FlashSetting.OFF -> "Poca luz · toca aquí para encender la linterna"
-                tooDark -> "Poca luz · busca una zona más iluminada"
-                stableProgress > 0.05f -> "No te muevas… capturando"
-                else -> modeHint(mode)
-            }
+    val hintArea: @Composable () -> Unit = {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
             AnimatedContent(
                 targetState = hint,
                 transitionSpec = { (fadeIn(tween(220)) + slideInVertically { it / 3 }) togetherWith fadeOut(tween(150)) },
                 label = "hint",
             ) { text ->
                 val isDarkHint = text.startsWith("Poca luz")
+                val isWarn = isDarkHint || text.startsWith("Imagen borrosa") || text.startsWith("Reflejo")
                 HintPill(
                     text = text,
-                    icon = if (isDarkHint) Icons.Filled.Lightbulb else null,
-                    warning = isDarkHint,
+                    icon = when {
+                        isDarkHint -> Icons.Filled.Lightbulb
+                        text.startsWith("Imagen borrosa") -> Icons.Filled.BlurOn
+                        text.startsWith("Reflejo") -> Icons.Filled.WbSunny
+                        else -> null
+                    },
+                    warning = isWarn,
                     onClick = if (isDarkHint && hasFlash) ({ flash = FlashSetting.TORCH }) else null,
                 )
             }
             AnimatedVisibility(visible = mode == ScanMode.ID_CARD && idFront != null) {
-                TextButton(onClick = { skipBack() }) {
+                TextButton(onClick = { skipBack() }, modifier = Modifier.heightIn(min = 48.dp)) {
                     Icon(Icons.Filled.SkipNext, null, tint = Color.White, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
                     Text("Omitir reverso (solo una cara)", color = Color.White)
                 }
             }
-            Spacer(Modifier.height(10.dp))
-            ModeSelector(selected = mode, onSelect = { mode = it })
-            Spacer(Modifier.height(16.dp))
+        }
+    }
+
+    val controls: @Composable () -> Unit = {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            ModeSelector(selected = mode, onSelect = { changeMode(it) })
+            Spacer(Modifier.height(14.dp))
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 24.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -735,6 +754,131 @@ private fun CameraContent(
                 }
             }
         }
+    }
+
+    BoxWithConstraints(Modifier.fillMaxSize().background(Color.Black)) {
+        val topInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+        val bottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+        // Vista previa 3:4 (lo que se ve = lo que se captura) arriba y los controles en la franja de abajo.
+        // Si la pantalla es demasiado baja, la vista previa ocupa todo y los controles van superpuestos.
+        val availableH = maxHeight - topInset - bottomInset - CONTROLS_HEIGHT
+        val stacked = availableH >= maxWidth * 0.95f
+        val previewH: Dp = if (stacked) min(maxWidth * 4f / 3f, availableH) else maxHeight
+        val previewW: Dp = if (stacked) min(maxWidth, previewH * 3f / 4f) else maxWidth
+
+        Column(Modifier.fillMaxSize()) {
+            if (stacked) Spacer(Modifier.height(topInset))
+            Box(Modifier.fillMaxWidth().height(previewH), contentAlignment = Alignment.TopCenter) {
+                Box(
+                    Modifier
+                        .width(previewW)
+                        .height(previewH)
+                        .clip(if (stacked) RoundedCornerShape(bottomStart = 22.dp, bottomEnd = 22.dp) else RoundedCornerShape(0.dp)),
+                ) {
+                    AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .onSizeChanged { viewSize = it }
+                            .pointerInput(Unit) {
+                                detectTapGestures { off ->
+                                    engine.focusAt(previewView, off.x, off.y)
+                                    focusPoint = off
+                                    focusKey++
+                                }
+                            }
+                            .pointerInput(Unit) {
+                                // Deslizar horizontalmente sobre la vista previa cambia de modo
+                                // (desactivado mientras hay un anverso de DNI pendiente).
+                                var total = 0f
+                                val threshold = with(density) { 70.dp.toPx() }
+                                detectHorizontalDragGestures(
+                                    onDragStart = { total = 0f },
+                                    onHorizontalDrag = { change, amount -> total += amount; change.consume() },
+                                    onDragEnd = {
+                                        val modes = ScanMode.entries
+                                        val idx = modes.indexOf(modeState)
+                                        if (abs(total) > threshold && idFront == null) {
+                                            val next = if (total < 0) idx + 1 else idx - 1
+                                            if (next in modes.indices) changeMode(modes[next])
+                                        }
+                                    },
+                                )
+                            },
+                    ) {
+                        DetectionOverlay(smoothed, mode, stableProgress, gradStart, gradEnd)
+                        FocusRing(focusPoint, focusKey, gradEnd)
+                    }
+                    if (shutterFlash.value > 0f) {
+                        Box(Modifier.fillMaxSize().graphicsLayer { alpha = shutterFlash.value }.background(Color.White))
+                    }
+                    if (stacked) {
+                        Box(Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp, start = 12.dp, end = 12.dp)) { hintArea() }
+                    }
+                }
+            }
+            if (stacked) {
+                Box(
+                    Modifier.fillMaxWidth().weight(1f).padding(bottom = bottomInset),
+                    contentAlignment = Alignment.Center,
+                ) { controls() }
+            }
+        }
+
+        if (!stacked) {
+            Column(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.55f), Color.Black.copy(alpha = 0.85f))))
+                    .navigationBarsPadding()
+                    .padding(bottom = 12.dp, top = 28.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                hintArea()
+                Spacer(Modifier.height(10.dp))
+                controls()
+            }
+        }
+
+        // ------------------------------------------------ barra superior (sobre la vista previa)
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.55f), Color.Transparent)))
+                .statusBarsPadding()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            RoundIconButton(Icons.Filled.Close, "Cerrar", onClick = { requestClose() })
+            Spacer(Modifier.weight(1f))
+            AutoCaptureToggle(
+                enabled = settings.autoCapture,
+                visible = mode != ScanMode.PHOTO,
+                onToggle = {
+                    val newValue = !settings.autoCapture
+                    workScope.launch { container.settings.update { it.copy(autoCapture = newValue) } }
+                    toast(if (newValue) "Captura automática activada" else "Captura automática desactivada")
+                },
+            )
+            Spacer(Modifier.width(8.dp))
+            if (hasFlash) {
+                val icon = when (flash) {
+                    FlashSetting.OFF -> Icons.Filled.FlashOff
+                    FlashSetting.AUTO -> Icons.Filled.FlashAuto
+                    FlashSetting.ON -> Icons.Filled.FlashOn
+                    FlashSetting.TORCH -> Icons.Filled.FlashlightOn
+                }
+                RoundIconButton(
+                    icon, flash.label,
+                    highlighted = flash != FlashSetting.OFF,
+                    onClick = {
+                        flash = FlashSetting.entries[(flash.ordinal + 1) % FlashSetting.entries.size]
+                        toast(flash.label)
+                    },
+                )
+            }
+        }
 
         if (cameraError != null) {
             Column(
@@ -755,27 +899,11 @@ private fun CameraContent(
             }
         }
 
-        AnimatedVisibility(
+        LoadingOverlay(
             visible = finishing,
-            enter = fadeIn(),
-            exit = fadeOut(),
+            message = if (pendingJobs > 0) "Mejorando $pendingJobs ${if (pendingJobs == 1) "captura" else "capturas"}…" else "Preparando documento…",
             modifier = Modifier.fillMaxSize(),
-        ) {
-            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.6f)), contentAlignment = Alignment.Center) {
-                Column(
-                    Modifier.clip(RoundedCornerShape(24.dp)).background(MaterialTheme.colorScheme.surfaceContainerHigh).padding(28.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    CircularProgressIndicator(color = primary)
-                    Spacer(Modifier.height(16.dp))
-                    Text(
-                        if (pendingJobs > 0) "Mejorando $pendingJobs ${if (pendingJobs == 1) "captura" else "capturas"}…" else "Preparando documento…",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
-                }
-            }
-        }
+        )
     }
 
     if (showDiscard) {
@@ -794,9 +922,11 @@ private fun CameraContent(
                     TextButton(onClick = { showDiscard = false }) { Text("Seguir") }
                 }
             },
+            shape = MaterialTheme.shapes.extraLarge,
         )
     }
 }
+
 
 private fun normalizedArea(det: LiveDetection): Float {
     val p = det.quad.points()
@@ -871,8 +1001,7 @@ private fun ModeSelector(selected: ScanMode, onSelect: (ScanMode) -> Unit) {
 
 @Composable
 private fun ModePill(mode: ScanMode, selected: Boolean, onClick: () -> Unit) {
-    val primary = MaterialTheme.colorScheme.primary
-    val secondary = MaterialTheme.colorScheme.secondary
+    val brandGradient = MaterialTheme.brand.horizontalGradient
     val scale by animateFloatAsState(if (selected) 1.06f else 1f, spring(dampingRatio = Spring.DampingRatioMediumBouncy), label = "pill")
     val textColor by animateColorAsState(if (selected) Color.White else Color.White.copy(alpha = 0.78f), label = "pillText")
     val shape = RoundedCornerShape(50)
@@ -881,10 +1010,12 @@ private fun ModePill(mode: ScanMode, selected: Boolean, onClick: () -> Unit) {
             .graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(shape)
             .then(
-                if (selected) Modifier.background(Brush.horizontalGradient(listOf(primary, secondary)))
+                if (selected) Modifier.background(brandGradient)
                 else Modifier.background(Color.White.copy(alpha = 0.10f)).border(1.dp, Color.White.copy(alpha = 0.16f), shape),
             )
-            .clickable(onClick = onClick)
+            .clickable(role = Role.Tab, onClick = onClick)
+            .semantics { stateDescription = if (selected) "Seleccionado" else "" }
+            .heightIn(min = 40.dp)
             .padding(horizontal = 14.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -896,8 +1027,8 @@ private fun ModePill(mode: ScanMode, selected: Boolean, onClick: () -> Unit) {
 
 @Composable
 private fun ShutterButton(enabled: Boolean, progress: Float, busy: Boolean, onClick: () -> Unit) {
-    val primary = MaterialTheme.colorScheme.primary
-    val secondary = MaterialTheme.colorScheme.secondary
+    val primary = MaterialTheme.brand.gradientStart
+    val secondary = MaterialTheme.brand.gradientEnd
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val scale by animateFloatAsState(
@@ -911,7 +1042,8 @@ private fun ShutterButton(enabled: Boolean, progress: Float, busy: Boolean, onCl
         Modifier
             .size(86.dp)
             .graphicsLayer { scaleX = scale; scaleY = scale; alpha = if (enabled) 1f else 0.6f }
-            .clickable(interactionSource = interaction, indication = null, enabled = enabled, onClick = onClick),
+            .semantics { contentDescription = "Capturar"; role = Role.Button }
+            .clickable(interactionSource = interaction, indication = null, enabled = enabled, role = Role.Button, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Canvas(Modifier.fillMaxSize()) {
@@ -960,7 +1092,7 @@ private fun BatchThumbnail(container: AppContainer, doc: Document?, processing: 
                         .clip(RoundedCornerShape(12.dp))
                         .border(2.dp, Color.White, RoundedCornerShape(12.dp))
                         .background(Color.DarkGray)
-                        .clickable(onClick = onDone),
+                        .clickable(onClickLabel = "Terminar y revisar", onClick = onDone),
                     contentAlignment = Alignment.Center,
                 ) {
                     if (last != null && doc != null) {
@@ -981,24 +1113,24 @@ private fun BatchThumbnail(container: AppContainer, doc: Document?, processing: 
                 if (count > 0) {
                     Box(
                         Modifier
-                            .padding(0.dp)
-                            .graphicsLayer { translationX = 14f; translationY = -14f }
+                            .offset(x = 6.dp, y = (-6).dp)
                             .size(22.dp)
                             .clip(CircleShape)
-                            .background(Brush.linearGradient(listOf(MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.secondary))),
+                            .background(MaterialTheme.brand.gradient)
+                            .semantics { contentDescription = "$count páginas" },
                         contentAlignment = Alignment.Center,
                     ) {
                         Text("$count", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }
-            Spacer(Modifier.height(6.dp))
             Row(
                 Modifier
+                    .minimumInteractiveComponentSize()
                     .clip(RoundedCornerShape(50))
                     .background(Color.White)
-                    .clickable(onClick = onDone)
-                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                    .clickable(role = Role.Button, onClick = onDone)
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text("Listo", color = Color.Black, fontSize = 12.sp, fontWeight = FontWeight.Bold)
@@ -1033,17 +1165,18 @@ private fun HintPill(text: String, icon: ImageVector?, warning: Boolean, onClick
 @Composable
 private fun AutoCaptureToggle(enabled: Boolean, visible: Boolean, onToggle: () -> Unit) {
     if (!visible) return
-    val primary = MaterialTheme.colorScheme.primary
-    val secondary = MaterialTheme.colorScheme.secondary
+    val brandGradient = MaterialTheme.brand.horizontalGradient
     Row(
         Modifier
+            .heightIn(min = 48.dp)
             .clip(RoundedCornerShape(50))
             .then(
-                if (enabled) Modifier.background(Brush.horizontalGradient(listOf(primary, secondary)))
+                if (enabled) Modifier.background(brandGradient)
                 else Modifier.background(Color.Black.copy(alpha = 0.45f)),
             )
-            .clickable(onClick = onToggle)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .semantics { stateDescription = if (enabled) "Captura automática activada" else "Captura manual" }
+            .clickable(role = Role.Switch, onClick = onToggle)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(Icons.Filled.AutoAwesome, null, tint = Color.White, modifier = Modifier.size(16.dp))
@@ -1058,12 +1191,12 @@ private fun RoundIconButton(
     description: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    size: androidx.compose.ui.unit.Dp = 44.dp,
+    size: Dp = 48.dp,
     highlighted: Boolean = false,
     dark: Boolean = true,
 ) {
     val bg = when {
-        highlighted -> MaterialTheme.colorScheme.primary
+        highlighted -> MaterialTheme.brand.gradientStart
         dark -> Color.Black.copy(alpha = 0.45f)
         else -> MaterialTheme.colorScheme.surfaceContainerHigh
     }
@@ -1073,32 +1206,9 @@ private fun RoundIconButton(
             .size(size)
             .clip(CircleShape)
             .background(bg)
-            .clickable(onClick = onClick),
+            .clickable(role = Role.Button, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Icon(icon, contentDescription = description, tint = fg, modifier = Modifier.size(size * 0.5f))
-    }
-}
-
-@Composable
-private fun GradientPillButton(text: String, icon: ImageVector?, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    val primary = MaterialTheme.colorScheme.primary
-    val secondary = MaterialTheme.colorScheme.secondary
-    Row(
-        modifier
-            .height(56.dp)
-            .shadow(12.dp, RoundedCornerShape(50), ambientColor = primary, spotColor = primary)
-            .clip(RoundedCornerShape(50))
-            .background(Brush.horizontalGradient(listOf(primary, secondary)))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 24.dp),
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        if (icon != null) {
-            Icon(icon, null, tint = Color.White)
-            Spacer(Modifier.width(10.dp))
-        }
-        Text(text, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
     }
 }

@@ -5,16 +5,14 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,28 +21,29 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.items as listItems
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.TextSnippet
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddAPhoto
 import androidx.compose.material.icons.filled.AutoFixHigh
+import androidx.compose.material.icons.filled.CallMerge
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Delete
@@ -55,16 +54,19 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -72,7 +74,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -83,7 +84,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -91,23 +91,48 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import coil.compose.AsyncImage
+import com.scannerpromax.data.AppSettings
 import com.scannerpromax.di.AppContainer
+import com.scannerpromax.domain.Document
+import com.scannerpromax.domain.FilterType
 import com.scannerpromax.domain.Page
 import com.scannerpromax.domain.ScanMode
+import com.scannerpromax.ui.camera.CaptureProcessor
+import com.scannerpromax.ui.components.AppTopBar
+import com.scannerpromax.ui.components.ConfirmDialog
+import com.scannerpromax.ui.components.GradientButton
+import com.scannerpromax.ui.components.LoadingOverlay
+import com.scannerpromax.ui.components.RenameDialog
+import com.scannerpromax.ui.components.SoftButton
+import com.scannerpromax.ui.components.pagesLabel
+import com.scannerpromax.ui.theme.brand
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
+/** Ámbito de proceso para borrados diferidos (Deshacer): el borrado se completa aunque se salga de la pantalla. */
+private val reviewAppScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun ReviewScreen(
     container: AppContainer,
@@ -121,10 +146,13 @@ fun ReviewScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val haptics = LocalHapticFeedback.current
+    val density = LocalDensity.current
     val repo = container.documents
+    val snackbar = remember { SnackbarHostState() }
 
     val doc by remember(docId) { repo.observe(docId) }.collectAsState(initial = null)
     var loaded by remember { mutableStateOf(false) }
+    var seenDoc by remember { mutableStateOf(false) }
     LaunchedEffect(docId) {
         val d = repo.get(docId)
         loaded = true
@@ -133,9 +161,19 @@ fun ReviewScreen(
             onBack()
         }
     }
+    // Si el documento se borra o se fusiona en otro mientras esta pantalla sigue abierta, se sale.
+    LaunchedEffect(doc, loaded) {
+        if (doc != null) seenDoc = true
+        else if (loaded && seenDoc) {
+            Toast.makeText(context, "El documento ya no existe", Toast.LENGTH_SHORT).show()
+            onBack()
+        }
+    }
 
     // Orden local (permite arrastrar sin esperar al disco).
     val order = remember { mutableStateListOf<Page>() }
+    // Páginas eliminadas a la espera de "Deshacer" (no se muestran aunque el repositorio aún las tenga).
+    val pendingDeletes = remember { mutableStateListOf<String>() }
     val gridState = rememberLazyGridState()
     val reorder = remember(gridState) {
         GridReorderState(gridState) { fromKey, toKey ->
@@ -144,29 +182,59 @@ fun ReviewScreen(
             if (from >= 0 && to >= 0 && from != to) order.add(to, order.removeAt(from))
         }
     }
-    LaunchedEffect(doc?.pages) {
-        val pages = doc?.pages ?: return@LaunchedEffect
-        if (reorder.draggingKey == null) {
-            order.clear()
-            order.addAll(pages)
+    fun syncOrder() {
+        val pages = doc?.pages ?: return
+        order.clear()
+        order.addAll(pages.filter { it.id !in pendingDeletes })
+    }
+    LaunchedEffect(doc?.pages, pendingDeletes.size) {
+        if (reorder.draggingKey == null) syncOrder()
+    }
+
+    // Auto-scroll al arrastrar una página cerca del borde superior/inferior de la rejilla.
+    LaunchedEffect(reorder.draggingKey) {
+        if (reorder.draggingKey == null) return@LaunchedEffect
+        val edge = with(density) { 64.dp.toPx() }
+        val maxSpeed = with(density) { 14.dp.toPx() }
+        while (isActive && reorder.draggingKey != null) {
+            val h = gridState.layoutInfo.viewportSize.height.toFloat()
+            val y = reorder.pointer.y
+            val speed = when {
+                h <= 0f -> 0f
+                y < edge -> -maxSpeed * ((edge - y) / edge).coerceIn(0f, 1f)
+                y > h - edge -> maxSpeed * ((y - (h - edge)) / edge).coerceIn(0f, 1f)
+                else -> 0f
+            }
+            if (speed != 0f) {
+                gridState.scrollBy(speed)
+                reorder.drag(Offset.Zero)
+            }
+            delay(16)
         }
     }
 
     var renaming by remember { mutableStateOf(false) }
-    var toDelete by remember { mutableStateOf<Page?>(null) }
     var importing by remember { mutableStateOf(false) }
-    var importProgress by remember { mutableFloatStateOf(0f) }
+    var importProgress by remember { mutableStateOf(0f) }
     var importJob by remember { mutableStateOf<Job?>(null) }
     var addMenu by remember { mutableStateOf(false) }
+    var moreMenu by remember { mutableStateOf(false) }
+    var showApplyAll by remember { mutableStateOf(false) }
+    var showMerge by remember { mutableStateOf(false) }
+    var mergeSource by remember { mutableStateOf<Document?>(null) }
+    var bulkProgress by remember { mutableStateOf<Float?>(null) }
+    var bulkMessage by remember { mutableStateOf("") }
+    var bulkJob by remember { mutableStateOf<Job?>(null) }
 
     fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
 
     fun commitOrder(ids: List<String>) {
-        val current = doc?.pages?.map { it.id }
+        val current = doc?.pages?.map { it.id }?.filter { it !in pendingDeletes }
         if (current == ids) return
         scope.launch {
             try {
-                repo.reorderPages(docId, ids)
+                // Las páginas pendientes de borrar van al final (se eliminarán enseguida).
+                repo.reorderPages(docId, ids + pendingDeletes.toList())
             } catch (c: CancellationException) {
                 throw c
             } catch (t: Throwable) {
@@ -183,21 +251,50 @@ fun ReviewScreen(
         commitOrder(order.map { it.id })
     }
 
+    /** Borrado optimista con "Deshacer" en lugar de un diálogo de confirmación. */
+    fun deleteWithUndo(page: Page) {
+        if (page.id in pendingDeletes) return
+        pendingDeletes.add(page.id)
+        order.removeAll { it.id == page.id }
+        scope.launch {
+            var undone = false
+            try {
+                snackbar.currentSnackbarData?.dismiss()
+                val r = snackbar.showSnackbar("Página eliminada", actionLabel = "Deshacer", duration = SnackbarDuration.Short)
+                undone = r == SnackbarResult.ActionPerformed
+            } finally {
+                if (undone) {
+                    pendingDeletes.remove(page.id)
+                } else {
+                    // Fuera del ciclo de vida de la pantalla: el borrado se completa aunque se salga.
+                    reviewAppScope.launch {
+                        try {
+                            repo.deletePage(docId, page.id)
+                        } catch (c: CancellationException) {
+                            throw c
+                        } catch (_: Throwable) {
+                            Toast.makeText(context.applicationContext, "No se pudo eliminar la página", Toast.LENGTH_SHORT).show()
+                        } finally {
+                            pendingDeletes.remove(page.id)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    val processor = remember { CaptureProcessor(container) }
     val gallery = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(50)) { uris ->
         if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        val mode = doc?.mode ?: ScanMode.DOCUMENT
         importJob = scope.launch {
             importing = true
             importProgress = 0f
-            var ok = 0
             try {
-                uris.forEachIndexed { i, uri ->
-                    try {
-                        ok += repo.addPagesFromUris(docId, listOf(uri)).size
-                    } catch (c: CancellationException) {
-                        throw c
-                    } catch (_: Throwable) {
-                    }
-                    importProgress = (i + 1f) / uris.size
+                val settings = runCatching { container.settings.settings.first() }.getOrDefault(AppSettings())
+                // Libro: cada foto se divide en dos páginas; DNI: anverso + reverso de dos en dos.
+                val ok = processor.importUris(docId, mode, uris, settings) { done, total ->
+                    importProgress = done.toFloat() / total.coerceAtLeast(1)
                 }
                 if (ok < uris.size) toast("Se importaron $ok de ${uris.size} imágenes")
             } finally {
@@ -212,55 +309,106 @@ fun ReviewScreen(
             .onFailure { toast("No hay una galería disponible") }
     }
 
+    /** Aplica un filtro (y opcionalmente la limpieza de rayas) a todas las páginas, con progreso. */
+    fun applyToAll(filter: FilterType, removeLines: Boolean?) {
+        if (bulkJob != null) return
+        val pages = order.toList()
+        if (pages.isEmpty()) return
+        bulkJob = scope.launch {
+            bulkProgress = 0f
+            var failed = 0
+            try {
+                pages.forEachIndexed { i, p ->
+                    bulkMessage = "Aplicando a la página ${i + 1} de ${pages.size}…"
+                    val current = repo.getPage(docId, p.id) ?: p
+                    val e = current.edits
+                    val updated = e.copy(filter = filter, autoRemoveLines = removeLines ?: e.autoRemoveLines)
+                    if (updated != e) {
+                        try {
+                            repo.updateEdits(docId, p.id, updated)
+                        } catch (c: CancellationException) {
+                            throw c
+                        } catch (_: Throwable) {
+                            failed++
+                        }
+                    }
+                    bulkProgress = (i + 1f) / pages.size
+                }
+                toast(if (failed == 0) "Filtro aplicado a ${pagesLabel(pages.size)}" else "No se pudo aplicar en $failed páginas")
+            } finally {
+                bulkProgress = null
+                bulkJob = null
+            }
+        }
+    }
+
+    fun merge(source: Document) {
+        if (bulkJob != null) return
+        bulkJob = scope.launch {
+            try {
+                bulkMessage = "Uniendo documentos…"
+                bulkProgress = 0.5f
+                withContext(NonCancellable) { repo.mergeInto(docId, source.id) }
+                toast("Se añadieron ${pagesLabel(source.pages.size)} de «${source.title}»")
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                toast("No se pudieron unir: ${t.message ?: "error"}")
+            } finally {
+                bulkProgress = null
+                bulkJob = null
+            }
+        }
+    }
+
+    /** Página visible (la primera de la rejilla) para abrir el OCR o el editor desde la barra inferior. */
+    fun visiblePage(): Page? {
+        val key = gridState.layoutInfo.visibleItemsInfo.firstOrNull { it.key is String && it.key != HEADER_KEY && it.key != FOOTER_KEY }?.key
+        return order.firstOrNull { it.id == key } ?: order.firstOrNull()
+    }
+
     BackHandler(enabled = importing) { importJob?.cancel() }
 
-    val primary = MaterialTheme.colorScheme.primary
-    val secondary = MaterialTheme.colorScheme.secondary
+    val brand = MaterialTheme.brand
     val d = doc
 
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Column(Modifier.fillMaxSize()) {
             // ------------------------------------------------ barra superior
-            Row(
-                Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 4.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Volver") }
-                Column(
-                    Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(12.dp))
-                        .clickable(enabled = d != null) { renaming = true }
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            d?.title ?: "Cargando…",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f, fill = false),
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Icon(Icons.Filled.Edit, "Renombrar", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            AppTopBar(
+                title = d?.title ?: "Cargando…",
+                subtitle = d?.let { "${pagesLabel(order.size)} · ${it.mode.label}" },
+                onBack = onBack,
+                actions = {
+                    IconButton(onClick = { renaming = true }, enabled = d != null) {
+                        Icon(Icons.Filled.Edit, "Renombrar")
                     }
-                    if (d != null) {
-                        val n = d.pages.size
-                        Text(
-                            "$n ${if (n == 1) "página" else "páginas"} · ${d.mode.label}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                    Box {
+                        IconButton(onClick = { moreMenu = true }, enabled = d != null) {
+                            Icon(Icons.Filled.MoreVert, "Más opciones")
+                        }
+                        DropdownMenu(expanded = moreMenu, onDismissRequest = { moreMenu = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Filtro para todas las páginas") },
+                                leadingIcon = { Icon(Icons.Filled.AutoFixHigh, null) },
+                                enabled = order.isNotEmpty(),
+                                onClick = { moreMenu = false; showApplyAll = true },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Unir con otro documento…") },
+                                leadingIcon = { Icon(Icons.Filled.CallMerge, null) },
+                                onClick = { moreMenu = false; showMerge = true },
+                            )
+                        }
                     }
-                }
-            }
+                },
+            )
 
             when {
                 d == null || !loaded -> Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = primary)
+                    CircularProgressIndicator(color = brand.gradientStart)
                 }
-                d.pages.isEmpty() && order.isEmpty() -> EmptyPages(
+                order.isEmpty() && pendingDeletes.isEmpty() -> EmptyPages(
                     modifier = Modifier.weight(1f),
                     onCamera = { onAddPages(d.mode) },
                     onGallery = { openGallery() },
@@ -277,11 +425,13 @@ fun ReviewScreen(
                         .pointerInput(reorder) {
                             detectDragGesturesAfterLongPress(
                                 onDragStart = { pos ->
+                                    reorder.pointer = pos
                                     if (reorder.start(pos)) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                                 },
                                 onDrag = { change, amount ->
                                     if (reorder.draggingKey != null) {
                                         change.consume()
+                                        reorder.pointer = change.position
                                         reorder.drag(amount)
                                     }
                                 },
@@ -347,7 +497,7 @@ fun ReviewScreen(
                             onMoveRight = { move(page, +1) },
                             onMoveFirst = { move(page, -order.size) },
                             onMoveLast = { move(page, order.size) },
-                            onDelete = { toDelete = page },
+                            onDelete = { deleteWithUndo(page) },
                         )
                     }
                     item(key = FOOTER_KEY, span = { GridItemSpan(maxLineSpan) }) { Spacer(Modifier.height(16.dp)) }
@@ -363,7 +513,7 @@ fun ReviewScreen(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Row(
-                    Modifier.navigationBarsPadding().padding(horizontal = 16.dp, vertical = 12.dp),
+                    Modifier.navigationBarsPadding().padding(horizontal = 12.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Box {
@@ -381,60 +531,45 @@ fun ReviewScreen(
                             )
                         }
                     }
+                    // Abre el OCR en la página visible (allí se puede reconocer todo el documento).
                     BarAction(Icons.AutoMirrored.Filled.TextSnippet, "Texto") {
-                        order.firstOrNull()?.let { onOcr(it.id) } ?: toast("No hay páginas")
+                        visiblePage()?.let { onOcr(it.id) } ?: toast("No hay páginas")
                     }
-                    BarAction(Icons.Filled.AutoFixHigh, "Editar") {
-                        order.firstOrNull()?.let { onEditPage(it.id) } ?: toast("No hay páginas")
+                    BarAction(Icons.Filled.AutoFixHigh, "Filtro") {
+                        if (order.isEmpty()) toast("No hay páginas") else showApplyAll = true
                     }
-                    Spacer(Modifier.width(12.dp))
-                    Row(
-                        Modifier
-                            .weight(1f)
-                            .height(54.dp)
-                            .shadow(10.dp, RoundedCornerShape(50), ambientColor = primary, spotColor = primary)
-                            .clip(RoundedCornerShape(50))
-                            .background(
-                                if (order.isNotEmpty()) Brush.horizontalGradient(listOf(primary, secondary))
-                                else Brush.horizontalGradient(listOf(Color.Gray, Color.Gray)),
-                            )
-                            .clickable(enabled = order.isNotEmpty(), onClick = onExport),
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(Icons.Filled.PictureAsPdf, null, tint = Color.White)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Exportar", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                    }
+                    Spacer(Modifier.width(10.dp))
+                    GradientButton(
+                        text = "Exportar",
+                        onClick = onExport,
+                        icon = Icons.Filled.PictureAsPdf,
+                        enabled = order.isNotEmpty(),
+                        height = 54.dp,
+                        modifier = Modifier.weight(1f),
+                    )
                 }
             }
         }
 
-        AnimatedVisibility(visible = importing, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.fillMaxSize()) {
-            Box(
-                Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.55f)).clickable(enabled = true, onClick = {}),
-                contentAlignment = Alignment.Center,
-            ) {
-                Column(
-                    Modifier
-                        .padding(32.dp)
-                        .clip(RoundedCornerShape(24.dp))
-                        .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-                        .padding(24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Text("Importando y mejorando…", style = MaterialTheme.typography.titleMedium)
-                    Spacer(Modifier.height(16.dp))
-                    LinearProgressIndicator(
-                        progress = { importProgress },
-                        modifier = Modifier.width(220.dp).clip(RoundedCornerShape(50)),
-                        color = primary,
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    TextButton(onClick = { importJob?.cancel() }) { Text("Cancelar") }
-                }
-            }
-        }
+        SnackbarHost(
+            snackbar,
+            Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 88.dp),
+        )
+
+        LoadingOverlay(
+            visible = importing,
+            message = "Importando y mejorando…",
+            progress = importProgress,
+            onCancel = { importJob?.cancel() },
+            modifier = Modifier.fillMaxSize(),
+        )
+        LoadingOverlay(
+            visible = bulkProgress != null,
+            message = bulkMessage,
+            progress = bulkProgress,
+            onCancel = { bulkJob?.cancel() },
+            modifier = Modifier.fillMaxSize(),
+        )
     }
 
     if (renaming && d != null) {
@@ -442,28 +577,126 @@ fun ReviewScreen(
             initial = d.title,
             onDismiss = { renaming = false },
             onConfirm = { newTitle ->
-                renaming = false
                 scope.launch { runCatching { repo.rename(docId, newTitle) }.onFailure { toast("No se pudo renombrar") } }
             },
         )
     }
 
-    toDelete?.let { page ->
-        AlertDialog(
-            onDismissRequest = { toDelete = null },
-            icon = { Icon(Icons.Filled.Delete, null, tint = MaterialTheme.colorScheme.error) },
-            title = { Text("¿Eliminar esta página?") },
-            text = { Text("La página se borrará del documento. Esta acción no se puede deshacer.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    toDelete = null
-                    order.removeAll { it.id == page.id }
-                    scope.launch { runCatching { repo.deletePage(docId, page.id) }.onFailure { toast("No se pudo eliminar") } }
-                }) { Text("Eliminar", color = MaterialTheme.colorScheme.error) }
-            },
-            dismissButton = { TextButton(onClick = { toDelete = null }) { Text("Cancelar") } },
+    if (showApplyAll) {
+        ApplyAllDialog(
+            initial = order.firstOrNull()?.edits?.filter ?: FilterType.MAGIC,
+            onDismiss = { showApplyAll = false },
+            onApply = { f, lines -> showApplyAll = false; applyToAll(f, lines) },
         )
     }
+
+    if (showMerge) {
+        val all by repo.documents.collectAsState()
+        val others = all.filter { it.id != docId && it.pages.isNotEmpty() }
+        MergePickerDialog(
+            documents = others,
+            onDismiss = { showMerge = false },
+            onPick = { showMerge = false; mergeSource = it },
+        )
+    }
+    mergeSource?.let { src ->
+        ConfirmDialog(
+            title = "¿Unir documentos?",
+            message = "Las ${pagesLabel(src.pages.size)} de «${src.title}» se añadirán al final de este documento y «${src.title}» se eliminará.",
+            confirmLabel = "Unir",
+            icon = Icons.Filled.CallMerge,
+            onConfirm = { merge(src) },
+            onDismiss = { mergeSource = null },
+        )
+    }
+}
+
+/** Diálogo "Filtro para todas las páginas". [onApply] recibe el filtro y si quitar rayas (null = no tocar). */
+@Composable
+private fun ApplyAllDialog(initial: FilterType, onDismiss: () -> Unit, onApply: (FilterType, Boolean?) -> Unit) {
+    var selected by remember { mutableStateOf(initial) }
+    var lines by remember { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Filled.AutoFixHigh, null) },
+        title = { Text("Filtro para todas las páginas") },
+        text = {
+            Column {
+                LazyColumn(Modifier.heightIn(max = 320.dp)) {
+                    listItems(FilterType.entries, key = { it.name }) { f ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .selectable(selected = f == selected, role = Role.RadioButton) { selected = f }
+                                .padding(horizontal = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(selected = f == selected, onClick = null)
+                            Spacer(Modifier.width(10.dp))
+                            Text(f.label, style = MaterialTheme.typography.bodyLarge)
+                        }
+                    }
+                }
+                HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable(role = Role.Checkbox) { lines = !lines }
+                        .padding(horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Checkbox(checked = lines, onCheckedChange = null)
+                    Spacer(Modifier.width(10.dp))
+                    Text("Quitar también rayas y líneas sueltas", style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onApply(selected, if (lines) true else null) }) { Text("Aplicar a todas") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } },
+        shape = MaterialTheme.shapes.extraLarge,
+    )
+}
+
+/** Lista de documentos para "Unir con…". */
+@Composable
+private fun MergePickerDialog(documents: List<Document>, onDismiss: () -> Unit, onPick: (Document) -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Filled.CallMerge, null) },
+        title = { Text("Unir con…") },
+        text = {
+            if (documents.isEmpty()) {
+                Text("No hay otros documentos con páginas.", style = MaterialTheme.typography.bodyMedium)
+            } else {
+                LazyColumn(Modifier.heightIn(max = 360.dp)) {
+                    listItems(documents, key = { it.id }) { doc ->
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 52.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { onPick(doc) }
+                                .padding(horizontal = 8.dp, vertical = 8.dp),
+                        ) {
+                            Text(doc.title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                "${pagesLabel(doc.pages.size)} · ${doc.mode.label}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } },
+        shape = MaterialTheme.shapes.extraLarge,
+    )
 }
 
 private const val HEADER_KEY = "__header__"
@@ -480,6 +713,8 @@ private class GridReorderState(
 ) {
     var draggingKey by mutableStateOf<String?>(null)
         private set
+    /** Última posición del puntero (coordenadas de la rejilla), para el auto-scroll en los bordes. */
+    var pointer: Offset = Offset.Zero
     private var initialOffset = Offset.Zero
     private var accumulated by mutableStateOf(Offset.Zero)
 
@@ -542,8 +777,7 @@ private fun PageCard(
     onDelete: () -> Unit,
 ) {
     val repo = container.documents
-    val primary = MaterialTheme.colorScheme.primary
-    val secondary = MaterialTheme.colorScheme.secondary
+    val brand = MaterialTheme.brand
     var menu by remember { mutableStateOf(false) }
 
     // Miniatura: si falta (p. ej. tras cambiar ediciones) se regenera en segundo plano.
@@ -561,7 +795,7 @@ private fun PageCard(
             .shadow(if (dragging) 18.dp else 2.dp, shape)
             .clip(shape)
             .background(MaterialTheme.colorScheme.surfaceContainer)
-            .then(if (dragging) Modifier.border(BorderStroke(2.dp, Brush.linearGradient(listOf(primary, secondary))), shape) else Modifier)
+            .then(if (dragging) Modifier.border(BorderStroke(2.dp, brand.gradient), shape) else Modifier)
             .clickable(onClick = onClick),
     ) {
         Box(
@@ -583,7 +817,7 @@ private fun PageCard(
                     .align(Alignment.BottomStart)
                     .padding(6.dp)
                     .clip(RoundedCornerShape(50))
-                    .background(Brush.horizontalGradient(listOf(primary, secondary)))
+                    .background(brand.horizontalGradient)
                     .padding(horizontal = 9.dp, vertical = 3.dp),
             ) {
                 Text("$number", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
@@ -601,16 +835,20 @@ private fun PageCard(
                 }
             }
             Box(Modifier.align(Alignment.TopEnd)) {
+                // Área táctil de 48 dp con el círculo visual de 32 dp dentro.
                 Box(
                     Modifier
-                        .padding(4.dp)
-                        .size(32.dp)
+                        .size(48.dp)
                         .clip(CircleShape)
-                        .background(Color.Black.copy(alpha = 0.45f))
-                        .clickable { menu = true },
+                        .clickable(role = Role.Button, onClickLabel = "Opciones de la página") { menu = true },
                     contentAlignment = Alignment.Center,
                 ) {
-                    Icon(Icons.Filled.MoreVert, "Opciones", tint = Color.White, modifier = Modifier.size(18.dp))
+                    Box(
+                        Modifier.size(32.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.45f)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(Icons.Filled.MoreVert, "Opciones", tint = Color.White, modifier = Modifier.size(18.dp))
+                    }
                 }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     DropdownMenuItem(
@@ -685,8 +923,9 @@ private fun PageCard(
 private fun BarAction(icon: ImageVector, label: String, onClick: () -> Unit) {
     Column(
         Modifier
+            .heightIn(min = 48.dp)
             .clip(RoundedCornerShape(14.dp))
-            .clickable(onClick = onClick)
+            .clickable(role = Role.Button, onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
@@ -698,15 +937,13 @@ private fun BarAction(icon: ImageVector, label: String, onClick: () -> Unit) {
 
 @Composable
 private fun EmptyPages(modifier: Modifier, onCamera: () -> Unit, onGallery: () -> Unit) {
-    val primary = MaterialTheme.colorScheme.primary
-    val secondary = MaterialTheme.colorScheme.secondary
     Column(
         modifier.fillMaxWidth().padding(32.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Box(
-            Modifier.size(96.dp).clip(CircleShape).background(Brush.linearGradient(listOf(primary, secondary))),
+            Modifier.size(96.dp).clip(CircleShape).background(MaterialTheme.brand.gradient),
             contentAlignment = Alignment.Center,
         ) { Icon(Icons.Filled.DocumentScanner, null, tint = Color.White, modifier = Modifier.size(44.dp)) }
         Spacer(Modifier.height(20.dp))
@@ -720,40 +957,8 @@ private fun EmptyPages(modifier: Modifier, onCamera: () -> Unit, onGallery: () -
         )
         Spacer(Modifier.height(24.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            OutlinedButton(onClick = onGallery) {
-                Icon(Icons.Filled.PhotoLibrary, null, Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Galería")
-            }
-            OutlinedButton(onClick = onCamera) {
-                Icon(Icons.Filled.AddAPhoto, null, Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Cámara")
-            }
+            SoftButton("Galería", onClick = onGallery, icon = Icons.Filled.PhotoLibrary, height = 48.dp)
+            GradientButton("Cámara", onClick = onCamera, icon = Icons.Filled.AddAPhoto, height = 48.dp)
         }
     }
-}
-
-@Composable
-private fun RenameDialog(initial: String, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
-    var text by remember { mutableStateOf(initial) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Renombrar documento") },
-        text = {
-            OutlinedTextField(
-                value = text,
-                onValueChange = { text = it.take(120) },
-                singleLine = true,
-                label = { Text("Nombre") },
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                keyboardActions = KeyboardActions(onDone = { if (text.isNotBlank()) onConfirm(text.trim()) }),
-                modifier = Modifier.fillMaxWidth(),
-            )
-        },
-        confirmButton = {
-            TextButton(enabled = text.isNotBlank(), onClick = { onConfirm(text.trim()) }) { Text("Guardar") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } },
-    )
 }

@@ -11,12 +11,15 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
+import androidx.camera.core.UseCase
+import androidx.camera.core.UseCaseGroup
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
+import androidx.core.view.doOnLayout
 import androidx.lifecycle.LifecycleOwner
 import com.scannerpromax.domain.Quad
 import com.scannerpromax.imaging.DeviceProfiler
@@ -39,13 +42,29 @@ import kotlin.math.sqrt
 /** Modo de flash de la cámara. */
 internal enum class FlashSetting(val label: String) { OFF("Flash apagado"), AUTO("Flash automático"), ON("Flash encendido"), TORCH("Linterna") }
 
-/** Detección en vivo (coordenadas del frame de análisis YA rotado). */
+/**
+ * Detección en vivo (coordenadas del frame de análisis YA rotado).
+ * [cropLeft]..[cropBottom]: zona del frame (normalizada 0..1, ya rotada) que coincide con lo que muestra
+ * la vista previa (ViewPort compartido). Por defecto, el frame completo.
+ */
 internal data class LiveDetection(
     val quad: Quad,
     val confidence: Float,
     val frameWidth: Int,
     val frameHeight: Int,
     val timestamp: Long,
+    val cropLeft: Float = 0f,
+    val cropTop: Float = 0f,
+    val cropRight: Float = 1f,
+    val cropBottom: Float = 1f,
+)
+
+/** Calidad en vivo para guiar al usuario y frenar la autocaptura con fotos movidas o con reflejos. */
+internal data class LiveQuality(
+    val tooDark: Boolean = false,
+    val blurry: Boolean = false,
+    val glare: Boolean = false,
+    val sharpness: Float = 0f,
 )
 
 /**
@@ -64,6 +83,9 @@ internal class CameraEngine(
 
     private val _tooDark = MutableStateFlow(false)
     val tooDark: StateFlow<Boolean> = _tooDark.asStateFlow()
+
+    private val _quality = MutableStateFlow(LiveQuality())
+    val quality: StateFlow<LiveQuality> = _quality.asStateFlow()
 
     private val _hasFlash = MutableStateFlow(false)
     val hasFlash: StateFlow<Boolean> = _hasFlash.asStateFlow()
@@ -89,8 +111,11 @@ internal class CameraEngine(
 
     private var provider: ProcessCameraProvider? = null
     private var camera: Camera? = null
+    private var preview: Preview? = null
     private var imageCapture: ImageCapture? = null
     private var analysis: ImageAnalysis? = null
+    /** Pico reciente de nitidez (decae poco a poco): la borrosidad se mide relativa a la propia escena. */
+    private var sharpPeak = 0f
     private var flash: FlashSetting = FlashSetting.OFF
     @Volatile private var released = false
     private var lastAnalysisAt = 0L
@@ -109,7 +134,12 @@ internal class CameraEngine(
                 return@addListener
             }
             provider = p
-            bindUseCases(p, owner, previewView)
+            // El ViewPort necesita la vista ya medida: si aún no lo está, se espera al primer layout.
+            if (previewView.width > 0 && previewView.height > 0 && previewView.viewPort != null) {
+                bindUseCases(p, owner, previewView)
+            } else {
+                previewView.doOnLayout { if (!released) bindUseCases(p, owner, previewView) }
+            }
         }, ContextCompat.getMainExecutor(context))
     }
 
@@ -156,6 +186,7 @@ internal class CameraEngine(
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
             .build()
+        val qualityEvery = if (lowEnd) 4 else 2
         imageAnalysis.setAnalyzer(analysisExecutor) { image ->
             try {
                 val now = SystemClock.elapsedRealtime()
@@ -163,12 +194,25 @@ internal class CameraEngine(
                 lastAnalysisAt = now
                 val plane = image.planes[0]
                 val rotation = image.imageInfo.rotationDegrees
+                val crop = rotatedCrop(image.cropRect, image.width, image.height, rotation)
                 val det = detector.detectLive(plane.buffer, image.width, image.height, plane.rowStride, rotation)
-                _detection.value = det?.let { LiveDetection(it.quad, it.confidence, it.frameWidth, it.frameHeight, now) }
-                // La luz cambia despacio: medirla cada pocos frames basta.
-                if (frameCounter++ % 6 == 0) {
-                    val q = QualityAnalyzer.analyzeLuma(plane.buffer, image.width, image.height, plane.rowStride)
+                _detection.value = det?.let {
+                    LiveDetection(it.quad, it.confidence, it.frameWidth, it.frameHeight, now, crop[0], crop[1], crop[2], crop[3])
+                }
+                // Nitidez/reflejos cada pocos frames (barato a 640 px); la luz cambia despacio.
+                if (frameCounter++ % qualityEvery == 0) {
+                    val q = detector.analyzeLastFrame()
+                        ?: QualityAnalyzer.analyzeLuma(plane.buffer, image.width, image.height, plane.rowStride)
+                    sharpPeak = maxOf(q.sharpness, sharpPeak * 0.97f)
+                    // Borrosa si cae claramente respecto al mejor enfoque reciente de la misma escena.
+                    val relBlur = sharpPeak > 0.02f && q.sharpness < sharpPeak * 0.55f
                     _tooDark.value = q.isTooDark
+                    _quality.value = LiveQuality(
+                        tooDark = q.isTooDark,
+                        blurry = q.isBlurry || relBlur,
+                        glare = q.hasGlare,
+                        sharpness = q.sharpness,
+                    )
                 }
             } catch (t: Throwable) {
                 Log.w(TAG, "Fallo en el análisis en vivo", t)
@@ -184,18 +228,29 @@ internal class CameraEngine(
             CameraSelector.DEFAULT_BACK_CAMERA
         }
 
+        // ViewPort compartido: los tres casos de uso usan el mismo recorte que la vista previa, así que el
+        // cuadrilátero detectado y la guía del DNI coinciden con lo que se ve aunque el análisis use otro aspecto.
+        val viewPort = try { previewView.viewPort } catch (_: Throwable) { null }
+        fun group(vararg cases: UseCase): UseCaseGroup = UseCaseGroup.Builder().apply {
+            viewPort?.let { setViewPort(it) }
+            cases.forEach { addUseCase(it) }
+        }.build()
+
         try {
-            p.unbindAll()
+            if (released) return
+            // Solo se desvinculan los casos de uso PROPIOS (otra instancia podría estar ya usando la cámara).
+            unbindOwn(p)
             camera = try {
-                p.bindToLifecycle(owner, selector, preview, capture, imageAnalysis).also { analysis = imageAnalysis }
+                p.bindToLifecycle(owner, selector, group(preview, capture, imageAnalysis)).also { analysis = imageAnalysis }
             } catch (t: Throwable) {
                 // Algunos equipos antiguos no admiten 3 casos de uso simultáneos: sin detección en vivo.
                 Log.w(TAG, "Sin análisis en vivo (combinación no soportada)", t)
                 imageAnalysis.clearAnalyzer()
                 analysis = null
-                p.unbindAll()
-                p.bindToLifecycle(owner, selector, preview, capture)
+                runCatching { p.unbind(preview, capture, imageAnalysis) }
+                p.bindToLifecycle(owner, selector, group(preview, capture))
             }
+            this.preview = preview
             imageCapture = capture
             _hasFlash.value = camera?.cameraInfo?.hasFlashUnit() == true
             applyFlash()
@@ -240,6 +295,33 @@ internal class CameraEngine(
         }
     }
 
+    /**
+     * Enfoca en el punto (coordenadas de la vista) y espera al resultado del AF, como mucho [timeoutMs].
+     * Devuelve true si el AF confirmó el enfoque. Se usa antes de la autocaptura (cámaras baratas "cazan" el foco).
+     */
+    suspend fun focusAndWait(previewView: PreviewView, x: Float, y: Float, timeoutMs: Long = 900L): Boolean {
+        val cam = camera ?: return false
+        return try {
+            val point = previewView.meteringPointFactory.createPoint(x, y)
+            val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
+                .setAutoCancelDuration(4, TimeUnit.SECONDS)
+                .build()
+            val future = cam.cameraControl.startFocusAndMetering(action)
+            kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
+                suspendCancellableCoroutine<Boolean> { cont ->
+                    future.addListener({
+                        val ok = runCatching { future.get().isFocusSuccessful }.getOrDefault(false)
+                        if (cont.isActive) cont.resume(ok)
+                    }, ContextCompat.getMainExecutor(context))
+                }
+            } ?: false
+        } catch (t: Throwable) {
+            if (t is kotlinx.coroutines.CancellationException) throw t
+            Log.w(TAG, "No se pudo enfocar", t)
+            false
+        }
+    }
+
     /** Captura una foto en [file]. Suspende hasta que el JPEG está escrito. */
     suspend fun capture(file: File, previewView: PreviewView?): File = suspendCancellableCoroutine { cont ->
         val ic = imageCapture
@@ -272,18 +354,43 @@ internal class CameraEngine(
         released = true
         try {
             analysis?.clearAnalyzer()
-            provider?.unbindAll()
+            provider?.let { unbindOwn(it) }
         } catch (_: Throwable) {
         }
         camera = null
+        preview = null
         imageCapture = null
         analysis = null
         try {
             // En el mismo hilo del analizador: garantiza que no hay una detección en curso.
-            analysisExecutor.execute { detector.releaseLiveBuffers() }
+            analysisExecutor.execute {
+                detector.releaseLiveBuffers()
+                QualityAnalyzer.releaseLiveBuffers()
+            }
         } catch (_: Throwable) {
         }
         analysisExecutor.shutdown()
+    }
+
+    /** Desvincula solo los casos de uso de esta instancia (nunca unbindAll: no tocar otra cámara activa). */
+    private fun unbindOwn(p: ProcessCameraProvider) {
+        val own = listOfNotNull<UseCase>(preview, imageCapture, analysis)
+        if (own.isNotEmpty()) runCatching { p.unbind(*own.toTypedArray()) }
+    }
+
+    /** cropRect del buffer (sin rotar) -> [l, t, r, b] normalizado en el frame ya rotado. */
+    private fun rotatedCrop(r: android.graphics.Rect, w: Int, h: Int, rotation: Int): FloatArray {
+        if (w <= 0 || h <= 0 || r.width() <= 0 || r.height() <= 0) return floatArrayOf(0f, 0f, 1f, 1f)
+        val l = r.left.toFloat() / w; val t = r.top.toFloat() / h
+        val rr = r.right.toFloat() / w; val b = r.bottom.toFloat() / h
+        val out = when (((rotation % 360) + 360) % 360) {
+            90 -> floatArrayOf(1f - b, l, 1f - t, rr)
+            180 -> floatArrayOf(1f - rr, 1f - b, 1f - l, 1f - t)
+            270 -> floatArrayOf(t, 1f - rr, b, 1f - l)
+            else -> floatArrayOf(l, t, rr, b)
+        }
+        for (i in out.indices) out[i] = out[i].coerceIn(0f, 1f)
+        return out
     }
 
     private companion object {

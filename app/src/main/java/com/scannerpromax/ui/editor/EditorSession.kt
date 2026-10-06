@@ -20,6 +20,7 @@ import com.scannerpromax.domain.Quad
 import com.scannerpromax.imaging.BitmapIO
 import com.scannerpromax.imaging.DeviceProfiler
 import com.scannerpromax.imaging.ImageEnhancer
+import com.scannerpromax.imaging.PerspectiveCorrector
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -155,9 +156,41 @@ internal class EditorSession(
     fun setFilter(f: FilterType) = update(edits.copy(filter = f))
     fun setAdjustments(a: Adjustments) = update(edits.copy(adjustments = a))
 
+    /**
+     * Proporción ancho/alto de la imagen recortada+rotada ACTUAL, calculada desde la geometría (no desde la
+     * última vista previa, que puede ir un paso por detrás si se gira dos veces seguidas).
+     */
+    private fun currentAspect(): Float {
+        val p = page
+        val pw = p?.width?.takeIf { it > 0 } ?: sourceWidth.coerceAtLeast(1)
+        val ph = p?.height?.takeIf { it > 0 } ?: sourceHeight.coerceAtLeast(1)
+        val (w, h) = edits.quad?.let { q ->
+            runCatching { PerspectiveCorrector.estimateSize(q, pw, ph) }
+                .map { it.first.toFloat() to it.second.toFloat() }
+                .getOrDefault(pw.toFloat() to ph.toFloat())
+        } ?: (pw.toFloat() to ph.toFloat())
+        val swapped = edits.rotation == 90 || edits.rotation == 270
+        val aw = if (swapped) h else w
+        val ah = if (swapped) w else h
+        return if (ah <= 0f) 1f else aw / ah
+    }
+
+    /**
+     * Activa/desactiva el enderezado. Cambia la geometría (rotación de unos grados), así que los trazos de
+     * borrado dejarían de coincidir: se quitan. Devuelve true si se quitaron trazos.
+     */
+    fun setAutoDeskew(enabled: Boolean): Boolean {
+        if (edits.autoDeskew == enabled) return false
+        val hadStrokes = edits.eraseStrokes.isNotEmpty()
+        redoStack.clear(); canRedo = false
+        update(edits.copy(autoDeskew = enabled, eraseStrokes = emptyList()))
+        regenerateThumbs()
+        return hadStrokes
+    }
+
     /** Rota 90° y transforma los trazos de borrado para que sigan sobre la misma zona. */
     fun rotate(clockwise: Boolean) {
-        val aspect = preview?.let { it.width.toFloat() / it.height.coerceAtLeast(1) } ?: 1f
+        val aspect = currentAspect()
         val rot = ((edits.rotation + if (clockwise) 90 else 270) % 360 + 360) % 360
         val strokes = edits.eraseStrokes.map { s ->
             EraseStroke(
@@ -202,6 +235,22 @@ internal class EditorSession(
     fun setWorkingQuad(q: Quad?, refresh: Boolean = false) {
         val original = q?.let { scaleQuad(it, 1f / workScale) }
         update(edits.copy(quad = original), refresh)
+    }
+
+    /** Resultado de validar el recorte antes de guardarlo. */
+    enum class QuadCheck { OK, FIXED, INVALID }
+
+    /**
+     * Comprueba que el recorte sea un cuadrilátero convexo. Si las esquinas solo están desordenadas
+     * (cruzadas), las reordena (tl, tr, br, bl); si ni así es válido devuelve INVALID y no toca nada.
+     * Un quad inválido produciría un warp de perspectiva retorcido o espejado.
+     */
+    fun checkQuad(): QuadCheck {
+        val q = edits.quad ?: return QuadCheck.OK
+        if (isConvexQuad(q.points().map { androidx.compose.ui.geometry.Offset(it.x, it.y) })) return QuadCheck.OK
+        val fixed = reorderQuad(q) ?: return QuadCheck.INVALID
+        update(edits.copy(quad = fixed), refresh = false)
+        return QuadCheck.FIXED
     }
 
     /** Detección automática de bordes sobre la imagen de trabajo. Devuelve true si encontró el documento. */
@@ -347,5 +396,18 @@ internal class EditorSession(
         private const val THUMB_SOURCE_SIDE = 280
 
         fun scaleQuad(q: Quad, f: Float): Quad = Quad.of(q.points().map { Pt(it.x * f, it.y * f) })
+
+        /** Ordena 4 puntos por ángulo alrededor del centroide empezando por arriba-izquierda; null si no es convexo. */
+        fun reorderQuad(q: Quad): Quad? {
+            val pts = q.points()
+            val cx = pts.sumOf { it.x.toDouble() } / 4.0
+            val cy = pts.sumOf { it.y.toDouble() } / 4.0
+            // En coordenadas de pantalla (y hacia abajo) atan2 creciente = sentido horario.
+            val sorted = pts.sortedBy { kotlin.math.atan2(it.y - cy, it.x - cx) }
+            val start = sorted.indices.minByOrNull { sorted[it].x + sorted[it].y } ?: 0
+            val ordered = List(4) { sorted[(start + it) % 4] }
+            val ok = isConvexQuad(ordered.map { androidx.compose.ui.geometry.Offset(it.x, it.y) })
+            return if (ok) Quad.of(ordered) else null
+        }
     }
 }

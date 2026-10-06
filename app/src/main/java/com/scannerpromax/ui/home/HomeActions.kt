@@ -19,7 +19,7 @@ internal suspend fun buildSharePdf(container: AppContainer, doc: Document, progr
     val repo = container.documents
     val inputs = doc.pages.mapIndexed { i, page ->
         val image = repo.processedFile(doc.id, page)
-        val ocr = if (settings.searchablePdf) repo.loadOcr(doc.id, page.id) else null
+        val ocr = if (settings.searchablePdf) repo.ensureOcr(doc.id, page.id) else null
         progress(0.3f * (i + 1) / doc.pages.size)
         PdfPageInput(image, ocr)
     }

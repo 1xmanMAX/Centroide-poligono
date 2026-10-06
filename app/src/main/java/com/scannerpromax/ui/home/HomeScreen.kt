@@ -45,6 +45,8 @@ import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Compress
 import androidx.compose.material.icons.rounded.CoPresent
+import androidx.compose.material.icons.rounded.Description
+import androidx.compose.material.icons.rounded.PhotoCamera
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.DocumentScanner
 import androidx.compose.material.icons.rounded.GridView
@@ -160,12 +162,15 @@ fun HomeScreen(
 
     val quickActions = remember(brand) {
         listOf(
+            QuickAction("Documento", "Hojas y cartas", Icons.Rounded.Description, brand.gradientStart) { onScan(ScanMode.DOCUMENT) },
             QuickAction("Libro", "2 páginas", Icons.AutoMirrored.Rounded.MenuBook, brand.gradientStart) { onScan(ScanMode.BOOK) },
             QuickAction("DNI / Tarjeta", "Anverso y reverso", Icons.Rounded.Badge, brand.gradientEnd) { onScan(ScanMode.ID_CARD) },
-            QuickAction("Galería", "Importar fotos", Icons.Rounded.PhotoLibrary, Color(0xFFFF8A4C)) { pickImages() },
             QuickAction("Recibo", "Tickets largos", Icons.AutoMirrored.Rounded.ReceiptLong, Color(0xFFFFB547)) { onScan(ScanMode.RECEIPT) },
             QuickAction("Pizarra", "Sin reflejos", Icons.Rounded.CoPresent, Color(0xFF4CC3FF)) { onScan(ScanMode.WHITEBOARD) },
+            QuickAction("Foto", "Color, sin recorte", Icons.Rounded.PhotoCamera, Color(0xFF8BD450)) { onScan(ScanMode.PHOTO) },
+            QuickAction("Galería", "Importar fotos", Icons.Rounded.PhotoLibrary, Color(0xFFFF8A4C)) { pickImages() },
             QuickAction("Comprimir", "Reducir PDF", Icons.Rounded.Compress, Color(0xFFFF5C9A)) { onCompressPdf() },
+            QuickAction("Ajustes", "Filtro y calidad", Icons.Rounded.Settings, brand.gradientEnd) { onSettings() },
         )
     }
 
@@ -223,7 +228,8 @@ fun HomeScreen(
                 PrimaryFab(
                     onClick = { onScan(ScanMode.DOCUMENT) },
                     expanded = fabExpanded,
-                    pulse = !container.deviceTier.isLowRam,
+                    // El halo pulsante solo en el primer uso (sin documentos): ahorra batería y no distrae.
+                    pulse = documents.isEmpty() && !container.deviceTier.isLowRam,
                     modifier = Modifier.navigationBarsPadding(),
                 )
             },
@@ -291,8 +297,8 @@ fun HomeScreen(
                             EmptyState(
                                 title = "Tu primer escaneo te espera",
                                 message = "Escanea documentos, libros, DNI o recibos. Los recortamos y mejoramos automáticamente para que se vean perfectos.",
-                                actionLabel = "Escanear ahora",
-                                onAction = { onScan(ScanMode.DOCUMENT) },
+                                // Sin botón propio: la tarjeta principal y el botón flotante ya invitan a escanear.
+                                actionLabel = null,
                                 modifier = Modifier.fillMaxWidth(),
                             )
                         }

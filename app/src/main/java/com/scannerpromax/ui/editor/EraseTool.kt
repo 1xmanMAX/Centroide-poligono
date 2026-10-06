@@ -74,15 +74,20 @@ internal fun EraseTool(
             .fillMaxSize()
             .clipToBounds()
             .onSizeChanged { boxSize = it }
-            .pointerInput(image) {
+            // Clave Unit: cada trazo genera una vista previa (ImageBitmap nuevo) y usar la imagen como clave
+            // reiniciaba el detector y cancelaba el trazo en curso. Lo que cambia se lee con rememberUpdatedState.
+            .pointerInput(Unit) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
+                    val downTime = down.uptimeMillis
+                    var lastTime = downTime
                     var transforming = false
                     current.clear()
                     toNormalized(down.position, size, zoom, pan, currentRect)?.let { current.add(it) }
                     cursor = down.position
                     while (true) {
                         val event = awaitPointerEvent()
+                        event.changes.firstOrNull()?.let { lastTime = it.uptimeMillis }
                         val pressed = event.changes.filter { it.pressed }
                         if (pressed.isEmpty()) break
                         if (pressed.size >= 2) {
@@ -120,7 +125,9 @@ internal fun EraseTool(
                             ch.consume()
                         }
                     }
-                    if (!transforming && current.isNotEmpty()) {
+                    // Un toque brevísimo de un solo punto suele ser accidental (p. ej. al iniciar un pellizco).
+                    val accidental = current.size < 2 && (lastTime - downTime) < 80L
+                    if (!transforming && current.isNotEmpty() && !accidental) {
                         val pts = current.map { Pt(it.x.coerceIn(0f, 1f), it.y.coerceIn(0f, 1f)) }
                         strokeCallback(EraseStroke(points = pts, radius = radius, mode = eraseMode))
                     }
@@ -153,10 +160,25 @@ internal fun EraseTool(
             }
             if (current.isNotEmpty()) drawStroke(current, brushRadius, mode, rect, accent)
         }
-        // Cursor del pincel (en coordenadas de pantalla, tamaño real con el zoom)
+        // Cursor del pincel (en coordenadas de pantalla, tamaño real con el zoom) + lupa lejos del dedo,
+        // para ver la raya que el dedo tapa.
         Canvas(Modifier.fillMaxSize()) {
             val c = cursor ?: return@Canvas
             val r = brushRadius * rect.width * zoom
+            if (rect.width > 0f && current.isNotEmpty()) {
+                val center = Offset(size.width / 2f, size.height / 2f)
+                fun t(p: Offset) = center + (p - center) * zoom + pan
+                val screenRect = Rect(t(rect.topLeft), t(rect.bottomRight))
+                drawLoupe(
+                    image = image,
+                    rect = screenRect,
+                    scale = screenRect.width / image.width,
+                    target = c,
+                    finger = c,
+                    accent = accent,
+                    brushRadiusPx = r,
+                )
+            }
             drawCircle(Color.White, radius = r, center = c, style = Stroke(width = 2f * density))
             drawCircle(accent, radius = r + 1.5f * density, center = c, style = Stroke(width = 1f * density))
         }

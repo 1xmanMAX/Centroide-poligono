@@ -63,7 +63,11 @@ private const val ANIM_MS = 320
  *  - PDF recibido de otra app ([incomingPdf]) -> Comprimir PDF.
  */
 @Composable
-fun AppNavHost(container: AppContainer, incomingPdf: MutableStateFlow<Uri?>) {
+fun AppNavHost(
+    container: AppContainer,
+    incomingPdf: MutableStateFlow<Uri?>,
+    incomingImages: MutableStateFlow<List<Uri>>? = null,
+) {
     val nav = rememberNavController()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -85,11 +89,13 @@ fun AppNavHost(container: AppContainer, incomingPdf: MutableStateFlow<Uri?>) {
         }
     }
 
-    // PDF compartido / abierto desde otra app -> compresor.
+    // PDF compartido / abierto desde otra app -> compresor. Se copia en el acto a la caché propia:
+    // el permiso temporal de lectura no sobrevive a la muerte del proceso, y cada copia tiene un Uri
+    // nuevo, así que compartir dos veces el mismo PDF vuelve a abrirlo.
     LaunchedEffect(incomingPdf) {
         incomingPdf.filterNotNull().collect { uri ->
-            compressUri = uri
             incomingPdf.value = null
+            compressUri = copyIncomingPdf(context, uri) ?: uri
             nav.navigate(Routes.COMPRESS) { launchSingleTop = true }
         }
     }
@@ -143,6 +149,17 @@ fun AppNavHost(container: AppContainer, incomingPdf: MutableStateFlow<Uri?>) {
         }
     }
 
+    // Imágenes compartidas desde otra app -> documento nuevo con mejora automática.
+    LaunchedEffect(incomingImages) {
+        val flow = incomingImages ?: return@LaunchedEffect
+        flow.collect { uris ->
+            if (uris.isNotEmpty()) {
+                flow.value = emptyList()
+                importImages(uris)
+            }
+        }
+    }
+
     Box(
         Modifier
             .fillMaxSize()
@@ -159,16 +176,16 @@ fun AppNavHost(container: AppContainer, incomingPdf: MutableStateFlow<Uri?>) {
             composable(Routes.HOME) { entry ->
                 HomeScreen(
                     container = container,
-                    onScan = { mode -> entry.ifResumed { nav.navigate(Routes.camera(mode)) } },
-                    onOpenDocument = { id -> entry.ifResumed { nav.navigate(Routes.review(id)) } },
+                    onScan = { mode -> entry.ifActive(nav) { nav.navigate(Routes.camera(mode)) } },
+                    onOpenDocument = { id -> entry.ifActive(nav) { nav.navigate(Routes.review(id)) } },
                     onImportImages = { uris -> importImages(uris) },
                     onCompressPdf = {
-                        entry.ifResumed {
+                        entry.ifActive(nav) {
                             compressUri = null
                             nav.navigate(Routes.COMPRESS) { launchSingleTop = true }
                         }
                     },
-                    onSettings = { entry.ifResumed { nav.navigate(Routes.SETTINGS) { launchSingleTop = true } } },
+                    onSettings = { entry.ifActive(nav) { nav.navigate(Routes.SETTINGS) { launchSingleTop = true } } },
                 )
             }
 
@@ -196,7 +213,7 @@ fun AppNavHost(container: AppContainer, incomingPdf: MutableStateFlow<Uri?>) {
                             entry.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
                         ) nav.finishCamera(entry, finishedId)
                     },
-                    onBack = { entry.ifResumed { nav.popBackStack() } },
+                    onBack = { entry.ifActive(nav) { nav.popBackStack() } },
                 )
             }
 
@@ -208,11 +225,11 @@ fun AppNavHost(container: AppContainer, incomingPdf: MutableStateFlow<Uri?>) {
                 ReviewScreen(
                     container = container,
                     docId = docId,
-                    onBack = { entry.ifResumed { nav.backTo(Routes.HOME) } },
-                    onEditPage = { pageId -> entry.ifResumed { nav.navigate(Routes.editor(docId, pageId)) } },
-                    onAddPages = { mode -> entry.ifResumed { nav.navigate(Routes.camera(mode, docId)) } },
-                    onExport = { entry.ifResumed { nav.navigate(Routes.export(docId)) } },
-                    onOcr = { pageId -> entry.ifResumed { nav.navigate(Routes.ocr(docId, pageId)) } },
+                    onBack = { entry.ifActive(nav) { nav.backTo(Routes.HOME) } },
+                    onEditPage = { pageId -> entry.ifActive(nav) { nav.navigate(Routes.editor(docId, pageId)) } },
+                    onAddPages = { mode -> entry.ifActive(nav) { nav.navigate(Routes.camera(mode, docId)) } },
+                    onExport = { entry.ifActive(nav) { nav.navigate(Routes.export(docId)) } },
+                    onOcr = { pageId -> entry.ifActive(nav) { nav.navigate(Routes.ocr(docId, pageId)) } },
                 )
             }
 
@@ -227,7 +244,7 @@ fun AppNavHost(container: AppContainer, incomingPdf: MutableStateFlow<Uri?>) {
                     container = container,
                     docId = entry.arguments?.getString("docId").orEmpty(),
                     pageId = entry.arguments?.getString("pageId").orEmpty(),
-                    onBack = { entry.ifResumed { nav.popBackStack() } },
+                    onBack = { entry.ifActive(nav) { nav.popBackStack() } },
                 )
             }
 
@@ -238,7 +255,7 @@ fun AppNavHost(container: AppContainer, incomingPdf: MutableStateFlow<Uri?>) {
                 ExportScreen(
                     container = container,
                     docId = entry.arguments?.getString("docId").orEmpty(),
-                    onBack = { entry.ifResumed { nav.popBackStack() } },
+                    onBack = { entry.ifActive(nav) { nav.popBackStack() } },
                 )
             }
 
@@ -253,7 +270,7 @@ fun AppNavHost(container: AppContainer, incomingPdf: MutableStateFlow<Uri?>) {
                     container = container,
                     docId = entry.arguments?.getString("docId").orEmpty(),
                     pageId = entry.arguments?.getString("pageId").orEmpty(),
-                    onBack = { entry.ifResumed { nav.popBackStack() } },
+                    onBack = { entry.ifActive(nav) { nav.popBackStack() } },
                 )
             }
 
@@ -261,14 +278,14 @@ fun AppNavHost(container: AppContainer, incomingPdf: MutableStateFlow<Uri?>) {
                 CompressPdfScreen(
                     container = container,
                     initialUri = compressUri,
-                    onBack = { entry.ifResumed { nav.backTo(Routes.HOME) } },
+                    onBack = { entry.ifActive(nav) { nav.backTo(Routes.HOME) } },
                 )
             }
 
             composable(Routes.SETTINGS) { entry ->
                 SettingsScreen(
                     container = container,
-                    onBack = { entry.ifResumed { nav.popBackStack() } },
+                    onBack = { entry.ifActive(nav) { nav.popBackStack() } },
                 )
             }
         }
@@ -284,10 +301,40 @@ fun AppNavHost(container: AppContainer, incomingPdf: MutableStateFlow<Uri?>) {
 
 // ------------------------------------------------------------------------------------- utilidades
 
-/** Ejecuta la acción solo si la pantalla está activa (evita navegaciones dobles por toques rápidos). */
-private inline fun NavBackStackEntry.ifResumed(action: () -> Unit) {
-    if (lifecycle.currentState == Lifecycle.State.RESUMED) action()
+/**
+ * Ejecuta la acción solo si esta entrada es la pantalla actual y está al menos en STARTED.
+ * Evita navegaciones dobles por toques rápidos sin bloquear los toques durante la animación de entrada
+ * (en gama baja la transición tarda y exigir RESUMED hacía que la app pareciera no responder).
+ */
+private inline fun NavBackStackEntry.ifActive(nav: NavHostController, action: () -> Unit) {
+    if (nav.currentBackStackEntry?.id == id && lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) action()
 }
+
+/** Copia un PDF recibido de otra app a la caché propia. Devuelve un Uri de archivo o null si falla. */
+private suspend fun copyIncomingPdf(context: android.content.Context, uri: Uri): Uri? =
+    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        try {
+            val resolver = context.contentResolver
+            var name: String? = null
+            runCatching {
+                resolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                    if (c.moveToFirst() && !c.isNull(0)) name = c.getString(0)
+                }
+            }
+            val clean = (name ?: uri.lastPathSegment?.substringAfterLast('/') ?: "documento.pdf")
+                .replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]"), "_")
+                .let { if (it.lowercase().endsWith(".pdf")) it else "$it.pdf" }
+            val dir = java.io.File(context.cacheDir, "incoming/${System.currentTimeMillis()}").apply { mkdirs() }
+            val out = java.io.File(dir, clean)
+            val input = resolver.openInputStream(uri) ?: return@withContext null
+            input.use { i -> out.outputStream().use { o -> i.copyTo(o, 64 * 1024) } }
+            if (out.length() <= 0L) { out.delete(); null } else Uri.fromFile(out)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
+        }
+    }
 
 /**
  * Al terminar la cámara: si se añadían páginas a un documento cuya revisión está justo detrás,

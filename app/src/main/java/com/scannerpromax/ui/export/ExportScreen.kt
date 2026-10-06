@@ -2,6 +2,8 @@ package com.scannerpromax.ui.export
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.content.pm.PackageManager
 import android.os.Build
 import android.widget.Toast
@@ -98,6 +100,11 @@ import com.scannerpromax.domain.PageSize
 import com.scannerpromax.domain.PdfOptions
 import com.scannerpromax.imaging.BitmapIO
 import com.scannerpromax.pdf.PdfPageInput
+import com.scannerpromax.ui.components.AppTopBar
+import com.scannerpromax.ui.components.GradientButton
+import com.scannerpromax.ui.components.LoadingOverlay
+import com.scannerpromax.ui.components.SoftButton
+import com.scannerpromax.ui.theme.brand
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -116,6 +123,7 @@ private enum class ExportAction { SAVE, SHARE }
 
 private data class Progress(val value: Float, val message: String)
 
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun ExportScreen(
     container: AppContainer,
@@ -142,6 +150,10 @@ fun ExportScreen(
     var job by remember { mutableStateOf<Job?>(null) }
     var pendingAction by remember { mutableStateOf<ExportAction?>(null) }
     var lastSaved by remember { mutableStateOf<String?>(null) }
+    // Lo último guardado (Uris de MediaStore) para ofrecer "Abrir" y "Compartir" en la tarjeta de éxito.
+    var savedUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var savedMime by remember { mutableStateOf("application/pdf") }
+    var seenDoc by remember { mutableStateOf(false) }
     // PDF ya generado con las mismas opciones: compartir y guardar no lo regeneran.
     var cachedPdf by remember { mutableStateOf<Pair<String, File>?>(null) }
 
@@ -154,6 +166,21 @@ fun ExportScreen(
             defaultsLoaded = true
         }
     }
+    // Documento borrado o fusionado mientras se exporta / al entrar: volver en vez de "Cargando…" eterno.
+    LaunchedEffect(docId) {
+        if (container.documents.get(docId) == null) {
+            Toast.makeText(context, "El documento ya no existe", Toast.LENGTH_SHORT).show()
+            onBack()
+        }
+    }
+    LaunchedEffect(doc) {
+        if (doc != null) seenDoc = true
+        else if (seenDoc) {
+            job?.cancel()
+            Toast.makeText(context, "El documento ya no existe", Toast.LENGTH_SHORT).show()
+            onBack()
+        }
+    }
     LaunchedEffect(doc?.title) {
         val t = doc?.title ?: return@LaunchedEffect
         if (fileName.isBlank()) fileName = sanitize(t)
@@ -162,7 +189,9 @@ fun ExportScreen(
     fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
 
     fun pdfKey(d: Document): String =
-        listOf(d.updatedAt, d.pages.joinToString { it.id + it.edits.hashCode() }, pageSize, quality, searchable, usePassword, password.hashCode(), fileName).joinToString("|")
+        // Sin updatedAt: guardar el OCR que faltaba actualiza el documento y obligaba a regenerar el PDF
+        // al pulsar "Compartir" después de "Guardar". Las ediciones de cada página sí invalidan la caché.
+        listOf(d.pages.joinToString { it.id + it.edits.hashCode() }, pageSize, quality, searchable, usePassword, password.hashCode(), fileName).joinToString("|")
 
     suspend fun buildPdf(d: Document): File {
         val key = pdfKey(d)
@@ -176,7 +205,7 @@ fun ExportScreen(
         val ocrs: List<OcrResult?> = if (searchable) {
             pages.mapIndexed { i, p ->
                 progressFlow.value = Progress(0.3f + 0.35f * i / n, "Reconociendo texto ${i + 1} de $n…")
-                container.documents.loadOcr(docId, p.id) ?: runOcr(container, docId, p.id, files[i])
+                container.documents.ensureOcr(docId, p.id) ?: runOcr(container, docId, p.id, files[i])
             }
         } else List(n) { null }
         progressFlow.value = Progress(0.65f, "Creando PDF…")
@@ -216,7 +245,9 @@ fun ExportScreen(
                         val pdf = buildPdf(d)
                         if (action == ExportAction.SAVE) {
                             progressFlow.value = Progress(1f, "Guardando en Descargas…")
-                            container.imageExporter.savePdfToDownloads(pdf, name)
+                            val uri = container.imageExporter.savePdfToDownloads(pdf, name)
+                            savedUris = listOf(uri)
+                            savedMime = "application/pdf"
                             lastSaved = "PDF guardado en Descargas/EscanerProMax"
                             toast("PDF guardado en Descargas")
                         } else {
@@ -231,7 +262,8 @@ fun ExportScreen(
                         }
                         progressFlow.value = Progress(0.7f, "Codificando ${imageFormat.label} en alta definición…")
                         if (action == ExportAction.SAVE) {
-                            container.imageExporter.saveToGallery(files, imageFormat, quality, name)
+                            savedUris = container.imageExporter.saveToGallery(files, imageFormat, quality, name)
+                            savedMime = imageFormat.mime
                             lastSaved = "${files.size} ${if (files.size == 1) "imagen guardada" else "imágenes guardadas"} en Galería (EscanerProMax)"
                             toast("Guardado en la Galería")
                         } else {
@@ -268,37 +300,56 @@ fun ExportScreen(
 
     BackHandler { if (job != null) job?.cancel() else onBack() }
 
-    val primary = MaterialTheme.colorScheme.primary
-    val secondary = MaterialTheme.colorScheme.secondary
+    fun openSaved() {
+        val uri = savedUris.firstOrNull() ?: return
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, savedMime)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        try {
+            context.startActivity(Intent.createChooser(intent, "Abrir con"))
+        } catch (_: Throwable) {
+            toast("No hay ninguna app para abrir este archivo")
+        }
+    }
+
+    fun shareSaved() {
+        val uris = savedUris
+        if (uris.isEmpty()) return
+        val intent = if (uris.size == 1) {
+            Intent(Intent.ACTION_SEND).apply { putExtra(Intent.EXTRA_STREAM, uris[0]) }
+        } else {
+            Intent(Intent.ACTION_SEND_MULTIPLE).apply { putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(uris)) }
+        }.apply {
+            type = savedMime
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        try {
+            context.startActivity(Intent.createChooser(intent, "Compartir"))
+        } catch (_: Throwable) {
+            toast("No hay apps para compartir")
+        }
+    }
+
+    val primary = MaterialTheme.brand.gradientStart
+    val secondary = MaterialTheme.brand.gradientEnd
     val d = doc
 
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Column(Modifier.fillMaxSize()) {
-            Row(
-                Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 4.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                IconButton(onClick = { if (job != null) job?.cancel() else onBack() }) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "Volver")
-                }
-                Column(Modifier.weight(1f)) {
-                    Text("Exportar", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                    Text(
-                        d?.let { "${it.title} · ${it.pages.size} ${if (it.pages.size == 1) "página" else "páginas"}" } ?: "Cargando…",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
+            AppTopBar(
+                title = "Exportar",
+                subtitle = d?.let { "${it.title} · ${it.pages.size} ${if (it.pages.size == 1) "página" else "páginas"}" } ?: "Cargando…",
+                onBack = { if (job != null) job?.cancel() else onBack() },
+            )
 
             Column(
                 Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
+                    // imePadding antes del scroll: reduce el área visible para que el campo enfocado quede a la vista.
                     .imePadding()
+                    .verticalScroll(rememberScrollState())
                     .padding(bottom = 16.dp),
             ) {
                 // Miniaturas de lo que se exporta
@@ -382,7 +433,7 @@ fun ExportScreen(
                         Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Box(Modifier.size(8.dp).clip(RoundedCornerShape(50)).background(Brush.linearGradient(listOf(primary, secondary))))
+                        Box(Modifier.size(8.dp).clip(RoundedCornerShape(50)).background(MaterialTheme.brand.gradient))
                         Spacer(Modifier.width(8.dp))
                         Text(
                             "Tamaño estimado: ≈ ${formatBytes(est)} · hasta ${quality.maxLongSide} px",
@@ -439,18 +490,26 @@ fun ExportScreen(
                 )
 
                 AnimatedVisibility(visible = lastSaved != null) {
-                    Row(
+                    Column(
                         Modifier
                             .padding(16.dp)
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(16.dp))
-                            .background(MaterialTheme.colorScheme.secondary.copy(alpha = 0.14f))
+                            .background(MaterialTheme.brand.success.copy(alpha = 0.12f))
                             .padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Icon(Icons.Filled.CheckCircle, null, tint = MaterialTheme.colorScheme.secondary)
-                        Spacer(Modifier.width(10.dp))
-                        Text(lastSaved ?: "", style = MaterialTheme.typography.bodyMedium)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Filled.CheckCircle, null, tint = MaterialTheme.brand.success)
+                            Spacer(Modifier.width(10.dp))
+                            Text(lastSaved ?: "", style = MaterialTheme.typography.bodyMedium)
+                        }
+                        if (savedUris.isNotEmpty()) {
+                            Spacer(Modifier.height(10.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                SoftButton("Abrir", onClick = { openSaved() }, icon = Icons.Filled.Visibility, height = 44.dp, modifier = Modifier.weight(1f))
+                                SoftButton("Compartir", onClick = { shareSaved() }, icon = Icons.Filled.Share, height = 44.dp, modifier = Modifier.weight(1f))
+                            }
+                        }
                     }
                 }
             }
@@ -467,82 +526,36 @@ fun ExportScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 val enabled = d != null && d.pages.isNotEmpty() && progress == null
-                Row(
-                    Modifier
-                        .weight(1f)
-                        .height(54.dp)
-                        .clip(RoundedCornerShape(50))
-                        .border(1.5.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(50))
-                        .clickable(enabled = enabled) { start(ExportAction.SHARE) }
-                        .graphicsLayer { alpha = if (enabled) 1f else 0.5f },
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(Icons.Filled.Share, null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Compartir", fontWeight = FontWeight.SemiBold)
-                }
-                Row(
-                    Modifier
-                        .weight(1.3f)
-                        .height(54.dp)
-                        .shadow(10.dp, RoundedCornerShape(50), ambientColor = primary, spotColor = primary)
-                        .clip(RoundedCornerShape(50))
-                        .background(Brush.horizontalGradient(listOf(primary, secondary)))
-                        .clickable(enabled = enabled) { start(ExportAction.SAVE) }
-                        .graphicsLayer { alpha = if (enabled) 1f else 0.5f },
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(Icons.Filled.Download, null, tint = Color.White)
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        if (kind == ExportKind.PDF) "Guardar en Descargas" else "Guardar en Galería",
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                    )
-                }
+                SoftButton(
+                    text = "Compartir",
+                    onClick = { start(ExportAction.SHARE) },
+                    icon = Icons.Filled.Share,
+                    enabled = enabled,
+                    height = 54.dp,
+                    modifier = Modifier.weight(1f),
+                )
+                // Texto corto (no cabe "Guardar en Descargas" a 360 dp o con letra grande); el destino
+                // se indica en la tarjeta de éxito.
+                GradientButton(
+                    text = if (kind == ExportKind.PDF) "Guardar PDF" else "Guardar",
+                    onClick = { start(ExportAction.SAVE) },
+                    icon = Icons.Filled.Download,
+                    enabled = enabled,
+                    height = 54.dp,
+                    modifier = Modifier.weight(1.3f),
+                )
             }
         }
 
         // ------------------------------------------------ progreso
         val pr = progress
-        AnimatedVisibility(visible = pr != null, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.fillMaxSize()) {
-            val animated by animateFloatAsState(pr?.value ?: 1f, label = "exportProgress")
-            Box(
-                Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.6f)).clickable(enabled = true, onClick = {}),
-                contentAlignment = Alignment.Center,
-            ) {
-                Column(
-                    Modifier
-                        .padding(32.dp)
-                        .clip(RoundedCornerShape(26.dp))
-                        .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-                        .padding(24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Box(
-                        Modifier.size(64.dp).clip(RoundedCornerShape(50)).background(Brush.linearGradient(listOf(primary, secondary))),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(if (kind == ExportKind.PDF) Icons.Filled.PictureAsPdf else Icons.Filled.Image, null, tint = Color.White, modifier = Modifier.size(30.dp))
-                    }
-                    Spacer(Modifier.height(16.dp))
-                    Text(pr?.message ?: "", style = MaterialTheme.typography.titleMedium)
-                    Spacer(Modifier.height(14.dp))
-                    LinearProgressIndicator(
-                        progress = { animated },
-                        modifier = Modifier.width(240.dp).height(6.dp).clip(RoundedCornerShape(50)),
-                        color = primary,
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    Text("${(animated * 100).toInt()} %", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Spacer(Modifier.height(8.dp))
-                    TextButton(onClick = { job?.cancel() }) { Text("Cancelar") }
-                }
-            }
-        }
+        LoadingOverlay(
+            visible = pr != null,
+            message = pr?.message ?: "",
+            progress = pr?.value,
+            onCancel = { job?.cancel() },
+            modifier = Modifier.fillMaxSize(),
+        )
     }
 }
 
@@ -633,15 +646,15 @@ private fun ChipRow(content: @Composable () -> Unit) {
 
 @Composable
 private fun Pill(label: String, selected: Boolean, onClick: () -> Unit) {
-    val primary = MaterialTheme.colorScheme.primary
-    val secondary = MaterialTheme.colorScheme.secondary
+    val primary = MaterialTheme.brand.gradientStart
+    val secondary = MaterialTheme.brand.gradientEnd
     val fg by animateColorAsState(if (selected) Color.White else MaterialTheme.colorScheme.onSurface, label = "pillFg")
     val shape = RoundedCornerShape(50)
     Box(
         Modifier
             .clip(shape)
             .then(
-                if (selected) Modifier.background(Brush.horizontalGradient(listOf(primary, secondary)))
+                if (selected) Modifier.background(MaterialTheme.brand.horizontalGradient)
                 else Modifier.background(MaterialTheme.colorScheme.surfaceContainerHigh).border(1.dp, MaterialTheme.colorScheme.outlineVariant, shape),
             )
             .clickable(onClick = onClick)
@@ -653,8 +666,8 @@ private fun Pill(label: String, selected: Boolean, onClick: () -> Unit) {
 
 @Composable
 private fun FormatCard(icon: ImageVector, title: String, subtitle: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
-    val primary = MaterialTheme.colorScheme.primary
-    val secondary = MaterialTheme.colorScheme.secondary
+    val primary = MaterialTheme.brand.gradientStart
+    val secondary = MaterialTheme.brand.gradientEnd
     val shape = RoundedCornerShape(20.dp)
     Column(
         modifier
@@ -662,7 +675,7 @@ private fun FormatCard(icon: ImageVector, title: String, subtitle: String, selec
             .background(if (selected) primary.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surfaceContainer)
             .border(
                 if (selected) 2.dp else 1.dp,
-                if (selected) Brush.linearGradient(listOf(primary, secondary)) else Brush.linearGradient(listOf(MaterialTheme.colorScheme.outlineVariant, MaterialTheme.colorScheme.outlineVariant)),
+                if (selected) MaterialTheme.brand.gradient else Brush.linearGradient(listOf(MaterialTheme.colorScheme.outlineVariant, MaterialTheme.colorScheme.outlineVariant)),
                 shape,
             )
             .clickable(onClick = onClick)
@@ -673,7 +686,7 @@ private fun FormatCard(icon: ImageVector, title: String, subtitle: String, selec
                 .size(44.dp)
                 .clip(RoundedCornerShape(14.dp))
                 .background(
-                    if (selected) Brush.linearGradient(listOf(primary, secondary))
+                    if (selected) MaterialTheme.brand.gradient
                     else Brush.linearGradient(listOf(MaterialTheme.colorScheme.surfaceContainerHighest, MaterialTheme.colorScheme.surfaceContainerHighest)),
                 ),
             contentAlignment = Alignment.Center,
@@ -698,12 +711,12 @@ private fun OptionSwitch(icon: ImageVector, title: String, subtitle: String, che
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(icon, null, tint = MaterialTheme.colorScheme.primary)
+        Icon(icon, null, tint = MaterialTheme.brand.gradientStart)
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
             Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Switch(checked = checked, onCheckedChange = onChange, colors = SwitchDefaults.colors(checkedTrackColor = MaterialTheme.colorScheme.primary))
+        Switch(checked = checked, onCheckedChange = onChange, colors = SwitchDefaults.colors(checkedTrackColor = MaterialTheme.brand.gradientStart))
     }
 }

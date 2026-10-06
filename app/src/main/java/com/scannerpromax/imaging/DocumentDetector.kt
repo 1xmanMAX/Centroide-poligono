@@ -25,10 +25,12 @@ import kotlin.math.roundToInt
  * Detección de bordes del documento. Thread-safe; reutiliza buffers internamente.
  *
  * Estrategias combinadas y puntuadas (a ~500 px de lado largo):
- *  1. Canny con umbral automático (mediana) sobre luminancia L (Lab).
- *  2. Canny sobre saturación ponderada por brillo (papel blanco sobre mesa de color).
- *  3. Segmentación Otsu del papel (claro) + apertura morfológica.
- *  4. HoughLinesP extendidas para cerrar documentos cuyo contorno está cortado (sombras, dedos).
+ *  1. Canny con umbrales sacados del MÓDULO DEL GRADIENTE (percentil) sobre luminancia L (Lab), con CLAHE
+ *     suave si hay poca luz. (La mediana de intensidad fallaba en escenas claras: papel sobre mesa clara.)
+ *  2. Bordes de color: saturación ponderada por brillo y canales a/b de Lab (tonos parecidos).
+ *  3. Máscara de bordes sensible (Canny 20/50) cerrada morfológicamente.
+ *  4. Segmentación Otsu del papel (claro) + apertura morfológica.
+ *  5. HoughLinesP extendidas para cerrar documentos cuyo contorno está cortado (sombras, dedos).
  * Cada contorno grande -> casco convexo -> approxPolyDP (o mejor cuadrilátero inscrito / minAreaRect).
  * Puntuación: área, ángulos ~90°, convexidad y fracción del perímetro apoyada sobre bordes reales.
  */
@@ -40,13 +42,16 @@ class DocumentDetector(private val tier: DeviceTier) {
     /** Buffers reutilizables de una pasada de detección. */
     private class Buffers {
         val blur = Mat(); val tmp = Mat(); val edges = Mat(); val edges2 = Mat()
-        val otsu = Mat(); val emask = Mat(); val hough = Mat(); val lines = Mat(); val hierarchy = Mat()
-        val hullIdx = MatOfInt(); val approx = MatOfPoint2f()
+        val otsu = Mat(); val emask = Mat(); val emaskClosed = Mat(); val hough = Mat(); val lines = Mat(); val hierarchy = Mat()
+        val gx = Mat(); val gy = Mat(); val mag = Mat(); val mag2 = Mat(); val colorTmp = Mat()
+        val hullIdx = MatOfInt(); val approx = MatOfPoint2f(); val hull2f = MatOfPoint2f()
         var emaskBytes = ByteArray(0)
         var w = 0; var h = 0
         fun release() {
             blur.release(); tmp.release(); edges.release(); edges2.release(); otsu.release(); emask.release()
-            hough.release(); lines.release(); hierarchy.release(); hullIdx.release(); approx.release()
+            emaskClosed.release(); hough.release(); lines.release(); hierarchy.release()
+            gx.release(); gy.release(); mag.release(); mag2.release(); colorTmp.release()
+            hullIdx.release(); approx.release(); hull2f.release()
         }
     }
 
@@ -59,6 +64,7 @@ class DocumentDetector(private val tier: DeviceTier) {
     private var yRoi: Mat? = null
     private var liveSmall: Mat? = null
     private var liveRot: Mat? = null
+    private var liveClahe: org.opencv.imgproc.CLAHE? = null
 
     private data class Candidate(val pts: FloatArray, val score: Double)
 
@@ -70,24 +76,26 @@ class DocumentDetector(private val tier: DeviceTier) {
     fun detect(bitmap: Bitmap): DetectionResult? {
         val w = bitmap.width; val h = bitmap.height
         if (w < 32 || h < 32) return null
-        val s = min(1.0, detectSide.toDouble() / max(w, h))
-        val sw = max(1, (w * s).roundToInt()); val sh = max(1, (h * s).roundToInt())
-        val small = if (s < 1.0) Bitmap.createScaledBitmap(bitmap, sw, sh, true) else bitmap
         val buf = Buffers()
         val bag = MatBag()
         try {
-            val rgba = bag.add(Cv.toRgba(small))
-            if (small !== bitmap) small.recycle()
+            // Reducción SIN aliasing (mitades + INTER_AREA): createScaledBitmap x8 convertía el texto en
+            // sal y pimienta, disparaba la densidad de bordes y creaba contornos espurios.
+            val rgba = bag.add(Cv.toRgbaScaled(bitmap, detectSide).first)
             val rgb = bag.mat(); Imgproc.cvtColor(rgba, rgb, Imgproc.COLOR_RGBA2RGB)
             val lab = bag.mat(); Imgproc.cvtColor(rgb, lab, Imgproc.COLOR_RGB2Lab)
             val l = bag.mat(); Core.extractChannel(lab, l, 0)
+            enhanceLowLight(l, null)
             val hsv = bag.mat(); Imgproc.cvtColor(rgb, hsv, Imgproc.COLOR_RGB2HSV)
             val sat = bag.mat(); Core.extractChannel(hsv, sat, 1)
             val v = bag.mat(); Core.extractChannel(hsv, v, 2)
             // Saturación ponderada por brillo: evita el ruido cromático de zonas oscuras
             val sw8 = bag.mat(); Core.multiply(sat, v, sw8, 1.0 / 255.0)
+            // Canales a/b de Lab amplificados (x3 alrededor de 128): separan tonos parecidos en brillo
+            val ca = bag.mat(); Core.extractChannel(lab, ca, 1); ca.convertTo(ca, -1, 3.0, -256.0)
+            val cb = bag.mat(); Core.extractChannel(lab, cb, 2); cb.convertTo(cb, -1, 3.0, -256.0)
 
-            val cand = detectCore(l, sw8, buf, live = false) ?: return null
+            val cand = detectCore(l, listOf(sw8, ca, cb), buf, live = false) ?: return null
             val fx = w.toDouble() / l.cols(); val fy = h.toDouble() / l.rows()
             val pts = FloatArray(8) { i -> (cand.pts[i] * if (i % 2 == 0) fx else fy).toFloat() }
             clampPts(pts, w, h)
@@ -137,7 +145,12 @@ class DocumentDetector(private val tier: DeviceTier) {
                 else -> small
             }
             val buf = liveBuf ?: Buffers().also { liveBuf = it }
-            val cand = detectCore(work, null, buf, live = true) ?: return null
+            // Poca luz: CLAHE suave (instancia reutilizada entre frames). Se aplica sobre la copia reducida.
+            if (Core.mean(work).`val`[0] < LOW_LIGHT_MEAN) {
+                val c = liveClahe ?: Imgproc.createCLAHE(2.0, Size(8.0, 8.0)).also { liveClahe = it }
+                enhanceLowLight(work, c)
+            }
+            val cand = detectCore(work, emptyList(), buf, live = true) ?: return null
             val rotW = if (rot == 90 || rot == 270) height else width
             val rotH = if (rot == 90 || rot == 270) width else height
             val fx = rotW.toDouble() / work.cols(); val fy = rotH.toDouble() / work.rows()
@@ -157,14 +170,33 @@ class DocumentDetector(private val tier: DeviceTier) {
         yMat?.release(); yMat = null
         liveSmall?.release(); liveSmall = null
         liveRot?.release(); liveRot = null
+        liveClahe = null
         yBytes = ByteArray(0)
+    }
+
+    /**
+     * Calidad (nitidez/brillo/reflejos) del ÚLTIMO frame pasado a [detectLive], reutilizando su luminancia
+     * ya copiada (sin volver a copiar el plano Y ni asignar buffers). Null si aún no hay frame.
+     */
+    @Synchronized
+    fun analyzeLastFrame(): QualityReport? {
+        val roi = yRoi ?: return null
+        if (roi.empty()) return null
+        return try {
+            // Los umbrales del analizador están calibrados a 640 px (reducción INTER_AREA)
+            val tmp = Mat()
+            try {
+                Cv.downscale(roi, tmp, 640)
+                QualityAnalyzer.analyzeGray(tmp)
+            } finally { tmp.release() }
+        } catch (_: Throwable) { null }
     }
 
     // =====================================================================================
     // Núcleo
     // =====================================================================================
 
-    private fun detectCore(l: Mat, sat: Mat?, b: Buffers, live: Boolean): Candidate? {
+    private fun detectCore(l: Mat, colorChannels: List<Mat>, b: Buffers, live: Boolean): Candidate? {
         val w = l.cols(); val h = l.rows()
         val area = w.toDouble() * h
         b.w = w; b.h = h
@@ -179,30 +211,37 @@ class DocumentDetector(private val tier: DeviceTier) {
         if (b.emaskBytes.size != n) b.emaskBytes = ByteArray(n)
         b.emask.get(0, 0, b.emaskBytes)
 
-        val sources = ArrayList<Pair<Mat, Double>>(4)
-        // 1) Canny automático sobre L
-        autoCanny(b.blur, b.edges)
+        val sources = ArrayList<Pair<Mat, Double>>(6)
+        // 1) Canny automático (percentil del gradiente) sobre L
+        autoCanny(b.blur, b.edges, b)
         var primary: Mat? = null
         if (Core.countNonZero(b.edges) <= 0.12 * area) {
             Imgproc.morphologyEx(b.edges, b.edges, Imgproc.MORPH_CLOSE, kernel3, Point(-1.0, -1.0), 2)
             sources.add(b.edges to 1.0)
             primary = b.edges
         }
-        // 2) Canny sobre saturación ponderada
-        if (sat != null) {
-            Imgproc.GaussianBlur(sat, b.tmp, Size(5.0, 5.0), 0.0)
-            autoCanny(b.tmp, b.edges2)
+        // 2) Bordes de color: saturación ponderada y a/b de Lab (OR de los Canny de cada canal)
+        if (colorChannels.isNotEmpty()) {
+            b.edges2.create(h, w, CvType.CV_8UC1); b.edges2.setTo(Scalar(0.0))
+            for (ch in colorChannels) {
+                Imgproc.GaussianBlur(ch, b.tmp, Size(5.0, 5.0), 0.0)
+                autoCanny(b.tmp, b.colorTmp, b)
+                Core.bitwise_or(b.edges2, b.colorTmp, b.edges2)
+            }
             if (Core.countNonZero(b.edges2) <= 0.12 * area) {
                 Imgproc.morphologyEx(b.edges2, b.edges2, Imgproc.MORPH_CLOSE, kernel3, Point(-1.0, -1.0), 2)
                 sources.add(b.edges2 to 1.0)
             }
         }
-        // 3) Segmentación Otsu (papel claro vs fondo; RETR_LIST también encuentra el caso inverso)
+        // 3) Máscara sensible cerrada como fuente de contornos (bordes de bajo contraste)
+        Imgproc.morphologyEx(b.emask, b.emaskClosed, Imgproc.MORPH_CLOSE, kernel3, Point(-1.0, -1.0), 2)
+        if (Core.countNonZero(b.emaskClosed) <= 0.2 * area) sources.add(b.emaskClosed to 0.85)
+        // 4) Segmentación Otsu (papel claro vs fondo; RETR_LIST también encuentra el caso inverso)
         Imgproc.GaussianBlur(l, b.otsu, Size(7.0, 7.0), 0.0)
         Imgproc.threshold(b.otsu, b.otsu, 0.0, 255.0, Imgproc.THRESH_BINARY or Imgproc.THRESH_OTSU)
         Imgproc.morphologyEx(b.otsu, b.otsu, Imgproc.MORPH_OPEN, kernel3, Point(-1.0, -1.0), 2)
         sources.add(b.otsu to 0.95)
-        // 4) Líneas de Hough extendidas (cierra contornos rotos)
+        // 5) Líneas de Hough extendidas (cierra contornos rotos)
         val houghSrc = primary ?: b.emask
         Imgproc.HoughLinesP(houghSrc, b.lines, 1.0, Math.PI / 180.0, max(30, (w * 0.12).roundToInt()), w * 0.15, w * 0.04)
         if (!b.lines.empty()) {
@@ -252,34 +291,31 @@ class DocumentDetector(private val tier: DeviceTier) {
         val idx = b.hullIdx.toArray()
         if (idx.size < 4) return null
         val hullPts = Array(idx.size) { pts[idx[it]] }
-        val hull2f = MatOfPoint2f(*hullPts)
-        try {
-            val peri = Imgproc.arcLength(hull2f, true)
-            var approx: Array<Point> = hullPts
-            for (eps in doubleArrayOf(0.01, 0.02, 0.03, 0.05)) {
-                Imgproc.approxPolyDP(hull2f, b.approx, eps * peri, true)
-                approx = b.approx.toArray()
-                if (approx.size <= 8) break
-            }
-            var best: Candidate? = null
-            if (approx.size in 4..8) {
-                val q = if (approx.size == 4) orderPoints(approx) else best4(approx)
-                val s = scoreQuad(q, b, live)
-                if (s > 0) best = Candidate(q, s * weight * (if (approx.size == 4) 1.0 else 0.92))
-            }
-            // Rectángulo mínimo (documentos con esquinas dobladas/tapadas)
-            val rr = Imgproc.minAreaRect(hull2f)
-            val box = arrayOfNulls<Point>(4).also { rr.points(it) }.map { it!! }.toTypedArray()
-            val qr = orderPoints(box)
-            val sr = scoreQuad(qr, b, live)
-            if (sr > 0) {
-                val cr = Candidate(qr, sr * weight * 0.7)
-                if (best == null || cr.score > best.score) best = cr
-            }
-            return best
-        } finally {
-            hull2f.release()
+        val hull2f = b.hull2f
+        hull2f.fromArray(*hullPts)
+        val peri = Imgproc.arcLength(hull2f, true)
+        var approx: Array<Point> = hullPts
+        for (eps in doubleArrayOf(0.01, 0.02, 0.03, 0.05)) {
+            Imgproc.approxPolyDP(hull2f, b.approx, eps * peri, true)
+            approx = b.approx.toArray()
+            if (approx.size <= 8) break
         }
+        var best: Candidate? = null
+        if (approx.size in 4..8) {
+            val q = if (approx.size == 4) orderPoints(approx) else best4(approx)
+            val s = scoreQuad(q, b, live)
+            if (s > 0) best = Candidate(q, s * weight * (if (approx.size == 4) 1.0 else 0.92))
+        }
+        // Rectángulo mínimo (documentos con esquinas dobladas/tapadas)
+        val rr = Imgproc.minAreaRect(hull2f)
+        val box = arrayOfNulls<Point>(4).also { rr.points(it) }.map { it!! }.toTypedArray()
+        val qr = orderPoints(box)
+        val sr = scoreQuad(qr, b, live)
+        if (sr > 0) {
+            val cr = Candidate(qr, sr * weight * 0.7)
+            if (best == null || cr.score > best.score) best = cr
+        }
+        return best
     }
 
     /** Puntuación 0..1 de un cuadrilátero ordenado (tl,tr,br,bl) en coords de trabajo; -1 si inválido. */
@@ -332,21 +368,45 @@ class DocumentDetector(private val tier: DeviceTier) {
         return if (total == 0) 0.0 else hit.toDouble() / total
     }
 
-    private fun autoCanny(blurred: Mat, dst: Mat) {
-        val hist = Cv.histogram(blurred)
-        val v = Cv.percentile(hist, 0.5).toDouble()
-        val lo = max(10.0, 0.66 * v)
-        val hi = min(255.0, max(lo * 2.0, 1.33 * v))
+    /**
+     * Canny con umbrales derivados de la distribución del MÓDULO DEL GRADIENTE (norma L1 de Sobel, la misma
+     * que usa Canny): hi = percentil 90, lo = 0.4·hi. Independiente del brillo medio de la escena.
+     */
+    private fun autoCanny(blurred: Mat, dst: Mat, b: Buffers) {
+        Imgproc.Sobel(blurred, b.gx, CvType.CV_16S, 1, 0, 3)
+        Imgproc.Sobel(blurred, b.gy, CvType.CV_16S, 0, 1, 3)
+        // |gx|/8 + |gy|/8 en 8 bits (satura en 255 -> 2040 real, suficiente para el percentil)
+        Core.convertScaleAbs(b.gx, b.mag, 0.125)
+        Core.convertScaleAbs(b.gy, b.mag2, 0.125)
+        Core.add(b.mag, b.mag2, b.mag)
+        val p = Cv.percentile(Cv.histogram(b.mag), 0.90) * 8.0
+        val hi = p.coerceIn(30.0, 400.0)
+        val lo = max(10.0, 0.4 * hi)
         Imgproc.Canny(blurred, dst, lo, hi)
     }
 
-    /** Refinamiento sub-píxel de las esquinas a resolución completa (con salvaguarda de desplazamiento). */
+    /** CLAHE suave sobre la luminancia si la escena es oscura (in-place). */
+    private fun enhanceLowLight(l: Mat, clahe: org.opencv.imgproc.CLAHE?) {
+        if (clahe == null && Core.mean(l).`val`[0] >= LOW_LIGHT_MEAN) return
+        (clahe ?: Imgproc.createCLAHE(2.0, Size(8.0, 8.0))).apply(l, l)
+    }
+
+    /**
+     * Refinamiento sub-píxel de las esquinas a resolución completa, con salvaguardas:
+     *  - no se refinan esquinas pegadas al borde de la imagen (documento parcialmente fuera, ya recortado);
+     *  - desplazamiento máximo = ventana;
+     *  - el soporte de borde (gradiente medio) de los dos lados adyacentes, medido a resolución completa
+     *    saltando la zona de la esquina (tarjetas con esquinas redondeadas), no puede empeorar; si empeora se
+     *    conserva el punto original (evita saltar a texto, sombras o marcos).
+     */
     private fun refineCorners(bitmap: Bitmap, pts: FloatArray) {
         val w = bitmap.width; val h = bitmap.height
         val win = (max(w, h) / 250).coerceIn(5, 20)
         val half = win * 3
+        val orig = pts.copyOf()
         for (i in 0 until 4) {
             val px = pts[i * 2]; val py = pts[i * 2 + 1]
+            if (px < 2f || py < 2f || px > w - 3f || py > h - 3f) continue
             val x0 = (px.roundToInt() - half).coerceIn(0, max(0, w - 1))
             val y0 = (py.roundToInt() - half).coerceIn(0, max(0, h - 1))
             val x1 = (px.roundToInt() + half).coerceIn(0, w)
@@ -366,8 +426,36 @@ class DocumentDetector(private val tier: DeviceTier) {
                 )
                 val r = p.toArray()[0]
                 val nx = r.x + x0; val ny = r.y + y0
-                if (hypot(nx - px, ny - py) <= win * 1.5 && nx.isFinite() && ny.isFinite()) {
-                    pts[i * 2] = nx.toFloat(); pts[i * 2 + 1] = ny.toFloat()
+                if (nx.isFinite() && ny.isFinite() && hypot(nx - px, ny - py) <= win.toDouble()) {
+                    // Gradiente del recorte (norma L1) para medir el soporte de los lados adyacentes
+                    val gxm = bag.mat(); val gym = bag.mat(); val ax = bag.mat(); val ay = bag.mat(); val mag = bag.mat()
+                    Imgproc.Sobel(g, gxm, CvType.CV_16S, 1, 0, 3)
+                    Imgproc.Sobel(g, gym, CvType.CV_16S, 0, 1, 3)
+                    Core.convertScaleAbs(gxm, ax, 0.25); Core.convertScaleAbs(gym, ay, 0.25)
+                    Core.add(ax, ay, mag)
+                    val mb = ByteArray(rw * rh); mag.get(0, 0, mb)
+                    val prev = (i + 3) % 4; val next = (i + 1) % 4
+                    fun support(cx: Double, cy: Double): Double {
+                        var sum = 0.0; var n = 0
+                        for (nb in intArrayOf(prev, next)) {
+                            val dx = orig[nb * 2] - orig[i * 2]; val dy = orig[nb * 2 + 1] - orig[i * 2 + 1]
+                            val len = hypot(dx.toDouble(), dy.toDouble())
+                            if (len < 1) continue
+                            val ux = dx / len; val uy = dy / len
+                            var t = win.toDouble()
+                            while (t < half) {
+                                val sx = (cx + ux * t - x0).roundToInt(); val sy = (cy + uy * t - y0).roundToInt()
+                                if (sx in 0 until rw && sy in 0 until rh) { sum += mb[sy * rw + sx].toInt() and 0xFF; n++ }
+                                t += 1.0
+                            }
+                        }
+                        return if (n == 0) 0.0 else sum / n
+                    }
+                    val before = support(px.toDouble(), py.toDouble())
+                    val after = support(nx, ny)
+                    if (after >= before * 0.95) {
+                        pts[i * 2] = nx.toFloat(); pts[i * 2 + 1] = ny.toFloat()
+                    }
                 }
             } catch (_: Throwable) {
                 // conservar la esquina original
@@ -381,6 +469,9 @@ class DocumentDetector(private val tier: DeviceTier) {
     private fun confidenceOf(score: Double): Float = ((score - 0.45) / 0.4).coerceIn(0.0, 1.0).toFloat()
 
     companion object {
+        /** Luminancia media por debajo de la cual se aplica CLAHE antes de buscar bordes. */
+        private const val LOW_LIGHT_MEAN = 80.0
+
         /** Ordena 4 puntos como tl, tr, br, bl (sentido horario en coordenadas de imagen). */
         internal fun orderPoints(p: Array<Point>): FloatArray {
             val cx = p.sumOf { it.x } / p.size; val cy = p.sumOf { it.y } / p.size

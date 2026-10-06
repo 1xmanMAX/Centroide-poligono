@@ -97,9 +97,15 @@ internal class SmoothedQuad {
         if (det == null) return
         val fw = det.frameWidth.toFloat(); val fh = det.frameHeight.toFloat()
         if (fw <= 0f || fh <= 0f) return
+        // Coordenadas relativas a la zona visible (cropRect del ViewPort compartido con la vista previa).
+        val cl = det.cropLeft; val ct = det.cropTop
+        val cw = (det.cropRight - det.cropLeft).takeIf { it > 0.01f } ?: 1f
+        val ch = (det.cropBottom - det.cropTop).takeIf { it > 0.01f } ?: 1f
         val q = det.quad
-        target = floatArrayOf(q.tl.x / fw, q.tl.y / fh, q.tr.x / fw, q.tr.y / fh, q.br.x / fw, q.br.y / fh, q.bl.x / fw, q.bl.y / fh)
-        frameW = fw; frameH = fh
+        fun nx(x: Float) = (x / fw - cl) / cw
+        fun ny(y: Float) = (y / fh - ct) / ch
+        target = floatArrayOf(nx(q.tl.x), ny(q.tl.y), nx(q.tr.x), ny(q.tr.y), nx(q.br.x), ny(q.br.y), nx(q.bl.x), ny(q.bl.y))
+        frameW = fw * cw; frameH = fh * ch
         lastSeen = nowMs
         signal.value = signal.value + 1
     }

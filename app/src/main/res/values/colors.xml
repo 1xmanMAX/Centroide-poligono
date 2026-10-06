@@ -1,5 +1,6 @@
 <resources>
-    <color name="brand_bg">#0B0F1A</color>
+    <!-- Fondo de ventana/splash: claro por defecto, oscuro en values-night (coincide con EscanerTheme). -->
+    <color name="brand_bg">#F6F7FC</color>
     <color name="brand_primary">#6C5CFF</color>
     <color name="brand_accent">#00D1B2</color>
     <color name="white">#FFFFFF</color>

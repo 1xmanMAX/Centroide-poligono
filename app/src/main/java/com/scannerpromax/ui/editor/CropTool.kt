@@ -239,7 +239,16 @@ private fun DrawScope.drawGrid(v: List<Offset>) {
 private fun lerp(a: Offset, b: Offset, t: Float) = Offset(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)
 
 /** Lupa circular con aumento ×2.6 sobre el punto que se arrastra; se coloca lejos del dedo. */
-private fun DrawScope.drawLoupe(image: ImageBitmap, rect: Rect, scale: Float, target: Offset, finger: Offset, accent: Color) {
+internal fun DrawScope.drawLoupe(
+    image: ImageBitmap,
+    rect: Rect,
+    scale: Float,
+    target: Offset,
+    finger: Offset,
+    accent: Color,
+    /** Radio del pincel en px de pantalla (0 = sin anillo). Se dibuja ampliado dentro de la lupa. */
+    brushRadiusPx: Float = 0f,
+) {
     val radius = 58f * density
     val margin = 16f * density
     val zoom = 2.6f
@@ -285,6 +294,9 @@ private fun DrawScope.drawLoupe(image: ImageBitmap, rect: Rect, scale: Float, ta
         val arm = 12f * density
         drawLine(accent, center - Offset(arm, 0f), center + Offset(arm, 0f), strokeWidth = 2f * density, cap = StrokeCap.Round)
         drawLine(accent, center - Offset(0f, arm), center + Offset(0f, arm), strokeWidth = 2f * density, cap = StrokeCap.Round)
+        if (brushRadiusPx > 0f) {
+            drawCircle(Color.White, radius = brushRadiusPx * zoom, center = center, style = Stroke(width = 1.5f * density))
+        }
     }
     drawCircle(Color.White, radius = radius, center = center, style = Stroke(width = 3f * density))
     drawCircle(accent, radius = radius + 1.5f * density, center = center, style = Stroke(width = 1.5f * density))
