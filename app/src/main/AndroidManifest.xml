@@ -35,6 +35,7 @@
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
                 <data android:mimeType="application/pdf" />
             </intent-filter>
         </activity>
