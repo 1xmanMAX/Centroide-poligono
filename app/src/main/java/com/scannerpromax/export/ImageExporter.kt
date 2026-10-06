@@ -37,23 +37,29 @@ class ImageExporter(private val context: Context) {
         }
 
     /** Guarda un PDF en Descargas (MediaStore Downloads/EscanerProMax en API 29+). */
-    suspend fun savePdfToDownloads(pdf: File, displayName: String): Uri = withContext(Dispatchers.IO) {
+    suspend fun savePdfToDownloads(pdf: File, displayName: String): Uri = saveToDownloads(pdf, displayName, MIME_PDF, "pdf")
+
+    /**
+     * Guarda cualquier archivo (PDF, .txt, .docx…) en Descargas/EscanerProMax. [extension] sin punto; se añade al
+     * nombre si falta.
+     */
+    suspend fun saveToDownloads(file: File, displayName: String, mime: String, extension: String): Uri = withContext(Dispatchers.IO) {
         var name = sanitizeName(displayName).ifEmpty { "Escaneo" }
-        if (!name.endsWith(".pdf", ignoreCase = true)) name += ".pdf"
+        if (!name.endsWith(".$extension", ignoreCase = true)) name += ".$extension"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-                put(MediaStore.MediaColumns.MIME_TYPE, MIME_PDF)
+                put(MediaStore.MediaColumns.MIME_TYPE, mime)
                 put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/$FOLDER")
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
             insertAndWrite(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) { out ->
-                pdf.inputStream().use { it.copyTo(out, BUFFER) }
+                file.inputStream().use { it.copyTo(out, BUFFER) }
             }
         } else {
             @Suppress("DEPRECATION")
             val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), FOLDER)
-            writeLegacy(dir, name, MIME_PDF) { out -> pdf.inputStream().use { it.copyTo(out, BUFFER) } }
+            writeLegacy(dir, name, mime) { out -> file.inputStream().use { it.copyTo(out, BUFFER) } }
         }
     }
 

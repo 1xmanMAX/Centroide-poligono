@@ -29,7 +29,9 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalDensity
 import com.scannerpromax.domain.ScanMode
+import com.scannerpromax.ui.theme.LocalPerf
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
@@ -169,16 +171,24 @@ private const val HOLD_MS = 450L
 /**
  * Superposición: cuadrilátero detectado (relleno translúcido + borde con degradado de marca + esquinas),
  * guía de tarjeta (DNI) o de lomo (libro).
+ *
+ * [stableProgress] se lee como lambda DENTRO de la fase de dibujo: su cambio (5-7 Hz durante la autocaptura)
+ * sólo redibuja este Canvas, sin recomponer la pantalla. Sin asignaciones por frame: Path, coordenadas y trazo
+ * se reutilizan; el degradado se recrea sólo si cambian sus extremos o el alfa (en gama baja, color sólido).
  */
 @Composable
 internal fun DetectionOverlay(
     quad: SmoothedQuad,
     mode: ScanMode,
-    stableProgress: Float,
+    stableProgress: () -> Float,
     primary: Color,
     secondary: Color,
     modifier: Modifier = Modifier,
 ) {
+    val lowEnd = LocalPerf.current.lowEnd
+    val density = LocalDensity.current.density
+    val cache = remember { OverlayCache() }
+    val stroke = remember(density) { Stroke(width = 3.5f * density, cap = StrokeCap.Round, join = StrokeJoin.Round) }
     Canvas(modifier.fillMaxSize()) {
         when (mode) {
             ScanMode.ID_CARD -> drawIdGuide(primary, secondary)
@@ -189,40 +199,73 @@ internal fun DetectionOverlay(
         @Suppress("UNUSED_VARIABLE") val v = quad.version // lectura en fase de dibujo
         val a = quad.alpha
         if (a <= 0.01f) return@Canvas
+        val progress = stableProgress()
         val map = FrameMapping.fillCenter(size.width, size.height, quad.frameW, quad.frameH)
         val p = quad.points
-        val pts = List(4) { i -> map.toView(p[i * 2], p[i * 2 + 1]) }
-        val path = Path().apply {
-            moveTo(pts[0].x, pts[0].y)
-            for (i in 1 until 4) lineTo(pts[i].x, pts[i].y)
-            close()
+        val xy = cache.xy
+        for (i in 0 until 4) {
+            xy[i * 2] = map.offsetX + p[i * 2] * map.frameW * map.scale
+            xy[i * 2 + 1] = map.offsetY + p[i * 2 + 1] * map.frameH * map.scale
         }
-        val locked = stableProgress > 0.02f
+        val path = cache.path
+        path.reset()
+        path.moveTo(xy[0], xy[1])
+        for (i in 1 until 4) path.lineTo(xy[i * 2], xy[i * 2 + 1])
+        path.close()
+        val locked = progress > 0.02f
         val fillColor = if (locked) secondary else primary
-        drawPath(path, fillColor.copy(alpha = 0.16f * a + 0.10f * stableProgress * a))
-        val brush = Brush.linearGradient(listOf(primary.copy(alpha = a), secondary.copy(alpha = a)), start = pts[0], end = pts[2])
-        drawPath(path, brush, style = Stroke(width = 3.5f * density, cap = StrokeCap.Round, join = StrokeJoin.Round))
+        drawPath(path, fillColor, alpha = (0.16f * a + 0.10f * progress * a).coerceIn(0f, 1f))
+        if (lowEnd) {
+            drawPath(path, primary, alpha = a, style = stroke)
+        } else {
+            drawPath(path, cache.brush(primary, secondary, a, xy), style = stroke)
+        }
         // Esquinas tipo "L" para un aspecto premium
         val armLen = 18f * density
         for (i in 0 until 4) {
-            val c = pts[i]
-            val prev = pts[(i + 3) % 4]
-            val next = pts[(i + 1) % 4]
-            drawArm(c, prev, armLen, a)
-            drawArm(c, next, armLen, a)
-            drawCircle(Color.White.copy(alpha = a), radius = 4.5f * density, center = c)
-            drawCircle(fillColor.copy(alpha = a), radius = 2.6f * density, center = c)
+            val prev = (i + 3) % 4
+            val next = (i + 1) % 4
+            drawArm(xy[i * 2], xy[i * 2 + 1], xy[prev * 2], xy[prev * 2 + 1], armLen, a)
+            drawArm(xy[i * 2], xy[i * 2 + 1], xy[next * 2], xy[next * 2 + 1], armLen, a)
+            val c = Offset(xy[i * 2], xy[i * 2 + 1])
+            drawCircle(Color.White, radius = 4.5f * density, center = c, alpha = a)
+            drawCircle(fillColor, radius = 2.6f * density, center = c, alpha = a)
         }
     }
 }
 
-private fun DrawScope.drawArm(from: Offset, toward: Offset, len: Float, alpha: Float) {
-    val dx = toward.x - from.x; val dy = toward.y - from.y
+/** Objetos reutilizados entre frames por [DetectionOverlay]. */
+private class OverlayCache {
+    val path = Path()
+    val xy = FloatArray(8)
+    private var brush: Brush? = null
+    private var key = FloatArray(5)
+    private var c0 = Color.Unspecified
+    private var c1 = Color.Unspecified
+
+    /** Degradado tl -> br; se recrea sólo si los extremos se mueven más de ~1 px o cambia el alfa. */
+    fun brush(primary: Color, secondary: Color, a: Float, xy: FloatArray): Brush {
+        val b = brush
+        if (b != null && primary == c0 && secondary == c1 &&
+            kotlin.math.abs(key[0] - xy[0]) < 1f && kotlin.math.abs(key[1] - xy[1]) < 1f &&
+            kotlin.math.abs(key[2] - xy[4]) < 1f && kotlin.math.abs(key[3] - xy[5]) < 1f &&
+            kotlin.math.abs(key[4] - a) < 0.02f
+        ) return b
+        key[0] = xy[0]; key[1] = xy[1]; key[2] = xy[4]; key[3] = xy[5]; key[4] = a
+        c0 = primary; c1 = secondary
+        return Brush.linearGradient(
+            listOf(primary.copy(alpha = a), secondary.copy(alpha = a)),
+            start = Offset(xy[0], xy[1]), end = Offset(xy[4], xy[5]),
+        ).also { brush = it }
+    }
+}
+
+private fun DrawScope.drawArm(fx: Float, fy: Float, tx: Float, ty: Float, len: Float, alpha: Float) {
+    val dx = tx - fx; val dy = ty - fy
     val d = hypot(dx, dy)
     if (d < 1f) return
     val l = minOf(len, d / 3f)
-    val end = Offset(from.x + dx / d * l, from.y + dy / d * l)
-    drawLine(Color.White.copy(alpha = alpha), from, end, strokeWidth = 5f * density, cap = StrokeCap.Round)
+    drawLine(Color.White, Offset(fx, fy), Offset(fx + dx / d * l, fy + dy / d * l), strokeWidth = 5f * density, cap = StrokeCap.Round, alpha = alpha)
 }
 
 private fun DrawScope.drawIdGuide(primary: Color, secondary: Color) {

@@ -25,6 +25,11 @@ import kotlin.math.sqrt
 class PageProcessor(val tier: DeviceTier) {
     val detector = DocumentDetector(tier)
 
+    init {
+        // Hilos de OpenCV acordes al equipo (en gama baja queda un núcleo libre para la interfaz)
+        Cv.configureThreads(tier)
+    }
+
     /** Caché de una entrada: el original reducido para vistas previas (los sliders llaman muchas veces). */
     private class PreviewSource(val ref: WeakReference<Bitmap>, val generation: Int, val scale: Double, val mat: Mat)
     private var previewSource: PreviewSource? = null
@@ -270,8 +275,11 @@ class PageProcessor(val tier: DeviceTier) {
 
     /** Libera [geo]; devuelve el Mat final (8UC3 u 8UC1). */
     private fun finish(geo: Mat, edits: PageEdits, opt: ImageEnhancer.Options, progress: ProgressCallback?): Mat {
+        // AUTO se clasifica una sola vez (a 256 px) y se usa tanto para el filtro como para decidir la limpieza
+        val analysis = if (edits.filter == FilterType.AUTO) runCatching { ImageEnhancer.analyzeMat(geo) }.getOrNull() else null
+        val effective = ImageEnhancer.effectiveFilter(edits.filter, analysis)
         var cur = try {
-            ImageEnhancer.applyMat(geo, edits.filter, edits.adjustments, opt)
+            ImageEnhancer.applyMat(geo, edits.filter, edits.adjustments, opt, analysis)
         } finally {
             geo.release()
         }
@@ -281,7 +289,7 @@ class PageProcessor(val tier: DeviceTier) {
             cur.release(); cur = r
         }
         progress?.invoke(0.8f)
-        if (edits.autoDenoise && edits.filter != FilterType.ORIGINAL && edits.filter != FilterType.VIVID) {
+        if (edits.autoDenoise && effective != FilterType.ORIGINAL && effective != FilterType.VIVID) {
             val r = Cleanup.denoiseMat(cur)
             cur.release(); cur = r
         }

@@ -64,6 +64,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.derivedStateOf
@@ -101,9 +102,13 @@ import com.scannerpromax.ui.components.LoadingOverlay
 import com.scannerpromax.ui.components.PrimaryFab
 import com.scannerpromax.ui.components.RenameDialog
 import com.scannerpromax.ui.components.SectionHeader
+import com.scannerpromax.ui.theme.LocalPerf
 import com.scannerpromax.ui.theme.PillShape
 import com.scannerpromax.ui.theme.brand
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import java.io.File
@@ -126,6 +131,7 @@ fun HomeScreen(
     val scope = rememberCoroutineScope()
     val focus = LocalFocusManager.current
     val brand = MaterialTheme.brand
+    val perf = LocalPerf.current
     val snackbar = remember { SnackbarHostState() }
 
     val documents by container.documents.documents.collectAsStateWithLifecycle()
@@ -150,13 +156,25 @@ fun HomeScreen(
         }
     }
 
-    // Búsqueda por título y por texto reconocido (OCR) de las páginas.
-    val filtered = remember(documents, query) {
+    // Búsqueda por título y por texto reconocido (OCR) de las páginas. Buscar en el texto OCR de cientos de
+    // páginas en cada tecla bloqueaba el hilo principal en gama baja: se hace en segundo plano con un pequeño
+    // retardo (las pulsaciones rápidas cancelan la búsqueda anterior). Sin consulta, la lista va directa.
+    var filtered by remember { mutableStateOf(documents) }
+    LaunchedEffect(documents, query) {
         val q = query.trim()
-        if (q.isEmpty()) documents
-        else documents.filter { d ->
-            d.title.contains(q, ignoreCase = true) || d.pages.any { it.ocrText?.contains(q, ignoreCase = true) == true }
+        val result = if (q.isEmpty()) {
+            documents
+        } else {
+            delay(SEARCH_DEBOUNCE_MS)
+            withContext(Dispatchers.Default) {
+                documents.filter { d ->
+                    d.title.contains(q, ignoreCase = true) || d.pages.any { p ->
+                        (p.ocrEditedText ?: p.ocrText)?.contains(q, ignoreCase = true) == true
+                    }
+                }
+            }
         }
+        filtered = result
     }
     val totalPages = remember(documents) { documents.sumOf { it.pages.size } }
 
@@ -229,7 +247,7 @@ fun HomeScreen(
                     onClick = { onScan(ScanMode.DOCUMENT) },
                     expanded = fabExpanded,
                     // El halo pulsante solo en el primer uso (sin documentos): ahorra batería y no distrae.
-                    pulse = documents.isEmpty() && !container.deviceTier.isLowRam,
+                    pulse = documents.isEmpty() && perf.richEffects,
                     modifier = Modifier.navigationBarsPadding(),
                 )
             },
@@ -307,6 +325,10 @@ fun HomeScreen(
                             val thumb = remember(doc.id, doc.pages.firstOrNull()?.thumbFile) {
                                 doc.pages.firstOrNull()?.thumbFile?.let { File(container.documents.docDir(doc.id), it) }
                             }
+                            // Misma instancia mientras el documento no cambie: la tarjeta se salta la recomposición.
+                            val actions = remember(doc) { actionsFor(doc) }
+                            // Sin animación de recolocación si el sistema tiene "Quitar animaciones".
+                            val itemModifier = if (perf.reduceMotion) Modifier else Modifier.animateItem()
                             if (gridMode) {
                                 DocumentCard(
                                     title = doc.title,
@@ -315,8 +337,8 @@ fun HomeScreen(
                                     thumbnail = thumb,
                                     mode = doc.mode,
                                     onClick = { onOpenDocument(doc.id) },
-                                    actions = actionsFor(doc),
-                                    modifier = Modifier.animateItem(),
+                                    actions = actions,
+                                    modifier = itemModifier,
                                 )
                             } else {
                                 DocumentListItem(
@@ -326,8 +348,8 @@ fun HomeScreen(
                                     thumbnail = thumb,
                                     mode = doc.mode,
                                     onClick = { onOpenDocument(doc.id) },
-                                    actions = actionsFor(doc),
-                                    modifier = Modifier.animateItem(),
+                                    actions = actions,
+                                    modifier = itemModifier,
                                 )
                             }
                         }
@@ -368,6 +390,8 @@ fun HomeScreen(
         )
     }
 }
+
+private const val SEARCH_DEBOUNCE_MS = 150L
 
 private fun LazyGridScope.fullItem(key: String, content: @Composable () -> Unit) {
     item(key = key, span = { GridItemSpan(maxLineSpan) }, contentType = key) { content() }

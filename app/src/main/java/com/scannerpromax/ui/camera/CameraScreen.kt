@@ -88,6 +88,7 @@ import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.FlashlightOn
 import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.NightsStay
 import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.SkipNext
@@ -105,14 +106,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -151,12 +155,17 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.withStarted
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import coil.size.Precision
 import com.scannerpromax.data.AppSettings
 import com.scannerpromax.di.AppContainer
 import com.scannerpromax.domain.Document
 import com.scannerpromax.domain.FilterType
 import com.scannerpromax.domain.PageEdits
 import com.scannerpromax.domain.ScanMode
+import com.scannerpromax.imaging.Cv
+import com.scannerpromax.imaging.HeavyWork
+import com.scannerpromax.imaging.MultiFrameFusion
 import com.scannerpromax.ui.components.GradientButton
 import com.scannerpromax.ui.components.LoadingOverlay
 import com.scannerpromax.ui.theme.brand
@@ -168,11 +177,13 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.math.abs
 import kotlin.math.hypot
@@ -367,6 +378,16 @@ private fun PermissionBullet(icon: ImageVector, text: String) {
 /** Alto reservado para los controles bajo la vista previa (modos + obturador). */
 private val CONTROLS_HEIGHT = 178.dp
 
+/**
+ * Modo poca luz / anti-reflejos (ráfaga + fusión multi-cuadro). AUTO: se activa solo cuando el análisis en vivo
+ * detecta oscuridad o reflejos.
+ */
+private enum class LowLightSetting(val label: String) {
+    AUTO("Poca luz / anti-reflejos: automático"),
+    ON("Poca luz / anti-reflejos: activado"),
+    OFF("Poca luz / anti-reflejos: desactivado"),
+}
+
 @Composable
 private fun CameraContent(
     container: AppContainer,
@@ -384,7 +405,8 @@ private fun CameraContent(
     val gradStart = brand.gradientStart
     val gradEnd = brand.gradientEnd
 
-    val settings by container.settings.settings.collectAsState(initial = AppSettings())
+    val settingsFlow = remember(container) { container.settings.settings }
+    val settings by settingsFlow.collectAsState(initial = AppSettings())
     val engine = remember { CameraEngine(context.applicationContext, container.pageProcessor.detector, container.deviceTier) }
     val processor = remember { CaptureProcessor(container) }
     // Ámbito de la pantalla (animaciones, captura). El procesamiento va en [captureScope].
@@ -411,6 +433,11 @@ private fun CameraContent(
     var viewSize by remember { mutableStateOf(IntSize.Zero) }
     var stableProgress by remember { mutableFloatStateOf(0f) }
     var focusPoint by remember { mutableStateOf<Offset?>(null) }
+    var lowLight by rememberSaveable { mutableStateOf(LowLightSetting.AUTO) }
+    /** Ráfaga en curso: fotos hechas / total (0 = sin ráfaga). */
+    var burstShot by remember { mutableIntStateOf(0) }
+    var burstTotal by remember { mutableIntStateOf(0) }
+    var burstForGlare by remember { mutableStateOf(false) }
     var focusKey by remember { mutableIntStateOf(0) }
     val shutterFlash = remember { Animatable(0f) }
     val smoothed = rememberSmoothedQuad()
@@ -435,7 +462,15 @@ private fun CameraContent(
 
     DisposableEffect(engine) {
         engine.bind(lifecycleOwner, previewView, flash)
+        // Gama baja: menos hilos de OpenCV con la cámara abierta. Se aplica desde el hilo de baja prioridad para
+        // que los hilos del pool (si se recrean) hereden esa prioridad.
+        val tier = container.deviceTier
+        HeavyWork.post { Cv.setCameraActive(true, tier) }
+        // Sin OCR de fondo con la cámara abierta: vista previa, análisis y ráfagas tienen la CPU.
+        container.documents.pauseBackgroundOcr()
         onDispose {
+            container.documents.resumeBackgroundOcr()
+            HeavyWork.post { Cv.setCameraActive(false, tier) }
             engine.release()
             workScope.cancel()
             // Los trabajos de procesamiento NO se cancelan: terminan en segundo plano y guardan sus páginas.
@@ -444,6 +479,8 @@ private fun CameraContent(
         }
     }
     LaunchedEffect(flash) { engine.setFlash(flash) }
+    // Con capturas mejorándose en segundo plano, el análisis en vivo cede CPU (la UI sigue fluida en gama baja).
+    LaunchedEffect(pendingJobs) { engine.backgroundBusy = pendingJobs > 0 }
     LaunchedEffect(mode) {
         engine.detectionEnabled = mode != ScanMode.PHOTO
         stableProgress = 0f
@@ -491,12 +528,33 @@ private fun CameraContent(
         return map.toView(cx, cy)
     }
 
+    /** ¿Va a disparar el flash en la próxima foto? (ON siempre; AUTO, con poca luz). */
+    fun flashWillFire(): Boolean = hasFlash && (flash == FlashSetting.ON || (flash == FlashSetting.AUTO && quality.tooDark))
+
+    /**
+     * ¿Usar ráfaga + fusión? Manual (activado/desactivado) o automático si hay poca luz o reflejos.
+     * Nunca si el flash va a disparar: cada foto llevaría su predisparo (1-2 s en gama baja) y el reflejo del
+     * flash está fijo respecto a la cámara, así que el anti-reflejos no puede quitarlo. Con la linterna
+     * encendida tampoco se usa el anti-reflejos (mismo motivo).
+     */
+    fun burstWanted(): Boolean {
+        if (flashWillFire()) return false
+        val torchGlareOnly = hasFlash && flash == FlashSetting.TORCH && !quality.tooDark
+        return when (lowLight) {
+            LowLightSetting.ON -> !torchGlareOnly || quality.tooDark
+            LowLightSetting.OFF -> false
+            LowLightSetting.AUTO -> quality.tooDark || (quality.glare && mode != ScanMode.PHOTO && !torchGlareOnly)
+        }
+    }
+
     fun captureNow(auto: Boolean = false) {
         if (capturing || finishing || !ready) return
         capturing = true
         val m = mode
         val guide = if (m == ScanMode.ID_CARD) guideNormalized() else null
         val focusTarget = if (auto) quadCenterInView() else null
+        val burst = burstWanted()
+        val glareMode = quality.glare && !quality.tooDark
         workScope.launch {
             // Autocaptura: enfocar en el documento y esperar al AF (las cámaras baratas "cazan" el foco).
             if (focusTarget != null) engine.focusAndWait(previewView, focusTarget.x, focusTarget.y)
@@ -505,34 +563,49 @@ private fun CameraContent(
                 shutterFlash.snapTo(0.8f)
                 shutterFlash.animateTo(0f, tween(320))
             }
-            val file = container.documents.newCaptureFile()
-            try {
-                engine.capture(file, previewView)
+            val count = if (burst) MultiFrameFusion.recommendedFrameCount(container.deviceTier) else 1
+            val files = List(count) { container.documents.newCaptureFile() }
+            val shots: List<File> = try {
+                if (count == 1) {
+                    engine.capture(files[0], previewView)
+                    files
+                } else {
+                    burstForGlare = glareMode
+                    burstShot = 0
+                    burstTotal = count
+                    engine.captureBurst(files, previewView) { n -> burstShot = n }
+                }
             } catch (c: CancellationException) {
-                file.delete()
+                files.forEach { it.delete() }
+                burstTotal = 0
                 throw c
             } catch (t: Throwable) {
+                files.forEach { it.delete() }
                 capturing = false
+                burstTotal = 0
                 toast("No se pudo capturar la foto")
                 return@launch
             }
+            burstTotal = 0
             capturing = false
             capturedThisSession++
             engine.resetDetection()
+            // La fusión (si hay ráfaga) corre en el trabajo de fondo, antes del flujo normal de cada modo.
+            suspend fun shotFile(): File = processor.mergeBurst(shots, removeGlare = true)
             when (m) {
-                ScanMode.BOOK -> launchJob { processor.addBook(ensureDoc(m), file, extraEdits(m)) }
+                ScanMode.BOOK -> launchJob { processor.addBook(ensureDoc(m), shotFile(), extraEdits(m)) }
                 ScanMode.ID_CARD -> {
                     val front = idFront
                     val filter = cardFilter()
                     if (front == null) {
-                        idFront = captureScope.async { runCatching { processor.cropCardSide(file, guide, filter) } }
+                        idFront = captureScope.async { runCatching { processor.cropCardSide(shotFile(), guide, filter) } }
                     } else {
                         idFront = null
                         launchJob {
                             val f = front.await().getOrThrow()
                             var b: Bitmap? = null
                             try {
-                                b = processor.cropCardSide(file, guide, filter)
+                                b = processor.cropCardSide(shotFile(), guide, filter)
                                 processor.addIdCard(ensureDoc(m), f, b, extraEdits(m))
                             } finally {
                                 f.recycle(); b?.recycle()
@@ -540,7 +613,7 @@ private fun CameraContent(
                         }
                     }
                 }
-                else -> launchJob { processor.addStandard(ensureDoc(m), file, m) }
+                else -> launchJob { processor.addStandard(ensureDoc(m), shotFile(), m) }
             }
         }
     }
@@ -677,14 +750,21 @@ private fun CameraContent(
     }
 
     // ---------------------------------------------------------------- UI
+    // stableProgress cambia en cada detección (5-7 Hz): el cuerpo sólo lee este booleano derivado, así la
+    // pantalla entera recompone únicamente cuando cambia el texto del aviso (no varias veces por segundo).
+    val holdingStill by remember { derivedStateOf { stableProgress > 0.05f } }
     val hint = when {
+        burstTotal > 0 && burstForGlare -> "Anti-reflejos · foto ${max(1, burstShot)} de $burstTotal · inclina un poco el móvil"
+        burstTotal > 0 -> "Poca luz · foto ${max(1, burstShot)} de $burstTotal · no te muevas"
         mode == ScanMode.ID_CARD && idFront != null -> "Paso 2 de 2 · Gira la tarjeta y encuadra el REVERSO"
         mode == ScanMode.ID_CARD -> "Paso 1 de 2 · Encuadra el ANVERSO dentro del marco"
+        tooDark && lowLight != LowLightSetting.OFF && !flashWillFire() -> "Poca luz · se tomarán varias fotos y se fusionarán"
         tooDark && hasFlash && flash == FlashSetting.OFF -> "Poca luz · toca aquí para encender la linterna"
         tooDark -> "Poca luz · busca una zona más iluminada"
-        mode != ScanMode.PHOTO && quality.blurry && stableProgress > 0.05f -> "Imagen borrosa · sujeta firme el móvil"
+        mode != ScanMode.PHOTO && quality.blurry && holdingStill -> "Imagen borrosa · sujeta firme el móvil"
+        mode != ScanMode.PHOTO && quality.glare && lowLight != LowLightSetting.OFF && burstWanted() -> "Reflejo · se corregirá con varias fotos (anti-reflejos)"
         mode != ScanMode.PHOTO && quality.glare -> "Reflejo · inclina un poco el móvil"
-        stableProgress > 0.05f -> "No te muevas… capturando"
+        holdingStill -> "No te muevas… capturando"
         else -> modeHint(mode)
     }
 
@@ -695,7 +775,7 @@ private fun CameraContent(
                 transitionSpec = { (fadeIn(tween(220)) + slideInVertically { it / 3 }) togetherWith fadeOut(tween(150)) },
                 label = "hint",
             ) { text ->
-                val isDarkHint = text.startsWith("Poca luz")
+                val isDarkHint = text.startsWith("Poca luz") && burstTotal == 0
                 val isWarn = isDarkHint || text.startsWith("Imagen borrosa") || text.startsWith("Reflejo")
                 HintPill(
                     text = text,
@@ -740,7 +820,7 @@ private fun CameraContent(
                 }
                 ShutterButton(
                     enabled = ready && !capturing && !finishing,
-                    progress = stableProgress,
+                    progress = { stableProgress },
                     busy = capturing,
                     onClick = { captureNow() },
                 )
@@ -806,12 +886,10 @@ private fun CameraContent(
                                 )
                             },
                     ) {
-                        DetectionOverlay(smoothed, mode, stableProgress, gradStart, gradEnd)
+                        DetectionOverlay(smoothed, mode, { stableProgress }, gradStart, gradEnd)
                         FocusRing(focusPoint, focusKey, gradEnd)
                     }
-                    if (shutterFlash.value > 0f) {
-                        Box(Modifier.fillMaxSize().graphicsLayer { alpha = shutterFlash.value }.background(Color.White))
-                    }
+                    ShutterFlashOverlay { shutterFlash.value }
                     if (stacked) {
                         Box(Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp, start = 12.dp, end = 12.dp)) { hintArea() }
                     }
@@ -852,6 +930,15 @@ private fun CameraContent(
         ) {
             RoundIconButton(Icons.Filled.Close, "Cerrar", onClick = { requestClose() })
             Spacer(Modifier.weight(1f))
+            LowLightToggle(
+                setting = lowLight,
+                active = burstWanted(),
+                onClick = {
+                    lowLight = LowLightSetting.entries[(lowLight.ordinal + 1) % LowLightSetting.entries.size]
+                    toast(lowLight.label)
+                },
+            )
+            Spacer(Modifier.width(8.dp))
             AutoCaptureToggle(
                 enabled = settings.autoCapture,
                 visible = mode != ScanMode.PHOTO,
@@ -1026,7 +1113,7 @@ private fun ModePill(mode: ScanMode, selected: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun ShutterButton(enabled: Boolean, progress: Float, busy: Boolean, onClick: () -> Unit) {
+private fun ShutterButton(enabled: Boolean, progress: () -> Float, busy: Boolean, onClick: () -> Unit) {
     val primary = MaterialTheme.brand.gradientStart
     val secondary = MaterialTheme.brand.gradientEnd
     val interaction = remember { MutableInteractionSource() }
@@ -1036,7 +1123,11 @@ private fun ShutterButton(enabled: Boolean, progress: Float, busy: Boolean, onCl
         spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
         label = "shutter",
     )
-    val animProgress by animateFloatAsState(progress, tween(180), label = "autoProgress")
+    // El progreso se anima y se lee SÓLO en la fase de dibujo (sin recomponer el botón ni la pantalla).
+    val animProgress = remember { Animatable(0f) }
+    LaunchedEffect(Unit) {
+        snapshotFlow { progress() }.collectLatest { animProgress.animateTo(it, tween(180)) }
+    }
     val inner by animateFloatAsState(if (busy) 0.55f else 1f, tween(160), label = "inner")
     Box(
         Modifier
@@ -1054,12 +1145,13 @@ private fun ShutterButton(enabled: Boolean, progress: Float, busy: Boolean, onCl
                 radius = r,
                 style = Stroke(width = stroke),
             )
-            if (animProgress > 0.001f) {
+            val ap = animProgress.value
+            if (ap > 0.001f) {
                 val pr = r
                 drawArc(
                     color = Color.White,
                     startAngle = -90f,
-                    sweepAngle = 360f * animProgress,
+                    sweepAngle = 360f * ap,
                     useCenter = false,
                     topLeft = Offset(center.x - pr, center.y - pr),
                     size = Size(pr * 2, pr * 2),
@@ -1096,9 +1188,21 @@ private fun BatchThumbnail(container: AppContainer, doc: Document?, processing: 
                     contentAlignment = Alignment.Center,
                 ) {
                     if (last != null && doc != null) {
-                        val file: File = container.documents.thumbFile(doc.id, last) ?: container.documents.originalFile(doc.id, last)
-                        AsyncImage(
-                            model = file,
+                        // El archivo se resuelve en IO y sólo cuando cambia la página (thumbFile consulta el disco).
+                        val ctx = LocalContext.current
+                        val file by produceState<File?>(null, doc.id, last.id, last.thumbFile, last.processedFile) {
+                            value = withContext(Dispatchers.IO) {
+                                container.documents.thumbFile(doc.id, last) ?: container.documents.originalFile(doc.id, last)
+                            }
+                        }
+                        val thumbPx = with(LocalDensity.current) { 54.dp.roundToPx() }.coerceAtMost(160)
+                        val request = remember(file, thumbPx) {
+                            file?.let {
+                                ImageRequest.Builder(ctx).data(it).size(thumbPx).precision(Precision.INEXACT).build()
+                            }
+                        }
+                        if (request != null) AsyncImage(
+                            model = request,
                             contentDescription = "Última página",
                             contentScale = ContentScale.Crop,
                             modifier = Modifier.fillMaxSize(),
@@ -1139,6 +1243,17 @@ private fun BatchThumbnail(container: AppContainer, doc: Document?, processing: 
             }
         }
     }
+}
+
+/** Destello de obturador: el alfa se lee en la capa gráfica (no recompone la pantalla durante la animación). */
+@Composable
+private fun ShutterFlashOverlay(alpha: () -> Float) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .graphicsLayer { this.alpha = alpha() }
+            .background(Color.White),
+    )
 }
 
 @Composable
@@ -1182,6 +1297,31 @@ private fun AutoCaptureToggle(enabled: Boolean, visible: Boolean, onToggle: () -
         Icon(Icons.Filled.AutoAwesome, null, tint = Color.White, modifier = Modifier.size(16.dp))
         Spacer(Modifier.width(6.dp))
         Text(if (enabled) "Auto" else "Manual", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+/** Interruptor del modo poca luz / anti-reflejos: resaltado si la ráfaga está activa; "A" = automático. */
+@Composable
+private fun LowLightToggle(setting: LowLightSetting, active: Boolean, onClick: () -> Unit) {
+    Box(contentAlignment = Alignment.Center) {
+        RoundIconButton(
+            Icons.Filled.NightsStay, setting.label,
+            highlighted = active,
+            onClick = onClick,
+            modifier = Modifier.graphicsLayer { alpha = if (setting == LowLightSetting.OFF) 0.6f else 1f },
+        )
+        if (setting == LowLightSetting.AUTO) {
+            Box(
+                Modifier
+                    .align(Alignment.BottomEnd)
+                    .size(18.dp)
+                    .clip(CircleShape)
+                    .background(Color.White),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("A", color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            }
+        }
     }
 }
 

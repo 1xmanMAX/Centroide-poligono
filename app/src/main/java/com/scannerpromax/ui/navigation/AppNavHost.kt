@@ -46,6 +46,7 @@ import com.scannerpromax.ui.home.HomeScreen
 import com.scannerpromax.ui.ocr.OcrScreen
 import com.scannerpromax.ui.review.ReviewScreen
 import com.scannerpromax.ui.settings.SettingsScreen
+import com.scannerpromax.ui.theme.LocalPerf
 import com.scannerpromax.ui.tools.CompressPdfScreen
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -70,6 +71,10 @@ fun AppNavHost(
 ) {
     val nav = rememberNavController()
     val context = LocalContext.current
+    // Transiciones adaptativas: más cortas en gama baja (menos frames con dos pantallas componiéndose a la vez)
+    // y ninguna si el sistema tiene "Quitar animaciones".
+    val perf = LocalPerf.current
+    val anim = perf.duration(ANIM_MS)
     val scope = rememberCoroutineScope()
 
     // Uri que recibe la pantalla de compresión (de otra app o null si se abre desde Home).
@@ -168,10 +173,10 @@ fun AppNavHost(
         NavHost(
             navController = nav,
             startDestination = Routes.HOME,
-            enterTransition = { navEnter() },
-            exitTransition = { navExit() },
-            popEnterTransition = { navPopEnter() },
-            popExitTransition = { navPopExit() },
+            enterTransition = { navEnter(anim) },
+            exitTransition = { navExit(anim) },
+            popEnterTransition = { navPopEnter(anim) },
+            popExitTransition = { navPopExit(anim) },
         ) {
             composable(Routes.HOME) { entry ->
                 HomeScreen(
@@ -195,10 +200,19 @@ fun AppNavHost(
                     navArgument("docId") { type = NavType.StringType; defaultValue = "" },
                     navArgument("mode") { type = NavType.StringType; defaultValue = ScanMode.DOCUMENT.name },
                 ),
-                enterTransition = { fadeIn(tween(ANIM_MS)) + scaleIn(tween(ANIM_MS), initialScale = 0.96f) },
-                exitTransition = { fadeOut(tween(ANIM_MS / 2)) },
-                popEnterTransition = { fadeIn(tween(ANIM_MS)) },
-                popExitTransition = { fadeOut(tween(ANIM_MS / 2)) + scaleOut(tween(ANIM_MS), targetScale = 0.96f) },
+                // La vista previa de la cámara es costosa de escalar: en gama baja solo fundido.
+                enterTransition = {
+                    if (anim == 0) EnterTransition.None
+                    else if (perf.lowEnd) fadeIn(tween(anim))
+                    else fadeIn(tween(anim)) + scaleIn(tween(anim), initialScale = 0.96f)
+                },
+                exitTransition = { if (anim == 0) ExitTransition.None else fadeOut(tween(anim / 2)) },
+                popEnterTransition = { if (anim == 0) EnterTransition.None else fadeIn(tween(anim)) },
+                popExitTransition = {
+                    if (anim == 0) ExitTransition.None
+                    else if (perf.lowEnd) fadeOut(tween(anim / 2))
+                    else fadeOut(tween(anim / 2)) + scaleOut(tween(anim), targetScale = 0.96f)
+                },
             ) { entry ->
                 val docId = entry.arguments?.getString("docId")?.takeIf { it.isNotBlank() }
                 val modeName = entry.arguments?.getString("mode")
@@ -364,14 +378,18 @@ private fun NavHostController.backTo(route: String) {
     }
 }
 
-private fun AnimatedContentTransitionScope<NavBackStackEntry>.navEnter(): EnterTransition =
-    slideInHorizontally(tween(ANIM_MS, easing = FastOutSlowInEasing)) { it / 4 } + fadeIn(tween(ANIM_MS))
+private fun AnimatedContentTransitionScope<NavBackStackEntry>.navEnter(ms: Int): EnterTransition =
+    if (ms == 0) EnterTransition.None
+    else slideInHorizontally(tween(ms, easing = FastOutSlowInEasing)) { it / 4 } + fadeIn(tween(ms))
 
-private fun AnimatedContentTransitionScope<NavBackStackEntry>.navExit(): ExitTransition =
-    slideOutHorizontally(tween(ANIM_MS, easing = FastOutSlowInEasing)) { -it / 8 } + fadeOut(tween(ANIM_MS / 2))
+private fun AnimatedContentTransitionScope<NavBackStackEntry>.navExit(ms: Int): ExitTransition =
+    if (ms == 0) ExitTransition.None
+    else slideOutHorizontally(tween(ms, easing = FastOutSlowInEasing)) { -it / 8 } + fadeOut(tween(ms / 2))
 
-private fun AnimatedContentTransitionScope<NavBackStackEntry>.navPopEnter(): EnterTransition =
-    slideInHorizontally(tween(ANIM_MS, easing = FastOutSlowInEasing)) { -it / 8 } + fadeIn(tween(ANIM_MS))
+private fun AnimatedContentTransitionScope<NavBackStackEntry>.navPopEnter(ms: Int): EnterTransition =
+    if (ms == 0) EnterTransition.None
+    else slideInHorizontally(tween(ms, easing = FastOutSlowInEasing)) { -it / 8 } + fadeIn(tween(ms))
 
-private fun AnimatedContentTransitionScope<NavBackStackEntry>.navPopExit(): ExitTransition =
-    slideOutHorizontally(tween(ANIM_MS, easing = FastOutSlowInEasing)) { it / 4 } + fadeOut(tween(ANIM_MS / 2))
+private fun AnimatedContentTransitionScope<NavBackStackEntry>.navPopExit(ms: Int): ExitTransition =
+    if (ms == 0) ExitTransition.None
+    else slideOutHorizontally(tween(ms, easing = FastOutSlowInEasing)) { it / 4 } + fadeOut(tween(ms / 2))

@@ -48,6 +48,11 @@ import kotlin.math.min
  * - Todo acceso nativo a los bitmaps pasa por [work] (Mutex): así se pueden reciclar con seguridad al salir
  *   aunque haya una vista previa a medio calcular, y en gama baja nunca hay dos procesos pesados a la vez.
  * - Las vistas previas usan collectLatest + debounce: los cambios rápidos de sliders cancelan los obsoletos.
+ * - Vista previa PROGRESIVA: primero una versión pequeña (480 px en gama baja) del filtro sobre una geometría
+ *   ya recortada en caché ([fastGeo], sin redecodificar ni rehacer la perspectiva), en ~decenas de ms; si el
+ *   usuario deja de mover el control, se refina con la tubería completa a [previewSide].
+ * - Las miniaturas de filtros se generan de una en una en un hilo de prioridad baja y ceden el paso a la
+ *   vista previa (lo que el usuario está mirando).
  */
 @Stable
 internal class EditorSession(
@@ -92,12 +97,22 @@ internal class EditorSession(
 
     private var source: Bitmap? = null
     private var thumbSource: Bitmap? = null
+    /** Original muy reducido para la vista previa rápida, y su geometría (recorte+rotación) en caché. */
+    private var fastSource: Bitmap? = null
+    private var fastGeo: Bitmap? = null
+    private var fastGeoKey: Any? = null
+    /** Hay una vista previa pedida que aún no terminó (las miniaturas esperan). Solo se usa en Main. */
+    private var previewPending = false
     /** Escala imagen de trabajo / original. */
     var workScale = 1f
         private set
     val previewSide: Int = if (tier.isLowRam) min(900, DeviceProfiler.previewSide(tier)) else DeviceProfiler.previewSide(tier)
+    /** Lado de la vista previa rápida (primer paso, mientras se mueven sliders o se cambia de filtro). */
+    private val fastSide: Int = if (tier.isLowRam || tier.cores <= 4) FAST_SIDE_LOW else FAST_SIDE
 
     private val editsFlow = MutableStateFlow<PageEdits?>(null)
+    /** Pausa antes de refinar: si llega otro cambio antes, el refinado (caro) se cancela sin haber empezado. */
+    private val refineDelayMs: Long = if (tier.isLowRam) 220L else 120L
     private var thumbsJob: Job? = null
     private var thumbsKey: Any? = null
     private var disposed = false
@@ -114,7 +129,9 @@ internal class EditorSession(
                 edits = p.edits
                 savedEdits = p.edits
                 val file = container.documents.originalFile(docId, p)
-                val maxPx = if (tier.isLowRam) 3_000_000 else min(tier.maxWorkingPixels, 6_000_000)
+                // Imagen de trabajo del editor: en gama baja ~2.4 MP bastan para el recorte con lupa y la vista
+                // previa de 900 px (menos memoria y una textura más pequeña que subir a la GPU).
+                val maxPx = if (tier.isLowRam) 2_400_000 else min(tier.maxWorkingPixels, 6_000_000)
                 val bmp = withContext(Dispatchers.Default) {
                     work.withLock { BitmapIO.decode(file.absolutePath, maxPx) }
                 }
@@ -150,6 +167,7 @@ internal class EditorSession(
     }
 
     fun requestPreview() {
+        previewPending = true
         editsFlow.value = edits
     }
 
@@ -283,6 +301,19 @@ internal class EditorSession(
                 val src = source ?: return@collectLatest
                 previewBusy = true
                 try {
+                    // Paso 1 (rápido): solo filtro + ajustes sobre la geometría pequeña en caché. Se omite si hay
+                    // trazos de borrado o "quitar rayas" (se verían aparecer y desaparecer).
+                    val fastOk = e.eraseStrokes.isEmpty() && !e.autoRemoveLines && e != previewEdits
+                    if (fastOk) {
+                        val fast = withContext(Dispatchers.Default) {
+                            work.withLock { if (src.isRecycled) null else fastPreview(src, e) }
+                        }
+                        if (fast != null) preview = fast.asImageBitmap()
+                        // Si el usuario sigue moviendo el control, collectLatest cancela aquí y nunca se paga
+                        // la vista previa completa de un valor intermedio.
+                        delay(refineDelayMs)
+                    }
+                    // Paso 2 (refinado): tubería completa a la resolución de vista previa.
                     val working = e.copy(quad = e.quad?.let { scaleQuad(it, workScale) })
                     val bmp = withContext(Dispatchers.Default) {
                         work.withLock { if (src.isRecycled) null else processor.preview(src, working, previewSide) }
@@ -291,15 +322,35 @@ internal class EditorSession(
                         preview = bmp.asImageBitmap()
                         previewEdits = e
                     }
+                    previewPending = false
                 } catch (c: CancellationException) {
                     throw c
                 } catch (t: Throwable) {
                     Log.w(TAG, "Fallo en la vista previa", t)
+                    previewPending = false
                 } finally {
                     previewBusy = false
                 }
             }
         }
+    }
+
+    /** Vista previa rápida: filtro sobre [fastGeo] (se rehace solo si cambia la geometría). Llamar bajo [work]. */
+    private fun fastPreview(src: Bitmap, e: PageEdits): Bitmap {
+        val key = Triple(e.quad, e.rotation, e.autoDeskew)
+        var geo = fastGeo
+        if (geo == null || geo.isRecycled || fastGeoKey != key) {
+            geo?.recycle()
+            fastGeo = null
+            val small = fastSource?.takeIf { !it.isRecycled }
+                ?: BitmapIO.thumbnail(src, (fastSide * 1.25f).toInt()).also { fastSource = it }
+            val pw = page?.width?.takeIf { it > 0 } ?: src.width
+            val f = small.width.toFloat() / pw
+            geo = processor.geometryOnly(small, e.copy(quad = e.quad?.let { scaleQuad(it, f) }), 0)
+            fastGeo = geo
+            fastGeoKey = key
+        }
+        return ImageEnhancer.apply(geo, e.filter, e.adjustments, tier, true)
     }
 
     /** Miniaturas de cada filtro (~200 px) en segundo plano. Solo se rehacen si cambia la geometría. */
@@ -312,8 +363,9 @@ internal class EditorSession(
         thumbsJob = scope.launch {
             val src = source ?: return@launch
             val page = page ?: return@launch
+            while (previewPending) delay(THUMB_YIELD_MS)
             val base = try {
-                withContext(Dispatchers.Default) {
+                withContext(EditorDispatchers.lowPriority) {
                     work.withLock {
                         if (src.isRecycled) return@withLock null
                         val small = thumbSource ?: BitmapIO.thumbnail(src, THUMB_SOURCE_SIDE).also { thumbSource = it }
@@ -333,7 +385,9 @@ internal class EditorSession(
                 val order = listOf(e.filter) + FilterType.entries.filter { it != e.filter }
                 for (f in order) {
                     ensureActive()
-                    val t = withContext(Dispatchers.Default) {
+                    // Cede el paso: mientras haya una vista previa pendiente no se compite por la CPU ni por [work].
+                    while (previewPending) delay(THUMB_YIELD_MS)
+                    val t = withContext(EditorDispatchers.lowPriority) {
                         work.withLock { ImageEnhancer.apply(base, f, Adjustments(), tier, true) }
                     }
                     filterThumbs[f] = t.asImageBitmap()
@@ -378,12 +432,18 @@ internal class EditorSession(
         scope.cancel()
         val src = source
         val ts = thumbSource
+        val fs = fastSource
+        val fg = fastGeo
         source = null
         thumbSource = null
+        fastSource = null
+        fastGeo = null
         // Reciclar cuando termine cualquier trabajo nativo en curso.
         CoroutineScope(Dispatchers.Default).launch {
             work.withLock {
                 processor.clearPreviewCache()
+                fg?.recycle()
+                fs?.recycle()
                 ts?.recycle()
                 src?.recycle()
             }
@@ -392,8 +452,12 @@ internal class EditorSession(
 
     companion object {
         private const val TAG = "EditorSession"
-        private const val PREVIEW_DEBOUNCE_MS = 110L
+        /** Debounce corto: el primer paso es barato, así que se puede reaccionar casi al instante. */
+        private const val PREVIEW_DEBOUNCE_MS = 40L
         private const val THUMB_SOURCE_SIDE = 280
+        private const val THUMB_YIELD_MS = 60L
+        private const val FAST_SIDE_LOW = 480
+        private const val FAST_SIDE = 640
 
         fun scaleQuad(q: Quad, f: Float): Quad = Quad.of(q.points().map { Pt(it.x * f, it.y * f) })
 

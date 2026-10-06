@@ -1,0 +1,53 @@
+# Perfil de referencia (Baseline Profile) escrito a mano.
+# AGP lo compila a assets/dexopt/baseline.prof en release y androidx.profileinstaller lo aplica al instalar,
+# así ART precompila (AOT) estas rutas y el primer arranque / primer desplazamiento no se interpretan ni
+# compilan con JIT sobre la marcha (la causa principal de jank en el primer uso en un Cortex-A53).
+#
+# Formato: [H]ot [S]tartup [P]ost-startup + firma; ** = comodín.
+#
+# Criterio:
+#  - S (startup) SOLO para lo que corre antes del primer frame de Inicio: así el layout del dex de arranque
+#    sigue agrupando lo realmente necesario y no se diluye.
+#  - No se repiten librerías que ya traen su propio perfil dentro del AAR (Compose runtime/ui/foundation/
+#    material3/animation, navigation, lifecycle, activity, core, splashscreen, CameraX, corrutinas): AGP los
+#    fusiona solo. Marcarlas aquí con comodines compilaba casi todo (≈ "speed"), alargaba la instalación y
+#    añadía decenas de MB de odex.
+#  - Lo ideal es regenerarlo con BaselineProfileGenerator (Macrobenchmark) en un dispositivo real.
+
+# ---- Arranque y primera pantalla (Inicio): actividad, aplicación, DI, tema, navegación, lista ----
+HSPLcom/scannerpromax/MainActivity**->**(**)**
+HSPLcom/scannerpromax/ScannerApp**->**(**)**
+HSPLcom/scannerpromax/NativeLibs**->**(**)**
+HSPLcom/scannerpromax/di/**->**(**)**
+HSPLcom/scannerpromax/ui/theme/**->**(**)**
+HSPLcom/scannerpromax/ui/navigation/**->**(**)**
+HSPLcom/scannerpromax/ui/home/**->**(**)**
+HSPLcom/scannerpromax/ui/components/**->**(**)**
+HSPLcom/scannerpromax/imaging/DeviceProfiler**->**(**)**
+Lcom/scannerpromax/MainActivity;
+Lcom/scannerpromax/ScannerApp;
+Lcom/scannerpromax/di/**;
+Lcom/scannerpromax/ui/theme/**;
+Lcom/scannerpromax/ui/navigation/**;
+Lcom/scannerpromax/ui/home/**;
+Lcom/scannerpromax/ui/components/**;
+
+# ---- Lectura de documentos y ajustes al arrancar (doc.json + DataStore) ----
+HSPLcom/scannerpromax/data/**->**(**)**
+HSPLcom/scannerpromax/domain/**->**(**)**
+Lcom/scannerpromax/data/**;
+Lcom/scannerpromax/domain/**;
+# kotlinx.serialization no trae perfil propio: solo el decodificador JSON usado al leer doc.json.
+HSPLkotlinx/serialization/json/**->**(**)**
+HSPLkotlinx/serialization/internal/**->**(**)**
+
+# ---- Miniaturas de Inicio (Coil 2 no trae perfil propio) ----
+HSPLcoil/**->**(**)**
+
+# ---- Resto de la app tras el arranque (cámara, editor, revisión, OCR, exportación): caliente pero no de
+#      arranque. Código pequeño; evita JIT al arrastrar esquinas o mover sliders por primera vez. ----
+HPLcom/scannerpromax/**->**(**)**
+
+# ---- OpenCV: envoltorios Java usados en cada frame / filtro (sin perfil propio; no es de arranque) ----
+HPLorg/opencv/core/**->**(**)**
+HPLorg/opencv/imgproc/**->**(**)**

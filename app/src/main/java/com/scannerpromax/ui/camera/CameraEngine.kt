@@ -36,6 +36,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
@@ -104,6 +105,28 @@ internal class CameraEngine(
 
     /** Intervalo mínimo entre análisis: ~7 fps en gama baja, ~14 fps en el resto. */
     private val minIntervalMs = if (lowEnd) 140L else 70L
+
+    /**
+     * Si es true (hay capturas mejorándose en segundo plano), el análisis en vivo baja el ritmo a la mitad para
+     * ceder CPU al procesamiento sin que la vista previa ni la interfaz pierdan fluidez.
+     */
+    @Volatile var backgroundBusy: Boolean = false
+    @Volatile private var glareStreak = 0
+
+    /** Media móvil (ms) del coste de cada análisis (detección + calidad), para el limitador adaptativo. */
+    @Volatile private var analysisCostMs = 0.0
+
+    /**
+     * Limitador de FPS ADAPTATIVO: el hilo de análisis ocupa como mucho ~35 % de un núcleo en gama baja (50 % en
+     * el resto). Si detectLive tarda 60 ms en un A53, el análisis baja a ~5 fps en vez de saturar la CPU (y
+     * calentar el equipo) compitiendo con la vista previa y la composición.
+     */
+    private fun currentIntervalMs(): Long {
+        val duty = if (lowEnd) 0.35 else 0.5
+        var iv = max(minIntervalMs.toDouble(), analysisCostMs / duty)
+        if (backgroundBusy) iv *= 2.0
+        return iv.toLong().coerceIn(minIntervalMs, 600L)
+    }
 
     private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor { r ->
         Thread(r, "scan-analyzer").apply { priority = Thread.NORM_PRIORITY - 1; isDaemon = true }
@@ -187,10 +210,11 @@ internal class CameraEngine(
             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
             .build()
         val qualityEvery = if (lowEnd) 4 else 2
+        glareStreak = 0
         imageAnalysis.setAnalyzer(analysisExecutor) { image ->
             try {
                 val now = SystemClock.elapsedRealtime()
-                if (!detectionEnabled || released || now - lastAnalysisAt < minIntervalMs) return@setAnalyzer
+                if (!detectionEnabled || released || now - lastAnalysisAt < currentIntervalMs()) return@setAnalyzer
                 lastAnalysisAt = now
                 val plane = image.planes[0]
                 val rotation = image.imageInfo.rotationDegrees
@@ -207,13 +231,19 @@ internal class CameraEngine(
                     // Borrosa si cae claramente respecto al mejor enfoque reciente de la misma escena.
                     val relBlur = sharpPeak > 0.02f && q.sharpness < sharpPeak * 0.55f
                     _tooDark.value = q.isTooDark
+                    // Nitidez cuantizada: el StateFlow sólo emite (y la pantalla sólo recompone) si algo
+                    // visible cambia, no en cada frame por una variación mínima del valor.
+                    // Reflejo persistente (2 análisis seguidos): un destello suelto no convierte el disparo en ráfaga.
+                    glareStreak = if (q.hasGlare) glareStreak + 1 else 0
                     _quality.value = LiveQuality(
                         tooDark = q.isTooDark,
                         blurry = q.isBlurry || relBlur,
-                        glare = q.hasGlare,
-                        sharpness = q.sharpness,
+                        glare = glareStreak >= 2,
+                        sharpness = (q.sharpness * 10f).roundToInt() / 10f,
                     )
                 }
+                val cost = (SystemClock.elapsedRealtime() - now).toDouble()
+                analysisCostMs = if (analysisCostMs == 0.0) cost else analysisCostMs * 0.8 + cost * 0.2
             } catch (t: Throwable) {
                 Log.w(TAG, "Fallo en el análisis en vivo", t)
             } finally {
@@ -341,6 +371,30 @@ internal class CameraEngine(
                 if (cont.isActive) cont.resumeWithException(exception)
             }
         })
+    }
+
+    /**
+     * Ráfaga para el modo poca luz / anti-reflejos: captura [files].size fotos seguidas (cada una espera a que
+     * la anterior esté escrita, sin acumular buffers). [onShot] recibe cuántas van. Devuelve los archivos
+     * capturados (al menos uno); si alguna falla se continúa con las demás.
+     */
+    suspend fun captureBurst(files: List<File>, previewView: PreviewView?, onShot: (Int) -> Unit = {}): List<File> {
+        val ok = ArrayList<File>(files.size)
+        var last: Throwable? = null
+        for (f in files) {
+            try {
+                capture(f, previewView)
+                ok.add(f)
+                onShot(ok.size)
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                last = t
+                f.delete()
+            }
+        }
+        if (ok.isEmpty()) throw last ?: IllegalStateException("No se pudo capturar la ráfaga")
+        return ok
     }
 
     /** Limpia la última detección (tras capturar, para que la autocaptura no se dispare dos veces). */

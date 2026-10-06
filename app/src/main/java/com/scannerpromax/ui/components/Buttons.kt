@@ -159,8 +159,11 @@ fun PrimaryFab(
 ) {
     val brand = MaterialTheme.brand
     val glow = brand.glow
+    val perf = com.scannerpromax.ui.theme.LocalPerf.current
+    // Sin halo infinito en gama baja ni con "Quitar animaciones": cada frame del halo invalida el dibujo.
+    val showPulse = pulse && perf.richEffects
     val transition = rememberInfiniteTransition(label = "fabPulse")
-    val pulseProgress by if (pulse) {
+    val pulseProgress by if (showPulse) {
         transition.animateFloat(
             initialValue = 0f,
             targetValue = 1f,
@@ -179,7 +182,7 @@ fun PrimaryFab(
             Modifier
                 .matchParentSize()
                 .drawBehind {
-                    if (pulse) {
+                    if (showPulse) {
                         val p = pulseProgress
                         val grow = 1f + p * 0.35f
                         val r = size.height / 2f
@@ -200,7 +203,8 @@ fun PrimaryFab(
             shape = PillShape,
             color = Color.Transparent,
             contentColor = Color.White,
-            shadowElevation = 10.dp,
+            // Sombra grande solo donde la GPU sobra; en gama baja basta una sombra corta.
+            shadowElevation = if (perf.lowEnd) 4.dp else 10.dp,
             modifier = Modifier.scale(scale),
         ) {
             Row(

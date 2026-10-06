@@ -1,6 +1,5 @@
 package com.scannerpromax.ocr
 
-import android.app.ActivityManager
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Rect
@@ -9,18 +8,26 @@ import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.TextRecognizer
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import com.scannerpromax.domain.FilterType
 import com.scannerpromax.domain.OcrBlock
 import com.scannerpromax.domain.OcrLine
 import com.scannerpromax.domain.OcrRect
 import com.scannerpromax.domain.OcrResult
+import com.scannerpromax.domain.OcrWord
+import com.scannerpromax.imaging.DeviceProfiler
+import com.scannerpromax.imaging.DeviceTier
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlin.math.abs
+import kotlin.math.atan2
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -29,52 +36,118 @@ import kotlin.math.sqrt
 /**
  * OCR en el dispositivo con ML Kit (latino, empaquetado: funciona sin internet).
  *
- * Estrategia de máxima precisión:
- *  1. Normaliza la escala: imágenes pequeñas se amplían (lado largo ~2400 px) y enormes se reducen (~3000 px).
- *  2. Si tras la primera pasada las líneas son muy bajas (< 20 px), hace una segunda pasada ampliando
- *     para que el texto mida ~30 px de alto y se queda con el resultado que reconozca más texto.
- *  3. Todas las coordenadas se devuelven en píxeles de la imagen recibida.
+ * Estrategia de precisión, pensada para gama baja (un solo reconocedor, pasadas secuenciales):
+ *  1. Escala normalizada (lado largo ~2400-3000 px). Si el filtro de la página conserva la iluminación de la foto
+ *     (Original/Vívido/Aclarar/Auto) se normaliza la iluminación en gris antes de reconocer.
+ *  2. Si las líneas son muy bajas (< 20 px) se vuelve a reconocer ampliando para que midan ~30 px.
+ *  3. Si la confianza media de las líneas es baja, segundo intento con una variante binarizada y se queda, línea a
+ *     línea, con la de mayor confianza (en gama baja como mucho una pasada extra en total).
+ *  4. Palabras con su caja (Text.Element) y ángulo de cada línea para la capa invisible precisa del PDF.
+ *  5. Orden de lectura por columnas ([ReadingOrder]). Todas las coordenadas en píxeles de la imagen recibida.
  */
 class OcrEngine(private val context: Context) {
 
-
-    private val lowRam: Boolean by lazy {
-        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
-        am == null || am.isLowRamDevice || am.memoryClass <= 192
+    /** Con el perfil del dispositivo del contenedor (mismo criterio de gama baja que el resto de la app). */
+    constructor(context: Context, tier: DeviceTier) : this(context) {
+        deviceTier = tier
     }
 
-    /** OCR de alta calidad: pre-procesa (escala a ~ altura de letra óptima, contraste) y reconoce en el dispositivo. */
-    suspend fun recognize(bitmap: Bitmap): OcrResult = withContext(Dispatchers.Default) {
-        require(!bitmap.isRecycled) { "Bitmap reciclado" }
-        val w = bitmap.width
-        val h = bitmap.height
-        val long = max(w, h)
-        val maxLong = if (lowRam) 2600 else 3400
-        val maxPixels = if (lowRam) 6_000_000 else 11_000_000
+    @Volatile private var deviceTier: DeviceTier? = null
 
-        // Primera pasada a escala normalizada.
-        val target = when {
-            long < MIN_LONG_SIDE -> MIN_LONG_SIDE
-            long > MAX_LONG_SIDE -> MAX_LONG_SIDE
-            else -> long
-        }
-        var scale = target.toFloat() / long
-        scale = clampScale(scale, w, h, maxLong, maxPixels)
-        var best = runPass(bitmap, scale)
+    /** Asigna el perfil del dispositivo (lo llama el repositorio si el motor se creó sin él). */
+    fun setDeviceTier(tier: DeviceTier) {
+        deviceTier = tier
+    }
 
-        // Segunda pasada si el texto es diminuto (letra pequeña en hoja completa, recibos lejanos...).
-        val medianLine = medianLineHeight(best.text)
-        if (medianLine in 1f..SMALL_TEXT_PX) {
-            val wanted = scale * (TARGET_TEXT_PX / medianLine)
-            val second = clampScale(wanted, w, h, maxLong, maxPixels)
-            if (second > scale * 1.25f) {
-                val pass2 = try { runPass(bitmap, second) } catch (e: OutOfMemoryError) { null }
-                if (pass2 != null && letterCount(pass2.text) >= letterCount(best.text)) {
-                    best = pass2
+    private fun tier(): DeviceTier = deviceTier ?: DeviceProfiler.profile(context).also { deviceTier = it }
+
+    /** Gama baja con el mismo criterio que [DeviceTier] (RAM total y núcleos), no solo por memoryClass. */
+    private val lowRam: Boolean get() = tier().let { it.isLowRam || it.cores <= 4 }
+
+    /**
+     * Resultado de la última pasada completada. Si el llamador cancela durante una pasada extra, aquí queda el
+     * mejor resultado ya calculado para poder guardarlo (no se desperdician segundos de CPU).
+     */
+    class Partial {
+        @Volatile var result: OcrResult? = null
+    }
+
+    /** OCR de alta calidad (sin información del filtro aplicado). */
+    suspend fun recognize(bitmap: Bitmap): OcrResult = recognize(bitmap, null)
+
+    /**
+     * OCR de alta calidad. [filter] = filtro con el que se generó [bitmap] (decide el pre-proceso); null = ninguno.
+     * No recicla [bitmap].
+     */
+    suspend fun recognize(bitmap: Bitmap, filter: FilterType?): OcrResult = recognize(bitmap, filter, false, null)
+
+    /**
+     * [lightweight] = OCR de fondo: entrada limitada (~3 MP en gama baja) y sin pasadas extra.
+     * [partial] recibe el mejor resultado tras cada pasada completada (ver [Partial]).
+     */
+    suspend fun recognize(bitmap: Bitmap, filter: FilterType?, lightweight: Boolean, partial: Partial?): OcrResult = Gate.lock.withLock {
+        withContext(Dispatchers.Default) {
+            require(!bitmap.isRecycled) { "Bitmap reciclado" }
+            val w = bitmap.width
+            val h = bitmap.height
+            val long = max(w, h)
+            val low = lowRam
+            val maxLong = if (low) 2400 else 3400
+            val maxPixels = when {
+                low && lightweight -> 3_000_000
+                low -> 4_000_000
+                else -> 11_000_000
+            }
+            val normalize = OcrPreprocess.needsNormalization(filter)
+            var extraPasses = 0
+            val maxExtra = when {
+                lightweight && low -> 0
+                low || lightweight -> 1
+                else -> 2
+            }
+
+            val target = when {
+                long < MIN_LONG_SIDE -> MIN_LONG_SIDE
+                long > MAX_LONG_SIDE -> MAX_LONG_SIDE
+                else -> long
+            }
+            var scale = clampScale(target.toFloat() / long, w, h, maxLong, maxPixels)
+            var best = runPass(bitmap, scale, if (normalize) Variant.NORMALIZED else Variant.PLAIN)
+            partial?.result = build(best.blocks, w, h)
+            currentCoroutineContext().ensureActive()
+
+            // Letra diminuta (hoja completa con letra pequeña, recibos lejanos...): ampliar.
+            val medianLine = medianLineHeight(best.blocks)
+            if (extraPasses < maxExtra && medianLine > 0f && medianLine * scale in 1f..SMALL_TEXT_PX) {
+                val wanted = TARGET_TEXT_PX / medianLine
+                val second = clampScale(wanted, w, h, maxLong, maxPixels)
+                if (second > scale * 1.25f) {
+                    currentCoroutineContext().ensureActive()
+                    val pass2 = try { runPass(bitmap, second, if (normalize) Variant.NORMALIZED else Variant.PLAIN) } catch (e: OutOfMemoryError) { null }
+                    extraPasses++
+                    if (pass2 != null && letterCount(pass2.blocks) >= letterCount(best.blocks)) {
+                        best = pass2
+                        scale = second
+                        partial?.result = build(best.blocks, w, h)
+                    }
+                    currentCoroutineContext().ensureActive()
                 }
             }
+
+            // Confianza baja: variante binarizada y fusión línea a línea.
+            val conf = meanConfidence(best.blocks)
+            if (conf in 0f..LOW_CONFIDENCE && extraPasses < maxExtra) {
+                currentCoroutineContext().ensureActive()
+                val lineH = medianLineHeight(best.blocks) // en px de la imagen original
+                val variant = try { runPass(bitmap, scale, Variant.BINARIZED, lineH * scale) } catch (e: OutOfMemoryError) { null }
+                if (variant != null && variant.blocks.isNotEmpty()) {
+                    best = Pass(mergeByConfidence(best.blocks, variant.blocks))
+                    partial?.result = build(best.blocks, w, h)
+                }
+            }
+            currentCoroutineContext().ensureActive()
+            partial?.result ?: build(best.blocks, w, h)
         }
-        toResult(best.text, best.scale, w, h)
     }
 
     /**
@@ -90,34 +163,59 @@ class OcrEngine(private val context: Context) {
 
     // ---------------------------------------------------------------------------------
 
-    private class Pass(val text: Text, val scale: Float)
+    private enum class Variant { PLAIN, NORMALIZED, BINARIZED }
+
+    /** Bloques en coordenadas de la imagen ORIGINAL recibida. */
+    private class Pass(val blocks: List<OcrBlock>)
 
     /** Un único cliente ML Kit por proceso (el modelo empaquetado ocupa memoria: no se duplica entre instancias). */
     private object Shared {
         @Volatile var recognizer: TextRecognizer? = null
     }
 
+    /** Un OCR a la vez en todo el proceso: en gama baja dos reconocimientos simultáneos agotan RAM y CPU. */
+    private object Gate {
+        val lock = Mutex()
+    }
+
     private fun client(): TextRecognizer = Shared.recognizer ?: synchronized(Shared) {
         Shared.recognizer ?: TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS).also { Shared.recognizer = it }
     }
 
-    private suspend fun runPass(src: Bitmap, scale: Float): Pass {
-        val input: Bitmap = if (kotlin.math.abs(scale - 1f) < 0.02f) src else {
+    /**
+     * Una pasada de ML Kit. No comprueba la cancelación al terminar: el llamador guarda primero el resultado en
+     * [Partial] y luego llama a ensureActive (así una cancelación no tira un reconocimiento ya pagado).
+     */
+    private suspend fun runPass(src: Bitmap, scale: Float, variant: Variant, lineHeightPx: Float = 0f): Pass {
+        val scaled: Bitmap = if (abs(scale - 1f) < 0.02f) src else {
             val nw = (src.width * scale).roundToInt().coerceAtLeast(1)
             val nh = (src.height * scale).roundToInt().coerceAtLeast(1)
             Bitmap.createScaledBitmap(src, nw, nh, true)
         }
-        val realScale = input.width.toFloat() / src.width
         try {
-            // NonCancellable: ML Kit lee los píxeles en su propio hilo. Si dejáramos de esperar al cancelar, el
-            // llamador reciclaría [src] (o nosotros [input]) mientras ML Kit aún lo usa -> "recycled bitmap"/crash.
-            val text = withContext(NonCancellable) {
-                client().process(InputImage.fromBitmap(input, 0)).await()
+            // Variantes en gris: se pasan a ML Kit como NV21 (plano Y + croma neutro, 1.5 B/px) en vez de un
+            // Bitmap ARGB (4 B/px): menos memoria y menos copias en gama baja.
+            val gray = when (variant) {
+                Variant.PLAIN -> null
+                Variant.NORMALIZED -> OcrPreprocess.normalizeIlluminationNv21(scaled)
+                Variant.BINARIZED -> OcrPreprocess.binarizeNv21(scaled, lineHeightPx)
             }
-            currentCoroutineContext().ensureActive()
-            return Pass(text, realScale)
+            val image: InputImage
+            val realScale: Float
+            if (gray != null) {
+                if (scaled !== src) scaled.recycle()
+                image = InputImage.fromByteArray(gray.nv21, gray.width, gray.height, 0, InputImage.IMAGE_FORMAT_NV21)
+                realScale = gray.width.toFloat() / src.width
+            } else {
+                image = InputImage.fromBitmap(scaled, 0)
+                realScale = scaled.width.toFloat() / src.width
+            }
+            // NonCancellable: ML Kit lee los píxeles en su propio hilo. Si dejáramos de esperar al cancelar, el
+            // llamador reciclaría [src] (o nosotros [scaled]) mientras ML Kit aún lo usa -> "recycled bitmap"/crash.
+            val text = withContext(NonCancellable) { client().process(image).await() }
+            return Pass(convert(text, realScale, src.width, src.height))
         } finally {
-            if (input !== src) input.recycle()
+            if (scaled !== src && !scaled.isRecycled) scaled.recycle()
         }
     }
 
@@ -130,16 +228,83 @@ class OcrEngine(private val context: Context) {
         return min(s, MAX_UPSCALE)
     }
 
-    private fun medianLineHeight(text: Text): Float {
-        val heights = text.textBlocks.flatMap { b -> b.lines.mapNotNull { it.boundingBox?.height()?.toFloat() } }
+    /** Altura mediana de línea en px de la imagen original (alto real, no envolvente). */
+    private fun medianLineHeight(blocks: List<OcrBlock>): Float {
+        val heights = blocks.flatMap { b -> b.lines.map { lineHeight(it) } }.filter { it > 0f }
         if (heights.isEmpty()) return 0f
         val sorted = heights.sorted()
         return sorted[sorted.size / 2]
     }
 
-    private fun letterCount(text: Text): Int = text.text.count { it.isLetterOrDigit() }
+    private fun lineHeight(l: OcrLine): Float = com.scannerpromax.pdf.TextLayerGeometry.lineHeight(l.box, l.angle)
 
-    private fun toResult(text: Text, scale: Float, w: Int, h: Int): OcrResult {
+    private fun letterCount(blocks: List<OcrBlock>): Int =
+        blocks.sumOf { b -> b.lines.sumOf { l -> l.text.count { it.isLetterOrDigit() } } }
+
+    /** Confianza media ponderada por letras; -1 si el modelo no la informa. */
+    private fun meanConfidence(blocks: List<OcrBlock>): Float {
+        var sum = 0.0
+        var n = 0
+        for (b in blocks) for (l in b.lines) {
+            if (l.confidence <= 0f) continue
+            val letters = l.text.count { it.isLetterOrDigit() }.coerceAtLeast(1)
+            sum += l.confidence * letters
+            n += letters
+        }
+        return if (n == 0) -1f else (sum / n).toFloat()
+    }
+
+    /**
+     * Fusiona dos reconocimientos de la misma imagen: cada línea de [a] se sustituye por la línea de [b] que la
+     * solapa (IoU > 0.5) si esta tiene más confianza; las líneas de [b] sin pareja y muy fiables se añaden.
+     */
+    private fun mergeByConfidence(a: List<OcrBlock>, b: List<OcrBlock>): List<OcrBlock> {
+        val bLines = b.flatMap { it.lines }
+        val used = BooleanArray(bLines.size)
+        val merged = a.map { block ->
+            val lines = block.lines.map { la ->
+                var bestIdx = -1
+                var bestIou = 0.5f
+                bLines.forEachIndexed { i, lb ->
+                    if (used[i]) return@forEachIndexed // cada línea de [b] sustituye como mucho a una de [a]
+                    val iou = iou(la.box, lb.box)
+                    if (iou > bestIou) { bestIou = iou; bestIdx = i }
+                }
+                if (bestIdx >= 0) {
+                    used[bestIdx] = true
+                    val lb = bLines[bestIdx]
+                    if (lb.confidence > la.confidence + 0.03f) lb else la
+                } else la
+            }
+            block.copy(text = lines.joinToString("\n") { it.text }, lines = lines)
+        }
+        val extra = bLines.filterIndexed { i, l ->
+            !used[i] && l.confidence >= ADD_CONFIDENCE && merged.none { blk -> blk.lines.any { overlapRatio(it.box, l.box) > 0.3f } }
+        }.map { OcrBlock(it.text, it.box, listOf(it)) }
+        return merged + extra
+    }
+
+    private fun iou(p: OcrRect, q: OcrRect): Float {
+        val inter = interArea(p, q)
+        val union = area(p) + area(q) - inter
+        return if (union <= 0f) 0f else inter / union
+    }
+
+    private fun overlapRatio(p: OcrRect, q: OcrRect): Float {
+        val m = min(area(p), area(q))
+        return if (m <= 0f) 0f else interArea(p, q) / m
+    }
+
+    private fun interArea(p: OcrRect, q: OcrRect): Float {
+        val w = min(p.right, q.right) - max(p.left, q.left)
+        val h = min(p.bottom, q.bottom) - max(p.top, q.top)
+        return if (w <= 0f || h <= 0f) 0f else w * h
+    }
+
+    private fun area(r: OcrRect) = max(0f, r.right - r.left) * max(0f, r.bottom - r.top)
+
+    /** Convierte el resultado de ML Kit a bloques en coordenadas de la imagen original. */
+    private fun convert(text: Text, scale: Float, w: Int, h: Int): List<OcrBlock> {
         val inv = 1f / scale
         fun map(r: Rect?): OcrRect {
             if (r == null) return OcrRect(0f, 0f, 0f, 0f)
@@ -150,38 +315,45 @@ class OcrEngine(private val context: Context) {
                 (r.bottom * inv).coerceIn(0f, h.toFloat()),
             )
         }
-        val blocks = text.textBlocks
-            .map { b ->
-                val lines = b.lines
-                    .filter { it.text.isNotBlank() }
-                    .map { l -> OcrLine(l.text.trim(), map(l.boundingBox)) }
-                OcrBlock(lines.joinToString("\n") { it.text }, map(b.boundingBox), lines)
+        return text.textBlocks.mapNotNull { b ->
+            val lines = b.lines.filter { it.text.isNotBlank() }.map { l ->
+                val words = l.elements.filter { it.text.isNotBlank() }.map { e ->
+                    OcrWord(e.text.trim(), map(e.boundingBox), safeConfidence { e.confidence })
+                }
+                OcrLine(
+                    text = l.text.trim(),
+                    box = map(l.boundingBox),
+                    words = words,
+                    angle = lineAngle(l),
+                    confidence = safeConfidence { l.confidence },
+                )
             }
-            .filter { it.lines.isNotEmpty() }
-            .let { sortReadingOrder(it) }
-        val full = blocks.joinToString("\n\n") { it.text }
-        return OcrResult(text = full, imageWidth = w, imageHeight = h, blocks = blocks)
+            if (lines.isEmpty()) null else OcrBlock(lines.joinToString("\n") { it.text }, map(b.boundingBox), lines)
+        }
     }
 
-    /**
-     * Orden de lectura: de arriba a abajo; bloques que comparten franja vertical (columnas) de izquierda a derecha.
-     */
-    private fun sortReadingOrder(blocks: List<OcrBlock>): List<OcrBlock> {
-        if (blocks.size < 2) return blocks
-        val sorted = blocks.sortedBy { it.box.top }
-        val rows = ArrayList<MutableList<OcrBlock>>()
-        for (b in sorted) {
-            val row = rows.lastOrNull()
-            val ref = row?.first()
-            val overlap = if (ref == null) 0f else {
-                val top = max(ref.box.top, b.box.top)
-                val bottom = min(ref.box.bottom, b.box.bottom)
-                val hMin = min(ref.box.bottom - ref.box.top, b.box.bottom - b.box.top).coerceAtLeast(1f)
-                (bottom - top) / hMin
-            }
-            if (row != null && overlap > 0.5f) row += b else rows += mutableListOf(b)
+    /** Ángulo (grados, horario positivo en la imagen) desde las esquinas reales; si faltan, el de ML Kit. */
+    private fun lineAngle(l: Text.Line): Float {
+        val pts = l.cornerPoints
+        if (pts != null && pts.size >= 2) {
+            val dx = (pts[1].x - pts[0].x).toDouble()
+            val dy = (pts[1].y - pts[0].y).toDouble()
+            if (dx * dx + dy * dy > 4.0) return Math.toDegrees(atan2(dy, dx)).toFloat()
         }
-        return rows.flatMap { r -> r.sortedBy { it.box.left } }
+        return safeConfidence { l.angle }.takeIf { it.isFinite() && it > -90f && it < 90f } ?: 0f
+    }
+
+    /** Las versiones antiguas del modelo pueden no implementar confianza/ángulo: -1 = desconocido. */
+    private inline fun safeConfidence(block: () -> Float): Float = try {
+        block().takeIf { it.isFinite() } ?: -1f
+    } catch (_: Throwable) {
+        -1f
+    }
+
+    private fun build(blocks: List<OcrBlock>, w: Int, h: Int): OcrResult {
+        val ordered = ReadingOrder.sort(blocks)
+        val full = ordered.joinToString("\n\n") { it.text }
+        return OcrResult(text = full, imageWidth = w, imageHeight = h, blocks = ordered)
     }
 
     private companion object {
@@ -190,6 +362,8 @@ class OcrEngine(private val context: Context) {
         const val MAX_UPSCALE = 3f
         const val SMALL_TEXT_PX = 20f
         const val TARGET_TEXT_PX = 30f
+        const val LOW_CONFIDENCE = 0.72f
+        const val ADD_CONFIDENCE = 0.85f
     }
 }
 

@@ -71,7 +71,11 @@ fun EmptyState(
 
 /** Ilustración vectorial: dos hojas inclinadas, renglones de texto y un haz de escaneo que sube y baja. */
 @Composable
-fun ScanIllustration(modifier: Modifier = Modifier, animated: Boolean = true) {
+fun ScanIllustration(
+    modifier: Modifier = Modifier,
+    // Animación infinita solo en gama media/alta y si el sistema no tiene "Quitar animaciones".
+    animated: Boolean = com.scannerpromax.ui.theme.LocalPerf.current.richEffects,
+) {
     val brand = MaterialTheme.brand
     val paper = MaterialTheme.colorScheme.surfaceContainerHighest
     val paperFront = if (brand.isDark) Color(0xFF242C45) else Color.White

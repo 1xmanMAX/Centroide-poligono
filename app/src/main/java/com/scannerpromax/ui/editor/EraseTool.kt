@@ -62,6 +62,9 @@ internal fun EraseTool(
     var pan by remember { mutableStateOf(Offset.Zero) }
     val current = remember { mutableStateListOf<Offset>() }
     var cursor by remember { mutableStateOf<Offset?>(null) }
+    // zoom, pan, current y cursor solo se leen en gestos, graphicsLayer y Canvas: arrastrar el dedo o hacer
+    // pellizco solo redibuja (sin recomponer). La lupa recorta con un Path reutilizado.
+    val loupeClip = remember { Path() }
 
     val rect = fitRect(boxSize, image.width, image.height, 0f)
     val currentRect by rememberUpdatedState(rect)
@@ -177,6 +180,7 @@ internal fun EraseTool(
                     finger = c,
                     accent = accent,
                     brushRadiusPx = r,
+                    clip = loupeClip,
                 )
             }
             drawCircle(Color.White, radius = r, center = c, style = Stroke(width = 2f * density))

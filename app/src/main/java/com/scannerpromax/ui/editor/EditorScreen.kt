@@ -77,6 +77,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -108,6 +109,7 @@ import com.scannerpromax.domain.Quad
 import com.scannerpromax.ui.components.AppTopBar
 import com.scannerpromax.ui.components.GradientButton
 import com.scannerpromax.ui.components.LoadingOverlay
+import com.scannerpromax.ui.theme.LocalPerf
 import com.scannerpromax.ui.theme.brand
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -143,8 +145,13 @@ fun EditorScreen(
 
     val session = remember(docId, currentPageId) { EditorSession(container, docId, currentPageId) }
     DisposableEffect(session) {
+        // El OCR de fondo cede la CPU mientras se editan vistas previas (fluidez en gama baja).
+        container.documents.pauseBackgroundOcr()
         session.load()
-        onDispose { session.dispose() }
+        onDispose {
+            session.dispose()
+            container.documents.resumeBackgroundOcr()
+        }
     }
 
     var tool by rememberSaveable { mutableStateOf(EditorTool.FILTERS) }
@@ -159,6 +166,7 @@ fun EditorScreen(
     var bulkJob by remember { mutableStateOf<Job?>(null) }
 
     val brand = MaterialTheme.brand
+    val perf = LocalPerf.current
     val primary = brand.gradientStart
     val secondary = brand.gradientEnd
     val errorColor = MaterialTheme.colorScheme.error
@@ -171,9 +179,15 @@ fun EditorScreen(
     }
 
     // ¿El recorte actual se puede guardar? (convexo, o solo con las esquinas desordenadas: se reordenan)
-    val quadValid = session.edits.quad?.let { q ->
-        isConvexQuad(q.points().map { Offset(it.x, it.y) }) || EditorSession.reorderQuad(q) != null
-    } ?: true
+    // derivedStateOf: esta pantalla solo se recompone cuando cambia la VALIDEZ, no con cada movimiento de un
+    // slider (que cambia session.edits); así un slider solo recompone su panel.
+    val quadValid by remember(session) {
+        derivedStateOf {
+            session.edits.quad?.let { q ->
+                isConvexQuad(q.points().map { Offset(it.x, it.y) }) || EditorSession.reorderQuad(q) != null
+            } ?: true
+        }
+    }
 
     /** Valida el recorte; si no es válido avisa, vuelve a Recortar y devuelve false. */
     fun ensureQuadValid(): Boolean = when (session.checkQuad()) {
@@ -331,7 +345,6 @@ fun EditorScreen(
                 contentAlignment = Alignment.Center,
             ) {
                 val src = session.sourceImage
-                val preview = session.preview
                 when {
                     session.loading || src == null -> CircularProgressIndicator(color = primary)
                     tool == EditorTool.CROP -> CropTool(
@@ -342,8 +355,8 @@ fun EditorScreen(
                         secondary = secondary,
                         error = errorColor,
                     )
-                    erasing && preview != null -> EraseTool(
-                        image = preview,
+                    erasing && session.preview != null -> EraseTool(
+                        image = session.preview!!,
                         strokes = session.edits.eraseStrokes,
                         appliedCount = session.previewEdits?.eraseStrokes?.let { applied ->
                             val cur = session.edits.eraseStrokes
@@ -354,15 +367,7 @@ fun EditorScreen(
                         onStroke = { session.addStroke(it) },
                         accent = brand.accent,
                     )
-                    else -> {
-                        val shown = if (showOriginal) src else (preview ?: src)
-                        Image(
-                            bitmap = shown,
-                            contentDescription = if (showOriginal) "Original" else "Vista previa",
-                            contentScale = ContentScale.Fit,
-                            modifier = Modifier.fillMaxSize().padding(10.dp),
-                        )
-                    }
+                    else -> PreviewImage(session, showOriginal)
                 }
 
                 // Navegación entre páginas (guarda automáticamente al cambiar)
@@ -377,22 +382,8 @@ fun EditorScreen(
                     )
                 }
 
-                // Indicador de procesamiento (nombre completo: evita el AnimatedVisibility de ColumnScope)
-                androidx.compose.animation.AnimatedVisibility(
-                    visible = session.previewBusy && tool != EditorTool.CROP,
-                    enter = fadeIn(), exit = fadeOut(),
-                    modifier = Modifier.align(Alignment.TopEnd).padding(12.dp),
-                ) {
-                    Row(
-                        Modifier.clip(RoundedCornerShape(50)).background(Color.Black.copy(alpha = 0.6f))
-                            .padding(horizontal = 10.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        CircularProgressIndicator(Modifier.size(14.dp), color = Color.White, strokeWidth = 2.dp)
-                        Spacer(Modifier.width(6.dp))
-                        Text("Procesando", color = Color.White, fontSize = 12.sp)
-                    }
-                }
+                // Indicador de procesamiento: en su propio ámbito de recomposición (cambia 2 veces por vista previa).
+                ProcessingBadge(session, hidden = tool == EditorTool.CROP, modifier = Modifier.align(Alignment.TopEnd).padding(12.dp))
 
                 // Antes / después: mantener pulsado
                 if (!session.loading && tool != EditorTool.CROP && !erasing) {
@@ -427,12 +418,12 @@ fun EditorScreen(
                     .fillMaxWidth()
                     .padding(top = 8.dp)
                     .heightIn(min = 150.dp)
-                    .animateContentSize(tween(220)),
+                    .then(if (perf.reduceMotion) Modifier else Modifier.animateContentSize(tween(perf.duration(220)))),
                 contentAlignment = Alignment.TopCenter,
             ) {
                 AnimatedContent(
                     targetState = if (erasing) null else tool,
-                    transitionSpec = { fadeIn(tween(200)) togetherWith fadeOut(tween(120)) },
+                    transitionSpec = { fadeIn(tween(perf.duration(200))) togetherWith fadeOut(tween(perf.duration(120))) },
                     label = "toolPanel",
                 ) { t ->
                     when (t) {
@@ -526,6 +517,39 @@ fun EditorScreen(
             },
             shape = MaterialTheme.shapes.extraLarge,
         )
+    }
+}
+
+/** Imagen mostrada (vista previa u original). Lee [EditorSession.preview] en su propio ámbito. */
+@Composable
+private fun PreviewImage(session: EditorSession, showOriginal: Boolean) {
+    val src = session.sourceImage ?: return
+    val shown = if (showOriginal) src else (session.preview ?: src)
+    Image(
+        bitmap = shown,
+        contentDescription = if (showOriginal) "Original" else "Vista previa",
+        contentScale = ContentScale.Fit,
+        modifier = Modifier.fillMaxSize().padding(10.dp),
+    )
+}
+
+@Composable
+private fun ProcessingBadge(session: EditorSession, hidden: Boolean, modifier: Modifier = Modifier) {
+    // Nombre completo: evita el AnimatedVisibility de ColumnScope.
+    androidx.compose.animation.AnimatedVisibility(
+        visible = session.previewBusy && !hidden,
+        enter = fadeIn(), exit = fadeOut(),
+        modifier = modifier,
+    ) {
+        Row(
+            Modifier.clip(RoundedCornerShape(50)).background(Color.Black.copy(alpha = 0.6f))
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CircularProgressIndicator(Modifier.size(14.dp), color = Color.White, strokeWidth = 2.dp)
+            Spacer(Modifier.width(6.dp))
+            Text("Procesando", color = Color.White, fontSize = 12.sp)
+        }
     }
 }
 
@@ -657,15 +681,16 @@ private fun CropPanel(detecting: Boolean, invalid: Boolean, onAuto: () -> Unit, 
 @Composable
 private fun FiltersPanel(session: EditorSession, onApplyAll: (() -> Unit)?) {
     val primary = MaterialTheme.brand.gradientStart
-    val secondary = MaterialTheme.brand.gradientEnd
     val edits = session.edits
+    // Solo el filtro (estable entre movimientos de slider): las celdas de la fila no se recomponen al ajustar.
+    val selectedFilter = edits.filter
     Column(Modifier.fillMaxWidth()) {
         LazyRow(
             contentPadding = PaddingValues(horizontal = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            items(FilterType.entries, key = { it.name }) { f ->
-                val selected = edits.filter == f
+            items(FilterType.entries, key = { it.name }, contentType = { "filter" }) { f ->
+                val selected = selectedFilter == f
                 val thumb = session.filterThumbs[f]
                 Column(
                     Modifier.width(72.dp).clip(RoundedCornerShape(14.dp)).clickable(role = Role.RadioButton) { session.setFilter(f) },

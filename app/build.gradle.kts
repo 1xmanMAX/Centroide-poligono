@@ -17,6 +17,9 @@ android {
         versionName = "1.0.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
+        // Solo español (textos de la app) e inglés: quita cientos de traducciones de AndroidX/Material/ML Kit
+        // (APK y resources.arsc más pequeños = menos memoria y arranque algo más rápido).
+        resourceConfigurations += listOf("es", "en")
     }
 
     // APKs por ABI: cada celular descarga solo las librerías nativas que necesita (APK más liviano).
@@ -25,12 +28,16 @@ android {
             isEnable = true
             reset()
             include("arm64-v8a", "armeabi-v7a", "x86_64")
-            isUniversalApk = true
+            // El APK universal (las 3 ABIs de OpenCV, mucho más pesado) solo sirve para repartir un único archivo.
+            // Instala el de tu ABI (armeabi-v7a en la mayoría de gama baja / Android Go). Desactivable con
+            // ./gradlew assembleRelease -PuniversalApk=false
+            isUniversalApk = (project.findProperty("universalApk") as String?)?.toBoolean() ?: true
         }
     }
 
     buildTypes {
         release {
+            // R8 completo (modo full por defecto en AGP 8) + recorte de recursos.
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
@@ -43,10 +50,21 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
+    // Release = perfil de referencia (src/main/baseline-prof.txt) compilado a assets/dexopt/baseline.prof;
+    // ProfileInstaller lo aplica al instalar para que ART precompile las rutas calientes (sin jank en el 1er uso).
     packaging {
-        resources { excludes += setOf("/META-INF/{AL2.0,LGPL2.1}", "META-INF/DEPENDENCIES") }
-        jniLibs { useLegacyPackaging = false }
+        // Recursos de criptografía post-cuántica de BouncyCastle (dependencia de pdfbox) que la app no usa: ~7 MB.
+        resources { excludes += setOf("/META-INF/{AL2.0,LGPL2.1}", "META-INF/DEPENDENCIES", "org/bouncycastle/pqc/**") }
+        // Librerías nativas comprimidas: APK mucho más liviano para descargar/compartir.
+        jniLibs { useLegacyPackaging = true }
     }
+}
+
+composeCompiler {
+    // Strong skipping ya viene activado por defecto desde Kotlin 2.0.20 (aquí 2.0.21).
+    // Clases de dominio inmutables (domain.*) y java.io.File marcadas como estables: las celdas que las reciben
+    // se saltan la recomposición si no cambian (comparación por equals en vez de por identidad).
+    stabilityConfigurationFile = project.layout.projectDirectory.file("compose_compiler_config.conf")
 }
 
 dependencies {
@@ -60,6 +78,8 @@ dependencies {
     implementation("androidx.compose.animation:animation")
     implementation("androidx.compose.foundation:foundation")
     debugImplementation("androidx.compose.ui:ui-tooling")
+    // Instala el perfil de referencia (baseline-prof.txt) también en instalaciones fuera de Play (APK directo).
+    implementation("androidx.profileinstaller:profileinstaller:1.4.1")
 
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.activity:activity-compose:1.9.3")

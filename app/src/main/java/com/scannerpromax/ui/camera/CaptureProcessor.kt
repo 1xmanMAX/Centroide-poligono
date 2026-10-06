@@ -16,13 +16,13 @@ import com.scannerpromax.domain.Quad
 import com.scannerpromax.domain.ScanMode
 import com.scannerpromax.imaging.BitmapIO
 import com.scannerpromax.imaging.BookSplitter
+import com.scannerpromax.imaging.HeavyWork
 import com.scannerpromax.imaging.IdCardComposer
 import com.scannerpromax.imaging.ImageEnhancer
+import com.scannerpromax.imaging.MultiFrameFusion
 import com.scannerpromax.imaging.PerspectiveCorrector
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.math.abs
@@ -32,12 +32,47 @@ import kotlin.math.roundToInt
 
 /**
  * Procesa las capturas según el modo (libro -> 2 páginas, DNI -> anverso+reverso en una hoja).
- * Todo en Dispatchers.Default y de uno en uno (Mutex) para no disparar la memoria en gama baja.
+ * El trabajo pesado pasa por la puerta única [HeavyWork] (1 hilo de prioridad BACKGROUND, de uno en uno) para no
+ * disparar la memoria en gama baja ni quitarle CPU a la vista previa. Nunca se llama al repositorio con el
+ * permiso tomado (el repositorio tiene su propio limitador y podría adoptar la misma puerta).
  */
 internal class CaptureProcessor(private val container: AppContainer) {
 
-    private val heavy = Mutex()
     private val tier get() = container.deviceTier
+
+    init {
+        // Contexto para cargar el modelo de super-resolución (MAGIC_PRO) desde assets
+        ImageEnhancer.init(container.appContext)
+    }
+
+    /**
+     * Modo poca luz / anti-reflejos: fusiona la ráfaga [files] (MultiFrameFusion: alineación ORB/ECC, promedio
+     * robusto y mínimo de luminancia en los brillos) en UN archivo que sigue el flujo normal. Con un solo
+     * archivo lo devuelve tal cual. Borra las fotos de la ráfaga. Si la fusión falla, sigue con la primera foto.
+     */
+    suspend fun mergeBurst(files: List<File>, removeGlare: Boolean = true): File {
+        if (files.size <= 1) return files.first()
+        return HeavyWork.run {
+                val out = container.documents.newCaptureFile()
+                try {
+                    val lowEnd = tier.isLowRam || tier.cores <= 4
+                    MultiFrameFusion.fuseFiles(
+                        files.map { it.absolutePath }, out.absolutePath,
+                        maxPixels = MultiFrameFusion.recommendedMaxPixels(tier),
+                        removeGlare = removeGlare, jpegQuality = if (lowEnd) 92 else 95, lowEnd = lowEnd,
+                    )
+                    withContext(NonCancellable + Dispatchers.IO) { files.forEach { it.delete() } }
+                    out
+                } catch (c: kotlinx.coroutines.CancellationException) {
+                    withContext(NonCancellable + Dispatchers.IO) { out.delete(); files.forEach { it.delete() } }
+                    throw c
+                } catch (t: Throwable) {
+                    Log.w(TAG, "No se pudo fusionar la ráfaga; se usa la primera foto", t)
+                    withContext(NonCancellable + Dispatchers.IO) { out.delete(); files.drop(1).forEach { it.delete() } }
+                    files.first()
+                }
+        }
+    }
 
     /** Documento, recibo, pizarra, foto: el repositorio detecta bordes y aplica el filtro del modo. */
     suspend fun addStandard(docId: String, file: File, mode: ScanMode? = null) {
@@ -48,36 +83,57 @@ internal class CaptureProcessor(private val container: AppContainer) {
         }
     }
 
-    /** Libro abierto: recorta el libro completo, detecta el lomo y guarda las páginas izquierda y derecha. */
-    suspend fun addBook(docId: String, file: File, edits: PageEdits) = withContext(Dispatchers.Default) {
-        heavy.withLock {
-            var bmp: Bitmap? = null
-            var warped: Bitmap? = null
-            var left: Bitmap? = null
-            var right: Bitmap? = null
-            try {
-                val src = BitmapIO.decode(file.absolutePath, tier.maxWorkingPixels)
-                bmp = src
-                val quad = detectQuad(src, minConfidence = 0.45f, minAreaFraction = 0.25f)
-                val base = if (quad != null) {
-                    PerspectiveCorrector.warp(src, quad).also {
-                        warped = it
-                        // El original completo ya no hace falta: liberarlo antes de dividir baja el pico de memoria.
-                        src.recycle(); bmp = null
-                    }
-                } else src
-                val split = BookSplitter.split(base)
-                left = split.left
-                right = split.right
-                // Libera lo antes posible para reducir el pico de memoria antes de guardar.
-                warped?.recycle(); warped = null
-                bmp?.recycle(); bmp = null
-                container.documents.addPageFromBitmap(docId, split.left, edits)
-                container.documents.addPageFromBitmap(docId, split.right, edits)
-            } finally {
-                listOfNotNull(bmp, warped, left, right).forEach { if (!it.isRecycled) it.recycle() }
-                withContext(NonCancellable + Dispatchers.IO) { file.delete() }
+    /**
+     * Libro abierto: recorta el libro completo, detecta el lomo y guarda las páginas izquierda y derecha.
+     * Con el permiso pesado: decodificar, recortar y dividir; la página derecha se guarda a un JPEG temporal
+     * (calidad 98) y se libera. Sin el permiso: cada página se entrega al repositorio de una en una, así no se
+     * retienen tres bitmaps grandes mientras el repositorio espera su turno de render.
+     */
+    suspend fun addBook(docId: String, file: File, edits: PageEdits) {
+        var left: Bitmap? = null
+        var right: Bitmap? = null
+        var rightFile: File? = null
+        try {
+            val split = HeavyWork.run {
+                var bmp: Bitmap? = null
+                var warped: Bitmap? = null
+                var l: Bitmap? = null
+                var r: Bitmap? = null
+                try {
+                    val src = BitmapIO.decode(file.absolutePath, tier.maxWorkingPixels)
+                    bmp = src
+                    val quad = detectQuad(src, minConfidence = 0.45f, minAreaFraction = 0.25f)
+                    val base = if (quad != null) {
+                        PerspectiveCorrector.warp(src, quad).also {
+                            warped = it
+                            // El original completo ya no hace falta: liberarlo antes de dividir baja el pico.
+                            src.recycle(); bmp = null
+                        }
+                    } else src
+                    val sp = BookSplitter.split(base)
+                    l = sp.left; r = sp.right
+                    warped?.recycle(); warped = null
+                    bmp?.recycle(); bmp = null
+                    val rf = container.documents.newCaptureFile()
+                    rightFile = rf
+                    withContext(Dispatchers.IO) { BitmapIO.saveJpeg(sp.right, rf.absolutePath, 98) }
+                    sp.right.recycle(); r = null
+                    sp.left.also { l = null }
+                } finally {
+                    listOfNotNull(bmp, warped, l, r).forEach { if (!it.isRecycled) it.recycle() }
+                }
             }
+            left = split
+            container.documents.addPageFromBitmap(docId, split, edits)
+            split.recycle(); left = null
+            val rf = rightFile ?: return
+            val rb = withContext(Dispatchers.IO) { BitmapIO.decode(rf.absolutePath, tier.maxWorkingPixels) }
+            right = rb
+            container.documents.addPageFromBitmap(docId, rb, edits)
+        } finally {
+            left?.let { if (!it.isRecycled) it.recycle() }
+            right?.let { if (!it.isRecycled) it.recycle() }
+            withContext(NonCancellable + Dispatchers.IO) { file.delete(); rightFile?.delete() }
         }
     }
 
@@ -97,7 +153,7 @@ internal class CaptureProcessor(private val container: AppContainer) {
         var out = side
         if (enhance != null && enhance != FilterType.ORIGINAL) {
             try {
-                val e = heavy.withLock { ImageEnhancer.apply(side, enhance, Adjustments(), tier, false) }
+                val e = HeavyWork.run { ImageEnhancer.apply(side, enhance, Adjustments(), tier, false) }
                 if (e !== side) { side.recycle(); out = e }
             } catch (t: Throwable) {
                 if (t is kotlinx.coroutines.CancellationException) { side.recycle(); throw t }
@@ -122,8 +178,8 @@ internal class CaptureProcessor(private val container: AppContainer) {
         }
     }
 
-    private suspend fun cropCardSideRaw(file: File, guide: RectF?): Bitmap = withContext(Dispatchers.Default) {
-        heavy.withLock {
+    private suspend fun cropCardSideRaw(file: File, guide: RectF?): Bitmap =
+        HeavyWork.run {
             val maxPx = min(tier.maxWorkingPixels, 8_000_000)
             val src = BitmapIO.decode(file.absolutePath, maxPx)
             try {
@@ -143,17 +199,15 @@ internal class CaptureProcessor(private val container: AppContainer) {
                 withContext(NonCancellable + Dispatchers.IO) { file.delete() }
             }
         }
-    }
 
     /** Compone anverso (+ reverso opcional) en una hoja A4 y la añade como página. No recicla las entradas. */
-    suspend fun addIdCard(docId: String, front: Bitmap, back: Bitmap?, edits: PageEdits) = withContext(Dispatchers.Default) {
-        heavy.withLock {
-            val page = IdCardComposer.compose(front, back)
-            try {
-                container.documents.addPageFromBitmap(docId, page, edits)
-            } finally {
-                page.recycle()
-            }
+    suspend fun addIdCard(docId: String, front: Bitmap, back: Bitmap?, edits: PageEdits) {
+        // Componer con el permiso; entregar al repositorio sin él (no anidar puertas de trabajo pesado).
+        val page = HeavyWork.run { IdCardComposer.compose(front, back) }
+        try {
+            container.documents.addPageFromBitmap(docId, page, edits)
+        } finally {
+            page.recycle()
         }
     }
 

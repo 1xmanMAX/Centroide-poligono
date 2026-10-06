@@ -41,17 +41,20 @@ data class BrandColors(
     val card: Color,
     val isDark: Boolean,
 ) {
+    // Los degradados se crean UNA vez por tema (antes un getter creaba un Brush nuevo en cada acceso, en cada
+    // recomposición de cada tarjeta/botón: basura y comparaciones de igualdad fallidas que impedían saltarse
+    // recomposiciones).
+
     /** Degradado principal (violeta -> turquesa) en diagonal. */
-    val gradient: Brush get() = Brush.linearGradient(listOf(gradientStart, gradientEnd))
+    val gradient: Brush = Brush.linearGradient(listOf(gradientStart, gradientEnd))
 
     /** Degradado horizontal para textos / barras. */
-    val horizontalGradient: Brush get() = Brush.horizontalGradient(listOf(gradientStart, gradientEnd))
+    val horizontalGradient: Brush = Brush.horizontalGradient(listOf(gradientStart, gradientEnd))
 
     /** Halo suave para fondos de cabecera. */
-    val backdrop: Brush
-        get() = Brush.verticalGradient(
-            listOf(gradientStart.copy(alpha = if (isDark) 0.22f else 0.12f), Color.Transparent),
-        )
+    val backdrop: Brush = Brush.verticalGradient(
+        listOf(gradientStart.copy(alpha = if (isDark) 0.22f else 0.12f), Color.Transparent),
+    )
 }
 
 private val DarkBrand = BrandColors(

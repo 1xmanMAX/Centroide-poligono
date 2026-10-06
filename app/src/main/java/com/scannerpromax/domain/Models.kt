@@ -16,6 +16,7 @@ enum class ScanMode(val label: String) {
 /** Filtros de mejora. Cada uno lo implementa [com.scannerpromax.imaging.ImageEnhancer]. */
 @Serializable
 enum class FilterType(val label: String) {
+    AUTO("Auto inteligente"),   // clasifica el contenido (texto, color, foto, recibo, pizarra, poca luz, pantalla) y elige el procesamiento
     ORIGINAL("Original"),
     MAGIC("Mágico"),            // color limpio: fondo blanco, sin sombras, tinta saturada y nítida
     MAGIC_PRO("Mágico Pro"),    // MAGIC + super-resolución ligera + des-ruido fuerte (fotos de cámaras malas)
@@ -93,6 +94,7 @@ data class Page(
     val edits: PageEdits = PageEdits(),
     val ocrText: String? = null,
     val ocrFile: String? = null,     // JSON con OcrResult (para capa de texto del PDF)
+    val ocrEditedText: String? = null, // texto corregido por el usuario (sobrevive a un nuevo OCR)
 )
 
 @Serializable
@@ -110,15 +112,39 @@ data class Document(
 @Serializable
 data class OcrRect(val left: Float, val top: Float, val right: Float, val bottom: Float)
 
+/** Palabra reconocida (Text.Element de ML Kit) con su caja alineada a los ejes y confianza (-1 = desconocida). */
 @Serializable
-data class OcrLine(val text: String, val box: OcrRect)
+data class OcrWord(val text: String, val box: OcrRect, val confidence: Float = -1f)
+
+/**
+ * Línea reconocida. [words] y [angle] (grados, positivo = horario en coordenadas de imagen; la caja es la envolvente
+ * alineada a los ejes) son opcionales: los JSON antiguos no los tienen.
+ */
+@Serializable
+data class OcrLine(
+    val text: String,
+    val box: OcrRect,
+    val words: List<OcrWord> = emptyList(),
+    val angle: Float = 0f,
+    val confidence: Float = -1f,
+)
 
 @Serializable
 data class OcrBlock(val text: String, val box: OcrRect, val lines: List<OcrLine>)
 
 /** Coordenadas en píxeles de la imagen PROCESADA sobre la que se corrió el OCR. */
 @Serializable
-data class OcrResult(val text: String, val imageWidth: Int, val imageHeight: Int, val blocks: List<OcrBlock>)
+data class OcrResult(
+    val text: String,
+    val imageWidth: Int,
+    val imageHeight: Int,
+    val blocks: List<OcrBlock>,
+    /** Texto corregido por el usuario (lo rellena el repositorio desde [Page.ocrEditedText] al cargar). */
+    val editedText: String? = null,
+) {
+    /** Texto a mostrar/exportar: el corregido si existe, si no el reconocido. */
+    val displayText: String get() = editedText ?: text
+}
 
 // ---------- Exportación ----------
 
@@ -152,7 +178,28 @@ enum class CompressionLevel(val label: String, val dpi: Int, val jpegQuality: In
 data class PdfOptions(
     val pageSize: PageSize = PageSize.AUTO,
     val quality: ExportQuality = ExportQuality.HIGH,
-    val searchable: Boolean = true,   // capa de texto OCR invisible
+    val searchable: Boolean = true,   // capa de texto OCR invisible (API antigua; ver textMode)
     val marginPt: Float = 0f,
     val password: String? = null,
-)
+    /** Modo de texto. null = se deduce de [searchable] (true -> BUSCABLE, false -> SOLO_IMAGEN). */
+    val textMode: PdfTextMode? = null,
+    /** Dónde van las páginas de texto visible en [PdfTextMode.BUSCABLE_CON_TEXTO]. */
+    val textPlacement: TextPlacement = TextPlacement.AFTER_EACH_PAGE,
+) {
+    val effectiveTextMode: PdfTextMode
+        get() = textMode ?: if (searchable) PdfTextMode.BUSCABLE else PdfTextMode.SOLO_IMAGEN
+}
+
+/** Qué texto lleva el PDF. */
+enum class PdfTextMode(val label: String, val description: String, val needsOcr: Boolean, val hasImages: Boolean) {
+    SOLO_IMAGEN("Solo imagen", "PDF de imágenes, sin texto", false, true),
+    BUSCABLE("Buscable (recomendado)", "Imagen + texto invisible: buscar, seleccionar y copiar", true, true),
+    BUSCABLE_CON_TEXTO("Buscable + texto reconocido", "Además añade páginas con el texto reconocido legible", true, true),
+    SOLO_TEXTO("Solo texto", "Solo el texto reconocido maquetado: muy liviano", true, false),
+}
+
+/** Ubicación de las páginas de texto reconocido. */
+enum class TextPlacement(val label: String) {
+    AFTER_EACH_PAGE("Tras cada página"),
+    END_OF_DOCUMENT("Al final del documento"),
+}

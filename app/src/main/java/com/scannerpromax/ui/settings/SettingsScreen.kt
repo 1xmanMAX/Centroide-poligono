@@ -86,14 +86,17 @@ import com.scannerpromax.ui.theme.brand
 import kotlinx.coroutines.launch
 
 /** Qué selector (hoja inferior) está abierto. */
-private enum class Picker { FILTER, PAGE_SIZE, QUALITY }
+private enum class Picker { FILTER, PAGE_SIZE, QUALITY, PDF_TEXT }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    val settings by container.settings.settings.collectAsStateWithLifecycle(initialValue = AppSettings())
+    // Flow recordado: SettingsRepository.settings devuelve un Flow nuevo en cada acceso y collectAsState
+    // reiniciaba la recolección en cada recomposición.
+    val settingsFlow = remember(container) { container.settings.settings }
+    val settings by settingsFlow.collectAsStateWithLifecycle(initialValue = AppSettings())
     var picker by remember { mutableStateOf<Picker?>(null) }
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
 
@@ -155,12 +158,11 @@ fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
                     onClick = { picker = Picker.QUALITY },
                 )
                 GroupDivider()
-                SwitchRow(
+                ValueRow(
                     icon = Icons.Rounded.TextFields,
-                    title = "PDF con texto buscable",
-                    subtitle = "Añade una capa de texto OCR invisible para buscar y copiar",
-                    checked = settings.searchablePdf,
-                    onCheckedChange = { v -> update { it.copy(searchablePdf = v) } },
+                    title = "Texto en el PDF",
+                    value = settings.pdfTextMode.label,
+                    onClick = { picker = Picker.PDF_TEXT },
                 )
             }
 
@@ -232,6 +234,15 @@ fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
             label = { it.label },
             description = { "Hasta ${it.maxLongSide} px · JPEG ${it.jpegQuality} %" + qualityHint(it) },
             onSelect = { v -> update { it.copy(exportQuality = v) } },
+            onDismiss = { picker = null },
+        )
+        Picker.PDF_TEXT -> ChoiceSheet(
+            title = "Texto en el PDF",
+            options = com.scannerpromax.domain.PdfTextMode.entries,
+            selected = settings.pdfTextMode,
+            label = { it.label },
+            description = { it.description },
+            onSelect = { v -> update { it.copy(pdfTextMode = v) } },
             onDismiss = { picker = null },
         )
         null -> Unit
@@ -453,8 +464,9 @@ private fun <T> ChoiceSheet(
 }
 
 private fun filterDescription(f: FilterType): String = when (f) {
+    FilterType.AUTO -> "Detecta el tipo de documento y aplica la mejor mejora (recomendado)"
     FilterType.ORIGINAL -> "Sin cambios de color, solo recorte"
-    FilterType.MAGIC -> "Fondo blanco, sin sombras y tinta nítida (recomendado)"
+    FilterType.MAGIC -> "Fondo blanco, sin sombras y tinta nítida"
     FilterType.MAGIC_PRO -> "Máxima mejora: des-ruido fuerte y más detalle para cámaras modestas"
     FilterType.NO_SHADOW -> "Elimina sombras conservando los colores"
     FilterType.GRAYSCALE -> "Escala de grises limpia"

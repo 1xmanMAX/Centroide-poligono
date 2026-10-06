@@ -3,17 +3,25 @@ package com.scannerpromax.pdf
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.RectF
+import android.util.Log
+import com.scannerpromax.domain.FilterType
+import com.scannerpromax.domain.OcrLine
 import com.scannerpromax.domain.OcrResult
 import com.scannerpromax.domain.PageSize
 import com.scannerpromax.domain.PdfOptions
+import com.scannerpromax.domain.PdfTextMode
+import com.scannerpromax.domain.TextPlacement
 import com.scannerpromax.export.ImageCodec
 import com.scannerpromax.imaging.ProgressCallback
+import com.scannerpromax.ocr.OcrText
+import com.scannerpromax.ocr.TextAligner
 import com.tom_roush.pdfbox.cos.COSName
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.pdmodel.PDPage
 import com.tom_roush.pdfbox.pdmodel.PDPageContentStream
 import com.tom_roush.pdfbox.pdmodel.common.PDRectangle
 import com.tom_roush.pdfbox.pdmodel.font.PDFont
+import com.tom_roush.pdfbox.pdmodel.font.PDType0Font
 import com.tom_roush.pdfbox.pdmodel.font.PDType1Font
 import com.tom_roush.pdfbox.pdmodel.graphics.color.PDDeviceGray
 import com.tom_roush.pdfbox.pdmodel.graphics.image.JPEGFactory
@@ -35,8 +43,23 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
-/** Una página a exportar: imagen procesada en disco y (opcional) su OCR para la capa de texto invisible. */
-data class PdfPageInput(val imageFile: File, val ocr: OcrResult?)
+/**
+ * Una página a exportar: imagen procesada en disco y (opcional) su OCR para la capa de texto invisible y las páginas
+ * de texto reconocido. Si [OcrResult.editedText] está presente se usa el texto corregido por el usuario.
+ */
+data class PdfPageInput(
+    val imageFile: File,
+    val ocr: OcrResult?,
+    /**
+     * true = la página es binaria (filtros B/N, Ahorro tinta): se incrusta a 1 bit sin analizarla.
+     * false = tiene grises/color: nunca se binariza (firmas a lápiz, sellos tenues, logos grises).
+     * null = desconocido (PDF externos, compresor): se decide con [ImageCodec.isNearlyBinary].
+     */
+    val binaryHint: Boolean? = null,
+)
+
+/** [PdfPageInput.binaryHint] según el filtro de la página: B/N y Ahorro tinta son binarios; el resto no. */
+fun binaryHintFor(filter: FilterType): Boolean = filter == FilterType.BLACK_WHITE || filter == FilterType.ECO_INK
 
 /**
  * Exportador de PDF con pdfbox-android.
@@ -44,7 +67,13 @@ data class PdfPageInput(val imageFile: File, val ocr: OcrResult?)
  *  - Imágenes casi binarias (filtros B/N, ahorro de tinta) -> 1 bit + Flate: nítidas y diminutas.
  *  - El resto -> JPEG con la calidad elegida; si el procesado ya es un JPEG de calidad suficiente y no
  *    hay que reducirlo, se incrusta tal cual (sin pérdida extra ni recodificación).
- *  - Capa de texto OCR invisible (PDF con búsqueda / copiar texto).
+ *  - Modos de texto ([PdfTextMode]):
+ *     · BUSCABLE: capa invisible palabra a palabra, con su ancho exacto y la inclinación de la línea, de modo que
+ *       buscar/seleccionar/copiar en cualquier visor resalta justo encima del texto impreso.
+ *     · BUSCABLE_CON_TEXTO: además, páginas "Texto reconocido – Página N" legibles (tras cada página o al final).
+ *     · SOLO_TEXTO: solo las páginas de texto (muy liviano).
+ *  - Fuente Liberation Sans (incluida en pdfbox-android) incrustada como subconjunto: soporte completo de
+ *    español (á é í ó ú ñ ü ¿ ¡ €) tanto en la capa invisible como en el texto visible.
  */
 class PdfExporter(private val context: Context) {
 
@@ -55,14 +84,32 @@ class PdfExporter(private val context: Context) {
             output.parentFile?.mkdirs()
             val tmp = File(output.parentFile, output.name + ".part")
             val doc = PDDocument(PdfSupport.tempMemorySetting(context))
+            val mode = options.effectiveTextMode
             try {
                 PdfSupport.applyMetadata(doc, output.nameWithoutExtension)
-                val font: PDFont = PDType1Font.HELVETICA
-                val sanitizer = TextSanitizer(font)
+                val fonts = Fonts(doc)
+                val deferredText = ArrayList<Pair<Int, OcrResult?>>()
                 pages.forEachIndexed { index, input ->
                     currentCoroutineContext().ensureActive()
-                    addPage(doc, input, options, font, sanitizer)
+                    val pageNo = index + 1
+                    when (mode) {
+                        PdfTextMode.SOLO_TEXTO -> addTextPages(doc, titleFor(pageNo, pages.size), input.ocr, textPageSize(options, null), fonts)
+                        else -> {
+                            val box = addImagePage(doc, input, options, mode, fonts)
+                            if (mode == PdfTextMode.BUSCABLE_CON_TEXTO) {
+                                if (options.textPlacement == TextPlacement.AFTER_EACH_PAGE) {
+                                    addTextPages(doc, titleFor(pageNo, pages.size), input.ocr, textPageSize(options, box), fonts)
+                                } else {
+                                    deferredText += pageNo to input.ocr
+                                }
+                            }
+                        }
+                    }
                     progress?.invoke((index + 1f) / (pages.size + 1f))
+                }
+                for ((pageNo, ocr) in deferredText) {
+                    currentCoroutineContext().ensureActive()
+                    addTextPages(doc, titleFor(pageNo, pages.size), ocr, textPageSize(options, null), fonts)
                 }
                 options.password?.takeIf { it.isNotEmpty() }?.let { PdfSupport.protect(doc, it) }
                 tmp.delete()
@@ -80,13 +127,70 @@ class PdfExporter(private val context: Context) {
 
     // -----------------------------------------------------------------------------------------
 
-    private fun addPage(doc: PDDocument, input: PdfPageInput, options: PdfOptions, font: PDFont, sanitizer: TextSanitizer) {
+    /** Fuentes del documento (se cargan solo si hacen falta). */
+    private inner class Fonts(private val doc: PDDocument) {
+        private var loaded: PDFont? = null
+        private var sanitizerCache: TextSanitizer? = null
+        var ascent = 0.905f
+            private set
+        var descent = 0.212f
+            private set
+
+        val font: PDFont
+            get() = loaded ?: loadUnicode().also { f ->
+                loaded = f
+                f.fontDescriptor?.let { d ->
+                    if (d.ascent > 0f) ascent = d.ascent / 1000f
+                    if (d.descent < 0f) descent = -d.descent / 1000f
+                }
+            }
+
+        val sanitizer: TextSanitizer
+            get() = sanitizerCache ?: TextSanitizer(font).also { sanitizerCache = it }
+
+        private fun loadUnicode(): PDFont = try {
+            context.assets.open(LIBERATION_SANS).use { PDType0Font.load(doc, it, true) }
+        } catch (t: Throwable) {
+            Log.w(TAG, "No se pudo cargar Liberation Sans; se usa Helvetica", t)
+            PDType1Font.HELVETICA
+        }
+
+        fun widthEm(text: String): Float = try {
+            font.getStringWidth(text) / 1000f
+        } catch (_: Exception) {
+            0f
+        }
+    }
+
+    private fun titleFor(pageNo: Int, total: Int) =
+        if (total == 1) "Texto reconocido" else "Texto reconocido – Página $pageNo"
+
+    /**
+     * Tamaño de las páginas de texto: el de la página de imagen (vertical) solo si es una hoja estándar; si es
+     * estrecha o con proporción rara (recibos, recortes) se usa el tamaño elegido o A4, para que el texto no quede
+     * partido casi palabra a palabra.
+     */
+    private fun textPageSize(options: PdfOptions, imageBox: PDRectangle?): PDRectangle {
+        if (imageBox != null) {
+            val w = min(imageBox.width, imageBox.height)
+            val h = max(imageBox.width, imageBox.height)
+            val aspect = w / h
+            val standard = listOf(PageSize.A4, PageSize.LETTER, PageSize.LEGAL)
+                .any { abs(it.widthPt / it.heightPt - aspect) / aspect < 0.08f }
+            if (w >= MIN_TEXT_PAGE_WIDTH && standard) return PDRectangle(w, h)
+        }
+        val size = if (options.pageSize == PageSize.AUTO) PageSize.A4 else options.pageSize
+        return PDRectangle(size.widthPt, size.heightPt)
+    }
+
+    /** Página de imagen (+ capa invisible si el modo lo pide). Devuelve su tamaño. */
+    private fun addImagePage(doc: PDDocument, input: PdfPageInput, options: PdfOptions, mode: PdfTextMode, fonts: Fonts): PDRectangle {
         val file = input.imageFile
         if (!file.exists()) throw IOException("Falta la imagen de una página")
         val (srcW, srcH) = ImageCodec.bounds(file)
         if (srcW <= 0 || srcH <= 0) throw IOException("Imagen de página ilegible")
 
-        val image = createImage(doc, file, srcW, srcH, options)
+        val image = createImage(doc, file, srcW, srcH, options, input.binaryHint)
         // Las dimensiones en puntos se calculan sobre el aspecto de la imagen original.
         val (mediaBox, placement) = layout(srcW.toFloat(), srcH.toFloat(), options)
         val page = PDPage(mediaBox)
@@ -95,19 +199,46 @@ class PdfExporter(private val context: Context) {
         PDPageContentStream(doc, page, PDPageContentStream.AppendMode.OVERWRITE, true).use { cs ->
             cs.drawImage(image, placement.left, placement.top, placement.width(), placement.height())
             val ocr = input.ocr
-            if (options.searchable && ocr != null && ocr.blocks.isNotEmpty()) {
-                writeTextLayer(cs, ocr, placement, font, sanitizer)
+            val wantsLayer = mode == PdfTextMode.BUSCABLE || mode == PdfTextMode.BUSCABLE_CON_TEXTO
+            if (wantsLayer && ocr != null && ocr.blocks.isNotEmpty() && sameAspect(ocr, srcW, srcH)) {
+                val map = ImageToPage(
+                    x0 = placement.left,
+                    yTop = placement.top + placement.height(),
+                    sx = placement.width() / ocr.imageWidth,
+                    sy = placement.height() / ocr.imageHeight,
+                )
+                writeTextLayer(cs, ocr, map, fonts)
             }
         }
+        return mediaBox
+    }
+
+    /** El OCR debe corresponder a esta imagen (mismo aspecto; si no, es de una versión anterior y se omite). */
+    private fun sameAspect(ocr: OcrResult, w: Int, h: Int): Boolean {
+        if (ocr.imageWidth <= 0 || ocr.imageHeight <= 0) return false
+        val a = w.toFloat() / h
+        val b = ocr.imageWidth.toFloat() / ocr.imageHeight
+        return abs(a - b) / a < 0.03f
     }
 
     /** Crea el XObject de imagen con la codificación más eficiente para su contenido. */
-    private fun createImage(doc: PDDocument, file: File, srcW: Int, srcH: Int, options: PdfOptions): PDImageXObject {
+    private fun createImage(
+        doc: PDDocument,
+        file: File,
+        srcW: Int,
+        srcH: Int,
+        options: PdfOptions,
+        binaryHint: Boolean?,
+    ): PDImageXObject {
         val maxLong = options.quality.maxLongSide
         val needsResize = max(srcW, srcH) > maxLong
 
-        if (ImageCodec.isNearlyBinary(file)) {
-            val bmp = ImageCodec.decodeScaled(file, maxLong)
+        // El filtro conocido evita una decodificación extra + recorrido de píxeles por página (y falsos positivos).
+        val binary = binaryHint ?: ImageCodec.isNearlyBinary(file)
+        if (binary) {
+            // A 1 bit reducir apenas ahorra espacio pero deja el texto dentado: se conserva hasta ~300 ppp en A4.
+            val binaryLong = min(max(srcW, srcH), max(maxLong, BINARY_MIN_LONG_SIDE))
+            val bmp = ImageCodec.decodeScaled(file, binaryLong)
             try {
                 return PdfSupport.binaryImage(doc, bmp)
             } finally {
@@ -170,46 +301,120 @@ class PdfExporter(private val context: Context) {
         return if (portrait) w to h else h to w
     }
 
-    /** Capa de texto invisible: cada línea OCR se ajusta (tamaño + escala horizontal) a su caja. */
-    private fun writeTextLayer(cs: PDPageContentStream, ocr: OcrResult, place: RectF, font: PDFont, sanitizer: TextSanitizer) {
-        if (ocr.imageWidth <= 0 || ocr.imageHeight <= 0) return
-        val sx = place.width() / ocr.imageWidth
-        val sy = place.height() / ocr.imageHeight
-        val bottomY = place.top + place.height() // borde superior de la imagen en coords PDF
+    /**
+     * Capa de texto invisible de precisión.
+     *  - Nivel de palabra cuando el OCR trae palabras: cada una en el centro de su caja, girada como su línea y con
+     *    su ancho exacto (escala horizontal); un espacio tras cada palabra para que copiar/extraer separe bien.
+     *  - Texto corregido por el usuario: alineado con las líneas detectadas ([TextAligner]); si una línea conserva
+     *    el número de palabras se reutilizan sus cajas, si no se ajusta la línea completa a su caja.
+     */
+    private fun writeTextLayer(cs: PDPageContentStream, ocr: OcrResult, map: ImageToPage, fonts: Fonts) {
+        val lines: List<OcrLine> = ocr.blocks.flatMap { it.lines }
+        if (lines.isEmpty()) return
+        val original = lines.map { wordsOf(it) }
+        val corrected = ocr.editedText?.let { TextAligner.align(original, it) }
+        val font = fonts.font
+        val sanitizer = fonts.sanitizer
         cs.beginText()
         cs.setRenderingMode(RenderingMode.NEITHER)
-        for (block in ocr.blocks) {
-            for (line in block.lines) {
-                val text = sanitizer.clean(line.text)
-                if (text.isBlank()) continue
-                val bw = (line.box.right - line.box.left) * sx
-                val bh = (line.box.bottom - line.box.top) * sy
-                if (bw < 1f || bh < 1f) continue
-                val fontSize = bh * 0.92f
-                val textWidth = try {
-                    font.getStringWidth(text) / 1000f * fontSize
-                } catch (_: Exception) {
-                    continue
+        var currentSize = -1f
+        var currentScale = -1f
+
+        fun show(text: String, trailingSpace: Boolean, box: com.scannerpromax.domain.OcrRect, angle: Float, lineH: Float) {
+            val clean = sanitizer.clean(text)
+            if (clean.isEmpty()) return
+            val run = TextLayerGeometry.place(box, angle, lineH, fonts.widthEm(clean), map, fonts.ascent, fonts.descent) ?: return
+            try {
+                if (run.fontSize != currentSize) { cs.setFont(font, run.fontSize); currentSize = run.fontSize }
+                if (run.hScale != currentScale) { cs.setHorizontalScaling(run.hScale); currentScale = run.hScale }
+                cs.setTextMatrix(Matrix(run.cos, run.sin, -run.sin, run.cos, run.x, run.y))
+                cs.showText(if (trailingSpace) "$clean " else clean)
+            } catch (_: IllegalArgumentException) {
+                // Carácter no codificable que escapó al filtro: se omite.
+            }
+        }
+
+        lines.forEachIndexed { i, line ->
+            val words = corrected?.get(i) ?: original[i]
+            if (words.isEmpty()) return@forEachIndexed
+            val lineH = TextLayerGeometry.lineHeight(line.box, line.angle)
+            if (line.words.isNotEmpty() && words.size == line.words.size) {
+                line.words.forEachIndexed { k, w ->
+                    show(words[k], trailingSpace = true, box = w.box, angle = line.angle, lineH = lineH)
                 }
-                if (textWidth <= 0f) continue
-                val hScale = (bw / textWidth * 100f).coerceIn(5f, 1000f)
-                val x = place.left + line.box.left * sx
-                val baseline = bottomY - line.box.bottom * sy + bh * 0.2f
-                try {
-                    cs.setFont(font, fontSize)
-                    cs.setHorizontalScaling(hScale)
-                    cs.setTextMatrix(Matrix.getTranslateInstance(x, baseline))
-                    cs.showText(text)
-                } catch (_: IllegalArgumentException) {
-                    // Carácter no codificable que escapó al filtro: se omite la línea.
-                }
+            } else {
+                show(words.joinToString(" "), trailingSpace = true, box = line.box, angle = line.angle, lineH = lineH)
             }
         }
         cs.endText()
     }
+
+    private fun wordsOf(line: OcrLine): List<String> =
+        if (line.words.isNotEmpty()) line.words.map { it.text } else TextAligner.tokenize(line.text)
+
+    /** Páginas visibles "Texto reconocido": título, párrafos y salto de página automático. */
+    private fun addTextPages(doc: PDDocument, title: String, ocr: OcrResult?, size: PDRectangle, fonts: Fonts) {
+        val font = fonts.font
+        val sanitizer = fonts.sanitizer
+        val paragraphs = OcrText.paragraphs(ocr).map { sanitizer.clean(it) }.filter { it.isNotBlank() }
+        val style = TextPageLayout.Style(pageWidth = size.width, pageHeight = size.height)
+        val pagesLayout = TextPageLayout.layout(
+            title = sanitizer.clean(title),
+            paragraphs = paragraphs,
+            style = style,
+            emptyNote = sanitizer.clean("(No se reconoció texto en esta página)"),
+        ) { text, fs -> fonts.widthEm(text) * fs }
+        for (lines in pagesLayout) {
+            val page = PDPage(PDRectangle(size.width, size.height))
+            doc.addPage(page)
+            PDPageContentStream(doc, page, PDPageContentStream.AppendMode.OVERWRITE, true).use { cs ->
+                // Filete bajo el título.
+                lines.lastOrNull { it.kind == TextPageLayout.Kind.TITLE }?.let { t ->
+                    cs.setStrokingColor(0.42f, 0.36f, 0.95f)
+                    cs.setLineWidth(1.2f)
+                    val y = t.y - t.size * 0.55f
+                    cs.moveTo(style.margin, y)
+                    cs.lineTo(size.width - style.margin, y)
+                    cs.stroke()
+                }
+                cs.beginText()
+                for (l in lines) {
+                    when (l.kind) {
+                        TextPageLayout.Kind.TITLE -> cs.setNonStrokingColor(0.17f, 0.14f, 0.45f)
+                        TextPageLayout.Kind.BODY -> cs.setNonStrokingColor(0.08f, 0.08f, 0.1f)
+                        TextPageLayout.Kind.NOTE -> cs.setNonStrokingColor(0.45f, 0.45f, 0.5f)
+                    }
+                    try {
+                        cs.setFont(font, l.size)
+                        cs.setTextMatrix(Matrix.getTranslateInstance(l.x, l.y))
+                        cs.showText(l.text)
+                    } catch (_: IllegalArgumentException) {
+                    }
+                }
+                // Pie discreto.
+                cs.setNonStrokingColor(0.55f, 0.55f, 0.6f)
+                try {
+                    cs.setFont(font, 7.5f)
+                    cs.setTextMatrix(Matrix.getTranslateInstance(style.margin, style.margin / 2f))
+                    cs.showText(sanitizer.clean("Texto reconocido automáticamente (OCR) · ${PdfSupport.PRODUCER}"))
+                } catch (_: IllegalArgumentException) {
+                }
+                cs.endText()
+            }
+        }
+    }
+
+    private companion object {
+        const val TAG = "PdfExporter"
+        const val LIBERATION_SANS = "com/tom_roush/pdfbox/resources/ttf/LiberationSans-Regular.ttf"
+        /** Ancho mínimo (pt) para reutilizar el tamaño de la imagen en las páginas de texto. */
+        const val MIN_TEXT_PAGE_WIDTH = 420f
+        /** Lado largo mínimo de las imágenes de 1 bit (A4 a 300 ppp). */
+        const val BINARY_MIN_LONG_SIDE = 3508
+    }
 }
 
-/** Deja solo caracteres codificables por la fuente (Helvetica/WinAnsi cubre todo el español). */
+/** Deja solo caracteres codificables por la fuente (Liberation Sans cubre latín ampliado, griego y cirílico). */
 internal class TextSanitizer(private val font: PDFont) {
     private val cache = HashMap<Char, Char?>()
 

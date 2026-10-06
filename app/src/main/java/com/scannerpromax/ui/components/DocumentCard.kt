@@ -41,12 +41,17 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import coil.compose.SubcomposeAsyncImage
+import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import coil.size.Precision
 import com.scannerpromax.domain.ScanMode
+import com.scannerpromax.ui.theme.LocalPerf
 import com.scannerpromax.ui.theme.PillShape
 import com.scannerpromax.ui.theme.brand
 import java.io.File
+
+/** Degradado inferior de las tarjetas: constante (no se crea un Brush por tarjeta y recomposición). */
+private val BottomScrim = Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.45f)))
 
 /** Acciones del menú contextual de un documento. null = opción oculta. */
 class DocumentActions(
@@ -94,7 +99,7 @@ fun DocumentCard(
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
                         .height(48.dp)
-                        .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.45f)))),
+                        .background(BottomScrim),
                 )
                 Badge(
                     text = pagesLabel(pageCount),
@@ -148,7 +153,8 @@ fun DocumentListItem(
                     .height(72.dp)
                     .clip(MaterialTheme.shapes.small),
             ) {
-                Thumbnail(thumbnail, mode, Modifier.fillMaxSize())
+                // Celda de 56×72 dp: no hace falta decodificar más de ~200 px.
+                Thumbnail(thumbnail, mode, Modifier.fillMaxSize(), sizePx = 200)
             }
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
@@ -171,39 +177,38 @@ fun DocumentListItem(
     }
 }
 
-/** Miniatura con Coil: decodificada a tamaño reducido (ahorro de memoria) y marcador mientras carga. */
+/**
+ * Miniatura con Coil: decodificada a tamaño reducido (ahorro de memoria) y marcador mientras carga.
+ *
+ * Rendimiento: antes era un SubcomposeAsyncImage (una subcomposición por celda, lo más caro al desplazar una
+ * rejilla). Ahora el marcador se dibuja DEBAJO y un AsyncImage normal encima: sin subcomposición y sin
+ * recomponer al terminar de cargar. Tamaño de decodificación según el tier ([LocalPerf]) y precisión INEXACT
+ * (solo submuestreo potencia de 2, sin un reescalado extra en CPU).
+ */
 @Composable
-fun Thumbnail(file: File?, mode: ScanMode, modifier: Modifier = Modifier, sizePx: Int = 360) {
+fun Thumbnail(file: File?, mode: ScanMode, modifier: Modifier = Modifier, sizePx: Int = 0) {
     val context = LocalContext.current
-    val placeholder: @Composable () -> Unit = {
-        Box(
-            Modifier
-                .fillMaxSize()
-                .background(MaterialTheme.colorScheme.surfaceContainerHighest),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(mode.icon, null, Modifier.size(32.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
+    val perf = LocalPerf.current
+    val side = if (sizePx > 0) sizePx else perf.thumbPx
+    Box(modifier.background(MaterialTheme.colorScheme.surfaceContainerHighest), contentAlignment = Alignment.Center) {
+        Icon(mode.icon, null, Modifier.size(32.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
+        if (file != null) {
+            val request = remember(file.path, side, perf.reduceMotion) {
+                ImageRequest.Builder(context)
+                    .data(file)
+                    .size(side)
+                    .precision(Precision.INEXACT)
+                    .crossfade(if (perf.reduceMotion) 0 else perf.duration(160))
+                    .build()
+            }
+            AsyncImage(
+                model = request,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
         }
     }
-    if (file == null) {
-        Box(modifier) { placeholder() }
-        return
-    }
-    val request = remember(file.path, sizePx) {
-        ImageRequest.Builder(context)
-            .data(file)
-            .size(sizePx)
-            .crossfade(180)
-            .build()
-    }
-    SubcomposeAsyncImage(
-        model = request,
-        contentDescription = null,
-        contentScale = ContentScale.Crop,
-        modifier = modifier.background(Color.White),
-        loading = { placeholder() },
-        error = { placeholder() },
-    )
 }
 
 @Composable

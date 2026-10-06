@@ -70,6 +70,11 @@ internal fun isConvexQuad(p: List<Offset>): Boolean {
  * Herramienta de recorte: imagen original con 4 esquinas arrastrables + puntos medios de cada lado,
  * lupa ampliada mientras se arrastra (precisión al píxel) y aviso visual si el cuadrilátero no es válido.
  *
+ * Rendimiento: durante el arrastre las esquinas viven en un estado LOCAL que solo se lee en la fase de
+ * dibujo (Canvas), así cada movimiento del dedo solo redibuja (sin recomponer esta herramienta ni la pantalla
+ * del editor). [onQuadChange] se llama al soltar. Las rutas (Path) se reutilizan entre frames y la lupa dibuja
+ * una región del ImageBitmap ya cargado (no crea bitmaps por frame).
+ *
  * [quad] en coordenadas de [image] (null = página completa). [onQuadChange] recibe coordenadas de [image].
  */
 @Composable
@@ -88,12 +93,24 @@ internal fun CropTool(
     var boxSize by remember { mutableStateOf(IntSize.Zero) }
     var active by remember { mutableIntStateOf(-1) }
     var finger by remember { mutableStateOf(Offset.Zero) }
+    /** Esquinas durante el arrastre (null = usar [quad]). Solo se lee al dibujar y en los gestos. */
+    var dragPts by remember { mutableStateOf<List<Pt>?>(null) }
+    // Rutas reutilizadas en cada frame (sin asignaciones en el bucle de dibujo).
+    val quadPath = remember { Path() }
+    val maskPath = remember { Path() }
+    val loupeClip = remember { Path() }
 
     val w = image.width.toFloat()
     val h = image.height.toFloat()
     val pts: List<Pt> = (quad ?: Quad.full(image.width, image.height)).points()
     val currentPts by rememberUpdatedState(pts)
     val onChange by rememberUpdatedState(onQuadChange)
+    fun livePts(): List<Pt> = dragPts ?: currentPts
+    fun commitDrag() {
+        dragPts?.let { onChange(Quad.of(it)) }
+        dragPts = null
+        active = -1
+    }
 
     val rect = fitRect(boxSize, image.width, image.height, pad)
     val scale = if (w > 0f) rect.width / w else 1f
@@ -109,7 +126,7 @@ internal fun CropTool(
             .pointerInput(image) {
                 detectDragGestures(
                     onDragStart = { pos ->
-                        val p = currentPts
+                        val p = livePts()
                         // 0..3 esquinas, 4..7 puntos medios (lado i -> i+1). Las esquinas tienen prioridad.
                         val candidates = ArrayList<Pair<Int, Float>>(8)
                         for (i in 0 until 4) candidates += i to (toView(p[i]) - pos).getDistance()
@@ -129,7 +146,7 @@ internal fun CropTool(
                         val s = currentScale.coerceAtLeast(1e-4f)
                         val dx = amount.x / s
                         val dy = amount.y / s
-                        val p = currentPts.toMutableList()
+                        val p = livePts().toMutableList()
                         if (idx < 4) {
                             p[idx] = Pt((p[idx].x + dx).coerceIn(0f, w), (p[idx].y + dy).coerceIn(0f, h))
                         } else {
@@ -143,10 +160,10 @@ internal fun CropTool(
                             p[i] = Pt((p[i].x + dn * nx).coerceIn(0f, w), (p[i].y + dn * ny).coerceIn(0f, h))
                             p[j] = Pt((p[j].x + dn * nx).coerceIn(0f, w), (p[j].y + dn * ny).coerceIn(0f, h))
                         }
-                        onChange(Quad.of(p))
+                        dragPts = p
                     },
-                    onDragEnd = { active = -1 },
-                    onDragCancel = { active = -1 },
+                    onDragEnd = { commitDrag() },
+                    onDragCancel = { commitDrag() },
                 )
             },
     ) {
@@ -159,15 +176,17 @@ internal fun CropTool(
                 dstOffset = IntOffset(rect.left.roundToInt(), rect.top.roundToInt()),
                 dstSize = IntSize(rect.width.roundToInt(), rect.height.roundToInt()),
             )
-            val v = pts.map { toView(it) }
+            val v = livePts().map { toView(it) }
             val valid = isConvexQuad(v)
-            val path = Path().apply {
+            val path = quadPath.apply {
+                reset()
                 moveTo(v[0].x, v[0].y)
                 for (i in 1 until 4) lineTo(v[i].x, v[i].y)
                 close()
             }
             // Oscurece lo que queda fuera del recorte
-            val mask = Path().apply {
+            val mask = maskPath.apply {
+                reset()
                 fillType = PathFillType.EvenOdd
                 addRect(rect)
                 addPath(path)
@@ -218,7 +237,7 @@ internal fun CropTool(
                     val a = v[idx - 4]; val b = v[(idx - 3) % 4]
                     Offset((a.x + b.x) / 2f, (a.y + b.y) / 2f)
                 }
-                drawLoupe(image, rect, scale, target, finger, if (valid) primary else error)
+                drawLoupe(image, rect, scale, target, finger, if (valid) primary else error, clip = loupeClip)
             }
         }
     }
@@ -248,6 +267,8 @@ internal fun DrawScope.drawLoupe(
     accent: Color,
     /** Radio del pincel en px de pantalla (0 = sin anillo). Se dibuja ampliado dentro de la lupa. */
     brushRadiusPx: Float = 0f,
+    /** Path reutilizable para el recorte circular (evita crear uno por frame). */
+    clip: Path? = null,
 ) {
     val radius = 58f * density
     val margin = 16f * density
@@ -276,7 +297,10 @@ internal fun DrawScope.drawLoupe(
     if (sr > image.width) { dr -= (sr - image.width) * k; sr = image.width.toFloat() }
     if (sb > image.height) { db -= (sb - image.height) * k; sb = image.height.toFloat() }
 
-    val circle = Path().apply { addOval(Rect(center, radius)) }
+    val circle = (clip ?: Path()).apply {
+        reset()
+        addOval(Rect(center, radius))
+    }
     drawCircle(Color.Black.copy(alpha = 0.35f), radius = radius + 4f * density, center = center + Offset(0f, 2f * density))
     clipPath(circle) {
         drawRect(Color(0xFF101010), topLeft = Offset(center.x - radius, center.y - radius), size = Size(radius * 2, radius * 2))

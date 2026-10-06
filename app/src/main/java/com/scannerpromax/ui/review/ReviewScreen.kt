@@ -32,7 +32,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items as listItems
 import androidx.compose.foundation.selection.selectable
@@ -76,6 +76,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -91,6 +92,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import com.scannerpromax.ui.theme.LocalPerf
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.Role
@@ -101,6 +103,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import coil.size.Precision
 import com.scannerpromax.data.AppSettings
 import com.scannerpromax.di.AppContainer
 import com.scannerpromax.domain.Document
@@ -466,8 +470,7 @@ fun ReviewScreen(
                             }
                         }
                     }
-                    items(order, key = { it.id }) { page ->
-                        val index = order.indexOf(page)
+                    itemsIndexed(order, key = { _, p -> p.id }, contentType = { _, _ -> "page" }) { index, page ->
                         val dragging = reorder.draggingKey == page.id
                         val lift by animateFloatAsState(if (dragging) 1.06f else 1f, tween(150), label = "lift")
                         val itemModifier = if (dragging) {
@@ -780,19 +783,38 @@ private fun PageCard(
     val brand = MaterialTheme.brand
     var menu by remember { mutableStateOf(false) }
 
-    // Miniatura: si falta (p. ej. tras cambiar ediciones) se regenera en segundo plano.
-    val thumb: File? = repo.thumbFile(docId, page)
-    LaunchedEffect(page.id, page.thumbFile, page.edits) {
-        if (repo.thumbFile(docId, page) == null) runCatching { repo.processedFile(docId, page) }
+    val context = LocalContext.current
+    val perf = LocalPerf.current
+    // Miniatura: se elige el archivo en segundo plano (antes se hacían File.exists() en el hilo principal en
+    // cada recomposición de cada celda: jank al desplazar en almacenamiento lento). Si falta (p. ej. tras cambiar
+    // ediciones) se regenera en segundo plano y el Flow del documento trae la nueva.
+    val model by produceState<File?>(initialValue = null, page.id, page.thumbFile, page.processedFile, page.edits) {
+        value = withContext(Dispatchers.IO) {
+            repo.thumbFile(docId, page)
+                ?: page.processedFile?.let { File(repo.docDir(docId), it) }?.takeIf { it.exists() }
+                ?: repo.originalFile(docId, page)
+        }
+        if (withContext(Dispatchers.IO) { repo.thumbFile(docId, page) } == null) {
+            runCatching { repo.processedFile(docId, page) }
+        }
     }
-    val model: Any = thumb
-        ?: page.processedFile?.let { File(repo.docDir(docId), it) }?.takeIf { it.exists() }
-        ?: repo.originalFile(docId, page)
+    // Decodificación acotada: aunque el modelo sea el original de 8-12 MP, Coil lo submuestrea al tamaño de celda.
+    val request = remember(model, perf.thumbPx) {
+        model?.let {
+            ImageRequest.Builder(context)
+                .data(it)
+                .size(perf.thumbPx)
+                .precision(Precision.INEXACT)
+                .build()
+        }
+    }
 
     val shape = RoundedCornerShape(18.dp)
     Column(
         modifier
-            .shadow(if (dragging) 18.dp else 2.dp, shape)
+            // En gama baja sin sombra en reposo (una sombra por celda es trabajo extra de la GPU en cada frame
+            // de desplazamiento); al arrastrar sí, para que se note que la página está "levantada".
+            .shadow(if (dragging) 18.dp else if (perf.lowEnd) 0.dp else 2.dp, shape)
             .clip(shape)
             .background(MaterialTheme.colorScheme.surfaceContainer)
             .then(if (dragging) Modifier.border(BorderStroke(2.dp, brand.gradient), shape) else Modifier)
@@ -807,7 +829,7 @@ private fun PageCard(
                 .background(MaterialTheme.colorScheme.surfaceContainerHighest),
         ) {
             AsyncImage(
-                model = model,
+                model = request,
                 contentDescription = "Página $number",
                 contentScale = ContentScale.Fit,
                 modifier = Modifier.fillMaxSize(),

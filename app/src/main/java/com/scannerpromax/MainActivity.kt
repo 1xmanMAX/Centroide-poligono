@@ -8,11 +8,25 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.scannerpromax.data.AppSettings
 import com.scannerpromax.ui.navigation.AppNavHost
 import com.scannerpromax.ui.theme.EscanerTheme
+import com.scannerpromax.ui.theme.LocalPerf
+import com.scannerpromax.ui.theme.PerfConfig
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     /** PDF recibido de otra app (compartir / abrir con) para comprimir. */
@@ -22,17 +36,46 @@ class MainActivity : ComponentActivity() {
     private val incomingImages = MutableStateFlow<List<Uri>>(emptyList())
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        installSplashScreen()
+        val app = application as ScannerApp
+        // El splash se mantiene hasta que el hilo de arranque cargó OpenCV/PdfBox y los documentos (sin bloquear
+        // el hilo principal: la condición solo lee un StateFlow en cada frame).
+        installSplashScreen().setKeepOnScreenCondition { !app.ready.value }
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         // Solo en el primer arranque: si la actividad se recrea (p. ej. tras morir el proceso),
         // el intent original no debe volver a llevar al compresor ni reimportar imágenes.
         if (savedInstanceState == null) handleIntent(intent)
-        val container = (application as ScannerApp).container
+        val container = app.container
+        val perf = PerfConfig.from(this, container.deviceTier)
         setContent {
-            val settings = container.settings.settings.collectAsStateWithLifecycle(initialValue = AppSettings()).value
-            EscanerTheme(darkTheme = settings.darkTheme, dynamicColor = settings.dynamicColor) {
-                AppNavHost(container = container, incomingPdf = incomingPdf, incomingImages = incomingImages)
+            // Flow recordado: SettingsRepository.settings crea un Flow nuevo en cada acceso y collectAsState
+            // reiniciaba la recolección (lectura de DataStore) en cada recomposición.
+            val settingsFlow = remember { container.settings.settings }
+            val initial = remember { app.initialSettings ?: AppSettings() }
+            val settings = settingsFlow.collectAsStateWithLifecycle(initialValue = initial).value
+            val ready by app.ready.collectAsStateWithLifecycle()
+            CompositionLocalProvider(LocalPerf provides perf) {
+                EscanerTheme(darkTheme = settings.darkTheme, dynamicColor = settings.dynamicColor) {
+                    if (ready) {
+                        AppNavHost(container = container, incomingPdf = incomingPdf, incomingImages = incomingImages)
+                    } else {
+                        // Detrás del splash: solo el fondo. La navegación (que usa OpenCV y los documentos) se
+                        // compone cuando todo está listo, así el hilo principal nunca espera a la inicialización.
+                        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background))
+                    }
+                }
+            }
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // Al pasar a segundo plano: escribir ya los doc.json con cambios diferidos (OCR, miniaturas) por si el
+        // sistema mata el proceso.
+        val app = application as ScannerApp
+        if (app.ready.value) {
+            lifecycleScope.launch(Dispatchers.IO + NonCancellable) {
+                runCatching { app.container.documents.flushPendingWrites() }
             }
         }
     }

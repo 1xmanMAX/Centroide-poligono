@@ -204,12 +204,16 @@ internal object Cv {
 
     /**
      * Estima el fondo (papel + iluminación) de la imagen a baja resolución.
-     * 1) dilatación (elimina tinta fina) + mediana, 2) máscara de "papel" (claro respecto de su entorno y poco
-     * saturado), 3) relleno de zonas no-papel (fotos, bloques de color, regiones oscuras) por convolución
-     * normalizada multiescala, 4) suavizado y re-escalado al tamaño completo.
+     * 1) cierre morfológico (elimina tinta fina sin desplazar bordes) + mediana, 2) máscara de "papel" (claro respecto de su entorno y poco
+     * saturado), 2b) SOMBRAS DURAS (mano, celular): zonas oscuras respecto del entorno pero lisas (papel sin
+     * textura una vez quitada la tinta) y conectadas con el borde de la imagen también son papel -> se
+     * normalizan en vez de rellenarse con el nivel del papel iluminado (antes quedaban como una mancha gris),
+     * 3) relleno de zonas no-papel (fotos, bloques de color, regiones oscuras) por convolución
+     * normalizada multiescala, 4) suavizado, 5) con [refine]: afinado con filtro guiado a resolución media
+     * (guía = imagen sin tinta) para que el borde de las sombras quede nítido y sin halo, 6) re-escalado.
      * Funciona con 8UC1 u 8UC3 (RGB). Devuelve un Mat del mismo tamaño/tipo que [img], sin ceros.
      */
-    fun estimateBackground(img: Mat, workSide: Int = 256): Mat = MatBag().use { bag ->
+    fun estimateBackground(img: Mat, workSide: Int = 256, refine: Boolean = false, refineSide: Int = 512): Mat = MatBag().use { bag ->
         val color = img.channels() >= 3
         val sm = bag.mat()
         downscale(img, sm, workSide)
@@ -217,7 +221,9 @@ internal object Cv {
 
         val k = oddAtLeast(side * 0.02, 3)
         val d = bag.mat()
-        Imgproc.dilate(sm, d, kernel(Imgproc.MORPH_ELLIPSE, k))
+        // CIERRE (dilatación + erosión) en vez de sólo dilatación: quita igual la tinta fina pero NO desplaza
+        // los bordes de las sombras grandes (la dilatación metía ~k/2 px de nivel iluminado dentro de la sombra).
+        Imgproc.morphologyEx(sm, d, Imgproc.MORPH_CLOSE, kernel(Imgproc.MORPH_ELLIPSE, k))
         Imgproc.medianBlur(d, d, oddAtLeast(side * 0.02, 3))
 
         // Canales V (brillo) y S (saturación)
@@ -241,6 +247,7 @@ internal object Cv {
         Core.compare(v, vmax, paper, Core.CMP_GE)
         Core.compare(s, Scalar(70.0), m2, Core.CMP_LT)
         Core.bitwise_and(paper, m2, paper)
+        addShadowRegions(v, s, vmax, paper, bag)
         if (Core.countNonZero(paper) < 0.15 * w * h) paper.setTo(Scalar(255.0))
         Imgproc.erode(paper, paper, kernel(Imgproc.MORPH_RECT, 3))
         if (Core.countNonZero(paper) == 0) paper.setTo(Scalar(255.0))
@@ -257,8 +264,8 @@ internal object Cv {
             if (Core.countNonZero(hole) == 0) break
             if (ch == 3) Core.merge(listOf(mf, mf, mf), mC) else mf.copyTo(mC)
             Core.multiply(out, mC, weighted)
-            Imgproc.GaussianBlur(weighted, num, Size(0.0, 0.0), sig)
-            Imgproc.GaussianBlur(mf, den, Size(0.0, 0.0), sig)
+            blurLarge(weighted, num, sig)
+            blurLarge(mf, den, sig)
             Core.max(den, Scalar(1e-4), den)
             if (ch == 3) Core.merge(listOf(den, den, den), denC) else den.copyTo(denC)
             Core.divide(num, denC, fill)
@@ -276,10 +283,284 @@ internal object Cv {
         Imgproc.GaussianBlur(out, out, Size(0.0, 0.0), max(1.0, side / 80.0))
         val out8 = bag.mat()
         out.convertTo(out8, if (color) CvType.CV_8UC3 else CvType.CV_8UC1)
-        Core.max(out8, Scalar(1.0, 1.0, 1.0, 1.0), out8)
+        // Ganancia acotada: en zonas casi negras (sin papel, tapa puesta, escena a oscuras) el fondo quedaba en
+        // 1..10 y img/fondo·230 convertía ±3 de ruido en ±140 niveles (gris moteado). Suelo = max(16, 25 % del
+        // percentil 90 del fondo) -> ganancia máxima ~x14 en el peor caso y ~x4 respecto al papel iluminado.
+        Core.max(out8, Scalar.all(backgroundFloor(out8)), out8)
+        val src8 = if (refine && min(img.cols(), img.rows()) >= 64) bag.add(refineBackground(img, out8, refineSide)) else out8
         val full = Mat()
-        Imgproc.resize(out8, full, img.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
+        Imgproc.resize(src8, full, img.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
         full
+    }
+
+    /** Suelo del fondo estimado (ver [estimateBackground]): max(16, 0.25·percentil 90 de su luminancia). */
+    private fun backgroundFloor(bg8: Mat): Double {
+        val g = if (bg8.channels() == 1) bg8 else gray(bg8)
+        try {
+            return max(16.0, 0.25 * percentile(histogram(g), 0.9))
+        } finally {
+            if (g !== bg8) g.release()
+        }
+    }
+
+    /**
+     * ¿Imagen prácticamente negra? (percentil 90 de la luminancia < [limit] a baja resolución). En ese caso no
+     * hay papel que normalizar: dividir por el fondo sólo amplifica ruido.
+     */
+    fun isNearlyBlack(img: Mat, limit: Int = 20): Boolean = MatBag().use { bag ->
+        val sm = bag.mat(); downscale(img, sm, 256)
+        val g = if (sm.channels() == 1) sm else bag.add(gray(sm))
+        percentile(histogram(g), 0.9) < limit
+    }
+
+    /**
+     * Desenfoque gaussiano de sigma grande sobre un campo suave: para sigma > 6 se reduce la imagen ~sigma/3
+     * veces, se difumina allí y se vuelve a ampliar (bilineal). Mismo resultado visual que el kernel completo
+     * (cientos de taps a sigma = side/4) a una fracción del coste: la estimación de fondo pasa de ~17 a ~9 ms
+     * a 256 px en un PC (más en un A53).
+     */
+    private fun blurLarge(src: Mat, dst: Mat, sigma: Double) {
+        if (sigma <= 6.0) { Imgproc.GaussianBlur(src, dst, Size(0.0, 0.0), sigma); return }
+        val f = sigma / 3.0
+        val sw = max(4, (src.cols() / f).roundToInt()); val sh = max(4, (src.rows() / f).roundToInt())
+        val sm = Mat()
+        try {
+            Imgproc.resize(src, sm, Size(sw.toDouble(), sh.toDouble()), 0.0, 0.0, Imgproc.INTER_AREA)
+            Imgproc.GaussianBlur(sm, sm, Size(0.0, 0.0), sigma * sw / src.cols())
+            Imgproc.resize(sm, dst, src.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
+        } finally { sm.release() }
+    }
+
+    /**
+     * Añade a [paper] las sombras duras: candidatas = más oscuras que el entorno ([vmax] ya escalado), poco
+     * saturadas, LISAS (desviación local baja en la imagen sin tinta) y no negras; se aceptan las componentes
+     * conexas grandes (>= 2 %) que tocan el borde (las sombras de la mano/celular entran desde fuera de la hoja;
+     * los bloques oscuros impresos suelen estar dentro de los márgenes).
+     */
+    private fun addShadowRegions(v: Mat, s: Mat, vmax: Mat, paper: Mat, bag: MatBag) {
+        val w = v.cols(); val h = v.rows()
+        val vf = bag.mat(); v.convertTo(vf, CvType.CV_32F)
+        val k = Size(5.0, 5.0)
+        val m = bag.mat(); Imgproc.blur(vf, m, k)
+        val sq = bag.mat(); Core.multiply(vf, vf, sq); Imgproc.blur(sq, sq, k)
+        val m2 = bag.mat(); Core.multiply(m, m, m2)
+        Core.subtract(sq, m2, sq); Core.max(sq, Scalar(0.0), sq); Core.sqrt(sq, sq)
+        val thr = bag.mat(); Core.multiply(m, Scalar(0.06), thr); Core.max(thr, Scalar(4.0), thr)
+        val cand = bag.mat(); Core.compare(sq, thr, cand, Core.CMP_LT)
+        val t = bag.mat()
+        Core.compare(v, vmax, t, Core.CMP_LT); Core.bitwise_and(cand, t, cand)
+        Core.compare(s, Scalar(70.0), t, Core.CMP_LT); Core.bitwise_and(cand, t, cand)
+        Core.compare(v, Scalar(12.0), t, Core.CMP_GT); Core.bitwise_and(cand, t, cand)
+        // Física de una sombra de mano/móvil: atenúa el papel a 0.35..0.75 de su nivel, no lo deja casi negro.
+        // [vmax] llega ya escalado por 0.62 -> v > 0.3·máximo local  <=>  v > vmax·(0.3/0.62).
+        val vmin = bag.mat(); Core.multiply(vmax, Scalar(0.30 / 0.62), vmin)
+        Core.compare(v, vmin, t, Core.CMP_GT); Core.bitwise_and(cand, t, cand)
+        if (Core.countNonZero(cand) < 0.02 * w * h) return
+        val labels = bag.mat(); val stats = bag.mat(); val cents = bag.mat()
+        val n = Imgproc.connectedComponentsWithStats(cand, labels, stats, cents, 4, CvType.CV_32S)
+        val minA = 0.02 * w * h
+        val row = IntArray(5)
+        val acc = bag.mat(); acc.create(v.size(), CvType.CV_8UC1); acc.setTo(Scalar(0.0))
+        var any = false
+        var accepted = 0.0
+        val maxTotal = 0.45 * w * h
+        // Las componentes grandes primero: si el total acumulado supera el 45 % de la imagen ya no es una sombra
+        // (es mesa, fondo o una zona oscura impresa) y se dejan de aceptar regiones.
+        val order = (1 until n).map { i -> stats.get(i, 0, row); i to row[4] }.sortedByDescending { it.second }
+        for ((i, _) in order) {
+            stats.get(i, 0, row)
+            val x = row[0]; val y = row[1]; val ww = row[2]; val hh = row[3]; val a = row[4]
+            if (a < minA) break
+            val touches = x == 0 || y == 0 || x + ww >= w || y + hh >= h
+            if (!touches) continue
+            // Franja recta que recorre un lado de punta a punta (mesa sin recortar, lomo de libro, banda a
+            // sangre): rellena casi todo su rectángulo. Las sombras de mano/móvil son irregulares.
+            val spansW = ww >= 0.96 * w && (y == 0 || y + hh >= h)
+            val spansH = hh >= 0.96 * h && (x == 0 || x + ww >= w)
+            val fill = a.toDouble() / max(1, ww * hh)
+            if ((spansW || spansH) && fill > 0.85) continue
+            if (accepted + a > maxTotal) continue
+            Core.compare(labels, Scalar(i.toDouble()), t, Core.CMP_EQ)
+            Core.bitwise_or(acc, t, acc)
+            accepted += a
+            any = true
+        }
+        if (!any) return
+        // Franja del borde de la sombra (no es "lisa" por el escalón): con el cierre morfológico su valor es
+        // fiable -> también papel. Sin esto se rellenaba mezclando ambos lados y quedaba una banda gris.
+        // (Sombra dura sintética: error en el borde 24.5 -> 11.9 niveles, en el papel 9.1 -> 6.3.)
+        val band = bag.mat()
+        Imgproc.dilate(acc, band, kernel(Imgproc.MORPH_RECT, 7))
+        Core.compare(s, Scalar(70.0), t, Core.CMP_LT); Core.bitwise_and(band, t, band)
+        Core.compare(v, Scalar(12.0), t, Core.CMP_GT); Core.bitwise_and(band, t, band)
+        Core.bitwise_or(acc, band, acc)
+        Core.bitwise_or(paper, acc, paper)
+    }
+
+    /**
+     * Afinado del fondo estimado a baja resolución con un filtro guiado conjunto a ~512 px: la guía es la
+     * luminancia sin tinta (cierre morfológico + mediana), así los bordes de las sombras siguen a la imagen
+     * real en lugar de un degradado borroso. Devuelve el fondo a resolución media (mismos canales que [bgSmall]).
+     */
+    private fun refineBackground(img: Mat, bgSmall: Mat, side0: Int): Mat = MatBag().use { bag ->
+        val mid = bag.mat()
+        downscale(img, mid, max(64, side0))
+        val g = if (mid.channels() == 1) mid else bag.add(gray(mid))
+        val side = max(g.cols(), g.rows())
+        val guide8 = bag.mat()
+        Imgproc.morphologyEx(g, guide8, Imgproc.MORPH_CLOSE, kernel(Imgproc.MORPH_ELLIPSE, oddAtLeast(side * 0.015, 3)))
+        Imgproc.medianBlur(guide8, guide8, 5)
+        val guide = bag.mat(); guide8.convertTo(guide, CvType.CV_32F, 1.0 / 255.0)
+        val bgm8 = bag.mat()
+        Imgproc.resize(bgSmall, bgm8, g.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
+        val bgm = bag.mat(); bgm8.convertTo(bgm, CvType.CV_32F, 1.0 / 255.0)
+        val q = bag.add(guidedFilter(guide, bgm, max(2, (side / 20.0).roundToInt()), 1e-4))
+        val out = Mat()
+        q.convertTo(out, bgSmall.type(), 255.0)
+        Core.max(out, Scalar(1.0, 1.0, 1.0, 1.0), out)
+        out
+    }
+
+    /**
+     * Filtro guiado de He et al. (O(N) con boxFilter) con guía [guide] 32FC1 y entrada [p] 32FC1/32FC3.
+     * Para imágenes pequeñas/medias (los intermedios son float del tamaño completo). Devuelve Mat nuevo 32F.
+     */
+    fun guidedFilter(guide: Mat, p: Mat, r: Int, eps: Double): Mat = MatBag().use { bag ->
+        val k = Size(2.0 * r + 1, 2.0 * r + 1)
+        val mI = bag.mat(); Imgproc.boxFilter(guide, mI, CvType.CV_32F, k)
+        val varI = bag.mat(); Imgproc.sqrBoxFilter(guide, varI, CvType.CV_32F, k)
+        val t = bag.mat(); Core.multiply(mI, mI, t); Core.subtract(varI, t, varI)
+        Core.add(varI, Scalar(eps), varI)
+        val chans = ArrayList<Mat>(3)
+        if (p.channels() == 1) chans.add(p) else Core.split(p, chans)
+        val outs = ArrayList<Mat>(chans.size)
+        val mp = bag.mat(); val mIp = bag.mat(); val a = bag.mat(); val b = bag.mat()
+        for (c in chans) {
+            Imgproc.boxFilter(c, mp, CvType.CV_32F, k)
+            Core.multiply(guide, c, mIp); Imgproc.boxFilter(mIp, mIp, CvType.CV_32F, k)
+            Core.multiply(mI, mp, t); Core.subtract(mIp, t, mIp)       // cov(I, p)
+            Core.divide(mIp, varI, a)
+            Core.multiply(a, mI, t); Core.subtract(mp, t, b)
+            Imgproc.boxFilter(a, a, CvType.CV_32F, k); Imgproc.boxFilter(b, b, CvType.CV_32F, k)
+            val q = Mat(); Core.multiply(a, guide, q); Core.add(q, b, q)
+            outs.add(q)
+        }
+        if (p.channels() != 1) for (c in chans) c.release()
+        if (outs.size == 1) outs[0] else {
+            val m = Mat(); Core.merge(outs, m); for (o in outs) o.release(); m
+        }
+    }
+
+    /**
+     * Filtro guiado AUTO-GUIADO sobre un canal 8U (des-ruido que preserva bordes de letras, O(N)).
+     * a = var/(var+eps), b = media·(1-a): en el papel liso (var << eps) promedia; en los trazos (var >> eps)
+     * conserva el píxel. Se procesa por BANDAS horizontales: memoria acotada (los float de la banda) y mejor
+     * uso de caché (en un PC: 8 MP en ~90 ms frente a ~210 ms de una pasada completa, mismo resultado exacto).
+     * [sub] = 2 calcula a, b a media resolución ("fast guided filter") para vistas previas.
+     */
+    fun guidedSelf(src: Mat, dst: Mat, r: Int, eps: Double, sub: Int = 1) {
+        require(src.type() == CvType.CV_8UC1)
+        val w = src.cols(); val h = src.rows()
+        if (sub > 1) { guidedSelfSub(src, dst, r, eps, sub); return }
+        if (dst !== src) dst.create(h, w, CvType.CV_8UC1)
+        val pad = 2 * r + 1
+        val band = max(64, min(h, 196_608 / max(1, w) * 2))
+        val k = Size(2.0 * r + 1, 2.0 * r + 1)
+        val m = Mat(); val m2 = Mat(); val t = Mat(); val a = Mat(); val b = Mat(); val sf = Mat(); val q8 = Mat()
+        // Si dst === src hay que leer de una copia de las filas originales (las bandas se solapan)
+        val source = if (dst === src) src.clone() else src
+        try {
+            var y = 0
+            while (y < h) {
+                val y1 = min(h, y + band)
+                val ya = max(0, y - pad); val yb = min(h, y1 + pad)
+                val roi = source.submat(ya, yb, 0, w)
+                Imgproc.boxFilter(roi, m, CvType.CV_32F, k)
+                Imgproc.sqrBoxFilter(roi, m2, CvType.CV_32F, k)
+                Core.multiply(m, m, t); Core.subtract(m2, t, m2)            // var
+                Core.add(m2, Scalar(eps), t); Core.divide(m2, t, a)         // a = var/(var+eps)
+                Core.multiply(a, m, t); Core.subtract(m, t, b)              // b = m - a·m
+                Imgproc.boxFilter(a, a, CvType.CV_32F, k); Imgproc.boxFilter(b, b, CvType.CV_32F, k)
+                roi.convertTo(sf, CvType.CV_32F)
+                roi.release()
+                Core.multiply(a, sf, sf); Core.add(sf, b, sf)
+                val core = sf.submat(y - ya, y - ya + (y1 - y), 0, w)
+                core.convertTo(q8, CvType.CV_8U)
+                core.release()
+                val d = dst.submat(y, y1, 0, w); q8.copyTo(d); d.release()
+                y = y1
+            }
+        } finally {
+            if (source !== src) source.release()
+            m.release(); m2.release(); t.release(); a.release(); b.release(); sf.release(); q8.release()
+        }
+    }
+
+    private fun guidedSelfSub(src: Mat, dst: Mat, r: Int, eps: Double, sub: Int) = MatBag().use { bag ->
+        val w = src.cols(); val h = src.rows()
+        val small = bag.mat()
+        Imgproc.resize(src, small, Size(max(1.0, (w / sub).toDouble()), max(1.0, (h / sub).toDouble())), 0.0, 0.0, Imgproc.INTER_AREA)
+        val rs = max(1, (r.toDouble() / sub).roundToInt())
+        val k = Size(2.0 * rs + 1, 2.0 * rs + 1)
+        val m = bag.mat(); val m2 = bag.mat(); val t = bag.mat(); val a = bag.mat(); val b = bag.mat()
+        Imgproc.boxFilter(small, m, CvType.CV_32F, k)
+        Imgproc.sqrBoxFilter(small, m2, CvType.CV_32F, k)
+        Core.multiply(m, m, t); Core.subtract(m2, t, m2)
+        Core.add(m2, Scalar(eps), t); Core.divide(m2, t, a)
+        Core.multiply(a, m, t); Core.subtract(m, t, b)
+        Imgproc.boxFilter(a, a, CvType.CV_32F, k); Imgproc.boxFilter(b, b, CvType.CV_32F, k)
+        val af = bag.mat(); val bf = bag.mat()
+        Imgproc.resize(a, af, src.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
+        Imgproc.resize(b, bf, src.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
+        val sf = bag.mat(); src.convertTo(sf, CvType.CV_32F)
+        Core.multiply(af, sf, sf); Core.add(sf, bf, sf)
+        sf.convertTo(dst, CvType.CV_8U)
+    }
+
+    /**
+     * Des-ruido de LUMINANCIA con filtro guiado (in-place sobre RGB 8UC3 o gris 8UC1). [sigma] = ruido medido
+     * del papel (0..255); eps = (2.2·sigma)² separa el grano (se alisa) de los bordes de las letras (se conservan).
+     * Radio según resolución (1..3). Mucho más rápido que NLM y que un bilateral grande, con calidad comparable.
+     */
+    fun guidedDenoiseLuma(img: Mat, sigma: Double, fast: Boolean) {
+        val long = max(img.cols(), img.rows())
+        val r = (long / 1400.0).roundToInt().coerceIn(1, 3)
+        val eps = (2.2 * max(2.0, sigma)).pow(2)
+        val sub = if (fast && long > 600) 2 else 1
+        if (img.channels() == 1) { guidedSelf(img, img, r, eps, sub); return }
+        MatBag().use { bag ->
+            val ycc = bag.mat(); Imgproc.cvtColor(img, ycc, Imgproc.COLOR_RGB2YCrCb)
+            val y = bag.mat(); Core.extractChannel(ycc, y, 0)
+            guidedSelf(y, y, r, eps, sub)
+            Core.insertChannel(y, ycc, 0)
+            Imgproc.cvtColor(ycc, img, Imgproc.COLOR_YCrCb2RGB)
+        }
+    }
+
+    /**
+     * Hilos de OpenCV según el equipo: en gama baja se deja un núcleo libre para que la interfaz (hilo
+     * principal + RenderThread) siga a 60 fps mientras se procesa. Idempotente.
+     */
+    @Volatile private var threadsConfigured = -1
+    @Volatile private var lastTier: DeviceTier? = null
+    @Volatile private var cameraActive = false
+    fun configureThreads(tier: DeviceTier) {
+        lastTier = tier
+        val cores = max(1, tier.cores)
+        val lowEnd = tier.isLowRam || cores <= 4
+        var n = if (lowEnd) max(1, cores - 1) else max(1, cores - 1).coerceAtMost(6)
+        // Con la cámara abierta en gama baja: 2 hilos como máximo, para que la vista previa, el análisis en vivo
+        // y el hilo principal no compitan con el procesado de la foto anterior.
+        if (cameraActive && lowEnd) n = min(n, 2)
+        if (threadsConfigured == n) return
+        threadsConfigured = n
+        try { Core.setNumThreads(n) } catch (_: Throwable) { }
+    }
+
+    /** La pantalla de cámara avisa al abrirse/cerrarse; en gama baja limita los hilos de OpenCV mientras tanto. */
+    fun setCameraActive(active: Boolean, tier: DeviceTier) {
+        cameraActive = active
+        configureThreads(lastTier ?: tier)
     }
 
     /** Nivel al que queda el papel tras normalizar (por debajo de 255 para no recortar el ruido y poder medirlo). */
@@ -349,9 +630,16 @@ internal object Cv {
      * Ruido relativo del papel estimado sobre un recorte central (normalizado por su propio fondo).
      * Captura también ruido correlacionado (demosaico/JPEG) de cámaras baratas.
      */
-    fun estimatePaperNoise(src: Mat): Double = MatBag().use { bag ->
+    fun estimatePaperNoise(src: Mat): Double = estimatePaperNoiseLevel(src).first
+
+    /**
+     * Como [estimatePaperNoise], y además el factor nivelDelPapel/[PAPER_LEVEL] para pasar el ruido RELATIVO
+     * a niveles reales de la imagen SIN normalizar: σ_abs = rel·factor. Los filtros que trabajan antes de dividir
+     * por el fondo (filtro guiado, promedio robusto) deben usar σ_abs: con papel a 60 el relativo sale ~4x mayor.
+     */
+    fun estimatePaperNoiseLevel(src: Mat): Pair<Double, Double> = MatBag().use { bag ->
         val w = src.cols(); val h = src.rows()
-        if (w < 16 || h < 16) return@use 0.0
+        if (w < 16 || h < 16) return@use 0.0 to 1.0
         val roi = Rect(w / 4, h / 4, max(8, w / 2), max(8, h / 2))
         val crop = bag.add(src.submat(roi))
         val g = bag.add(gray(crop))
@@ -364,7 +652,8 @@ internal object Cv {
         val bg = bag.add(estimateBackground(gs, 128))
         val n = bag.mat()
         divideByBackground(gs, bg, n)
-        paperStats(histogram(n)).first
+        val level = percentile(histogram(bg), 0.5).toDouble()
+        paperStats(histogram(n)).first to (level / PAPER_LEVEL).coerceIn(0.05, 1.15)
     }
 
     /** Color medio del papel: media de los píxeles más claros (percentil >= 85). */

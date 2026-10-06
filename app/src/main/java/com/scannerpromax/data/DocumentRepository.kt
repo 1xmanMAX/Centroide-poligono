@@ -22,9 +22,12 @@ import com.scannerpromax.ocr.OcrEngine
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -33,12 +36,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import java.io.File
@@ -48,7 +52,9 @@ import java.util.Date
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -83,7 +89,10 @@ class DocumentRepository(
      * paraleliza internamente, así que un segundo permiso solo compensa en gama alta con mucha RAM.
      */
     private val heavy = Semaphore(heavyPermits())
-    private val activeHeavy = AtomicInteger(0)
+    /** Trabajos pesados en curso o esperando permiso (el OCR de fondo espera a que llegue a 0). */
+    private val activeHeavy = MutableStateFlow(0)
+    /** Pantallas que piden pausar el OCR de fondo (cámara abierta, editor con vistas previas, fusión...). */
+    private val ocrPause = MutableStateFlow(0)
     /** Documentos borrados: los trabajos en curso no deben volver a crear su carpeta. */
     private val deletedIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
     private val pageLocks = ConcurrentHashMap<String, Mutex>()
@@ -110,6 +119,11 @@ class DocumentRepository(
     private val queuedOcr: MutableSet<String> = ConcurrentHashMap.newKeySet()
     private val ocrLocks = ConcurrentHashMap<String, Mutex>()
 
+    /** Escritura de doc.json: un candado por documento (fuera de [writeMutex]) y escrituras diferidas agrupadas. */
+    private val fileLocks = ConcurrentHashMap<String, Mutex>()
+    private val pendingWrites = ConcurrentHashMap<String, Job>()
+    private val lastWritten = ConcurrentHashMap<String, Document>()
+
     init {
         scope.launch {
             try {
@@ -127,12 +141,39 @@ class DocumentRepository(
             loaded.await()
             delay(STARTUP_OCR_DELAY_MS)
             writeMutex.withLock { docs.values.toList() }.forEach { d ->
-                d.pages.filter { it.ocrFile == null }.forEach { enqueueOcr(d.id, it.id) }
+                d.pages.filter { it.ocrFile == null }.forEach { p ->
+                    // Las páginas cuyo OCR ya falló varias veces no se reintentan en cada arranque.
+                    if (withContext(Dispatchers.IO) { ocrFailures(d.id, p.id) } < OCR_MAX_BACKGROUND_ATTEMPTS) {
+                        enqueueOcr(d.id, p.id)
+                    }
+                }
             }
         }
     }
 
     val documents: StateFlow<List<Document>> get() = _documents.asStateFlow()
+
+    /**
+     * Pausa el OCR de fondo mientras haya una pantalla sensible abierta (cámara: vista previa, análisis y ráfagas;
+     * editor: vistas previas; fusión multi-foto). Es un contador: cada llamada debe ir seguida de
+     * [resumeBackgroundOcr] (p. ej. en el onDispose de un DisposableEffect). Si hay un OCR de fondo en curso se
+     * cancela tras la pasada actual de ML Kit (lo ya reconocido se guarda) y la página se vuelve a encolar.
+     */
+    fun pauseBackgroundOcr() {
+        ocrPause.update { it + 1 }
+    }
+
+    fun resumeBackgroundOcr() {
+        ocrPause.update { (it - 1).coerceAtLeast(0) }
+    }
+
+    /** Escribe ya los doc.json con cambios diferidos (llamar al pasar a segundo plano, p. ej. en onStop). */
+    suspend fun flushPendingWrites() {
+        for (id in pendingWrites.keys.toList()) {
+            pendingWrites.remove(id)?.cancel()
+            writeLatest(id, sync = true)
+        }
+    }
 
     fun observe(docId: String): Flow<Document?> =
         _documents.map { list -> list.firstOrNull { it.id == docId } }.distinctUntilChanged()
@@ -176,7 +217,11 @@ class DocumentRepository(
             docs.remove(docId)
             publish()
         }
-        withContext(Dispatchers.IO) { docDir(docId).deleteRecursively() }
+        pendingWrites.remove(docId)?.cancel()
+        fileLock(docId).withLock {
+            withContext(Dispatchers.IO) { docDir(docId).deleteRecursively() }
+        }
+        lastWritten.remove(docId)
     }
 
     suspend fun duplicate(docId: String): Document {
@@ -395,12 +440,18 @@ class DocumentRepository(
                         cleanupStale(dir, p, keepProcessed = processedName, keepThumb = thumbName)
                         // El OCR guardado deja de ser válido solo si la imagen cambió.
                         val editsChanged = p.edits != edits
-                        if (editsChanged) p.ocrFile?.let { File(dir, it).delete() }
+                        if (editsChanged) {
+                            p.ocrFile?.let { File(dir, it).delete() }
+                            ocrFailFile(docId, pageId).delete() // imagen nueva: se vuelve a intentar
+                        }
                         p.copy(
                             edits = edits,
                             processedFile = processedName,
                             thumbFile = thumbName,
-                            ocrText = if (editsChanged) null else p.ocrText,
+                            // El texto corregido por el usuario se conserva (se realinea con el nuevo OCR); si no
+                            // hay corrección se mantiene el texto anterior como aproximación para la búsqueda
+                            // hasta que el nuevo OCR lo sustituya.
+                            ocrText = p.ocrEditedText ?: p.ocrText,
                             ocrFile = if (editsChanged) null else p.ocrFile,
                         ).also { result = it }
                     }
@@ -427,19 +478,67 @@ class DocumentRepository(
         }
     }
 
+    /**
+     * Guarda el OCR de la página. El texto corregido por el usuario vive en [Page.ocrEditedText] (no en el JSON):
+     * si [result] trae [OcrResult.editedText] distinto del reconocido se guarda como corrección; si no, se conserva
+     * la corrección que ya tuviera la página (se realinea con las nuevas líneas al exportar).
+     */
     suspend fun saveOcr(docId: String, pageId: String, result: OcrResult) {
         loaded.await()
-        val name = "$OCR_DIR/$pageId.json"
+        val page = findPage(docId, pageId) ?: return
+        saveOcrFor(docId, pageId, page.edits, result)
+    }
+
+    /**
+     * Guarda el OCR reconocido sobre la imagen de [edits]. El nombre del archivo lleva el hash de las ediciones y
+     * la comprobación "las ediciones no cambiaron" se hace dentro de la transformación atómica: un OCR de una
+     * versión anterior de la página nunca queda asociado a la nueva (capa invisible desplazada o del revés).
+     * Es una actualización recuperable: doc.json se escribe diferido y sin fsync.
+     */
+    private suspend fun saveOcrFor(
+        docId: String,
+        pageId: String,
+        edits: PageEdits,
+        result: OcrResult,
+        clearEdited: Boolean = false,
+    ) {
+        if (docId in deletedIds) return
+        val dir = docDir(docId)
+        val name = ocrName(pageId, edits)
+        val edited = result.editedText?.takeIf { it.isNotBlank() && it != result.text }
         withContext(Dispatchers.IO) {
-            val f = File(docDir(docId), name)
+            val f = File(dir, name)
             f.parentFile?.mkdirs()
-            writeAtomic(f, json.encodeToString(OcrResult.serializer(), result))
+            writeAtomic(f, json.encodeToString(OcrResult.serializer(), result.copy(editedText = null)), sync = false)
+            ocrFailFile(docId, pageId).delete()
         }
+        var attached = false
+        mutatePagesIfPresent(docId, durable = false) { pages ->
+            pages.map {
+                if (it.id != pageId || it.edits != edits) it else {
+                    attached = true
+                    it.ocrFile?.takeIf { old -> old != name }?.let { old -> File(dir, old).delete() }
+                    val keepEdited = if (clearEdited) edited else edited ?: it.ocrEditedText
+                    it.copy(ocrText = keepEdited ?: result.text, ocrFile = name, ocrEditedText = keepEdited)
+                }
+            }
+        }
+        if (!attached) withContext(Dispatchers.IO) { File(dir, name).delete() }
+    }
+
+    /**
+     * Guarda (o borra con null/vacío) el texto corregido por el usuario. Se usa en el texto visible, .txt/.docx y,
+     * alineado con las líneas detectadas, en la capa invisible del PDF.
+     */
+    suspend fun saveEditedText(docId: String, pageId: String, text: String?) {
+        val recognized = loadOcr(docId, pageId)?.text
+        val clean = text?.takeIf { it.isNotBlank() && it != recognized }
         mutatePages(docId) { pages ->
-            pages.map { if (it.id == pageId) it.copy(ocrText = result.text, ocrFile = name) else it }
+            pages.map { if (it.id == pageId) it.copy(ocrEditedText = clean, ocrText = clean ?: recognized ?: it.ocrText) else it }
         }
     }
 
+    /** OCR guardado de la página, con el texto corregido del usuario en [OcrResult.editedText] (si lo hay). */
     suspend fun loadOcr(docId: String, pageId: String): OcrResult? {
         val page = findPage(docId, pageId) ?: return null
         val name = page.ocrFile ?: return null
@@ -447,7 +546,7 @@ class DocumentRepository(
             val f = File(docDir(docId), name)
             if (!f.exists()) return@withContext null
             try {
-                json.decodeFromString(OcrResult.serializer(), f.readText())
+                json.decodeFromString(OcrResult.serializer(), f.readText()).copy(editedText = page.ocrEditedText)
             } catch (t: Throwable) {
                 Log.w(TAG, "OCR corrupto en $f", t)
                 null
@@ -471,7 +570,7 @@ class DocumentRepository(
             val expectedFile = File(dir, expected)
             if (expectedFile.exists()) {
                 if (current.processedFile != expected) {
-                    mutatePagesIfPresent(docId) { pages ->
+                    mutatePagesIfPresent(docId, durable = false) { pages ->
                         pages.map { if (it.id == current.id && it.edits == current.edits) it.copy(processedFile = expected) else it }
                     }
                 }
@@ -594,7 +693,7 @@ class DocumentRepository(
             ScanMode.ID_CARD -> PageEdits(quad = quad, filter = docFilter ?: FilterType.MAGIC, autoDeskew = false)
             ScanMode.DOCUMENT, ScanMode.RECEIPT, ScanMode.BOOK -> PageEdits(
                 quad = quad,
-                filter = docFilter ?: FilterType.MAGIC,
+                filter = docFilter ?: FilterType.AUTO,
                 autoRemoveLines = defaultAutoRemoveLines,
             )
         }
@@ -628,11 +727,15 @@ class DocumentRepository(
                     File(dir, PROCESSED_DIR).mkdirs()
                     File(dir, THUMB_DIR).mkdirs()
                     if (isBinaryFilter(edits.filter)) {
+                        saveJpegAtomic(thumb, File(dir, thumbName), THUMB_QUALITY)
+                        // El PNG tarda 1-3 s en un Cortex-A53: se suelta el permiso pesado antes de codificarlo
+                        // para que la siguiente captura empiece su render (solo quedan vivos dos bitmaps).
+                        currentCoroutineContext()[HeavyPermit]?.release()
                         saveAtomic(rendered, File(dir, processedName), Bitmap.CompressFormat.PNG, 100)
                     } else {
                         saveJpegAtomic(rendered, File(dir, processedName), PROCESSED_QUALITY)
+                        saveJpegAtomic(thumb, File(dir, thumbName), THUMB_QUALITY)
                     }
-                    saveJpegAtomic(thumb, File(dir, thumbName), THUMB_QUALITY)
                 }
             } finally {
                 if (thumb !== rendered && thumb !== original) thumb.recycle()
@@ -662,7 +765,7 @@ class DocumentRepository(
             } finally {
                 bmp.recycle()
             }
-            mutatePagesIfPresent(docId) { pages -> pages.map { if (it.id == page.id) it.copy(thumbFile = name) else it } }
+            mutatePagesIfPresent(docId, durable = false) { pages -> pages.map { if (it.id == page.id) it.copy(thumbFile = name) else it } }
         }
     }
 
@@ -707,34 +810,76 @@ class DocumentRepository(
         mutate(docId) { it.copy(pages = transform(it.pages)) }
     }
 
-    private suspend fun mutatePagesIfPresent(docId: String, transform: (List<Page>) -> List<Page>) {
+    /**
+     * Como [mutatePages] pero sin fallar si el documento ya no existe y sin tocar updatedAt. [durable] = false para
+     * actualizaciones recuperables (OCR, miniaturas, nombre del procesado): doc.json se escribe diferido, agrupado
+     * y sin fsync, así las capturas en serie y el OCR de fondo no se bloquean entre sí en la eMMC.
+     */
+    private suspend fun mutatePagesIfPresent(docId: String, durable: Boolean = true, transform: (List<Page>) -> List<Page>) {
         loaded.await()
-        writeMutex.withLock {
+        val changed = writeMutex.withLock {
             withContext(Dispatchers.IO) {
                 val doc = docs[docId]
                 if (doc != null) {
                     val updated = doc.copy(pages = transform(doc.pages))
                     if (updated != doc) {
-                        writeDocJson(updated)
                         docs[docId] = updated
                         publish()
-                    }
-                }
+                        true
+                    } else false
+                } else false
             }
         }
+        if (changed) persist(docId, durable)
     }
 
-    /** Aplica [transform] bajo el candado de escritura (en IO: el transform puede borrar archivos). */
+    /**
+     * Aplica [transform] bajo el candado de escritura (en IO: el transform puede borrar archivos) y escribe doc.json
+     * (fuera del candado global: solo bloquea a este documento).
+     */
     private suspend fun mutate(docId: String, transform: (Document) -> Document) {
         loaded.await()
         writeMutex.withLock {
             withContext(Dispatchers.IO) {
                 val doc = docs[docId] ?: throw IOException("Documento no encontrado")
                 val updated = transform(doc).copy(updatedAt = System.currentTimeMillis())
-                writeDocJson(updated)
                 docs[docId] = updated
                 publish()
             }
+        }
+        persist(docId, durable = true)
+    }
+
+    private fun fileLock(docId: String): Mutex = fileLocks.getOrPut(docId) { Mutex() }
+
+    private suspend fun persist(docId: String, durable: Boolean) {
+        if (durable) writeLatest(docId, sync = true) else scheduleWrite(docId)
+    }
+
+    /** Escritura diferida y agrupada (debounce) de doc.json. */
+    private fun scheduleWrite(docId: String) {
+        pendingWrites.computeIfAbsent(docId) {
+            scope.launch {
+                delay(WRITE_DEBOUNCE_MS)
+                pendingWrites.remove(docId)
+                try {
+                    writeLatest(docId, sync = false)
+                } catch (c: kotlinx.coroutines.CancellationException) {
+                    throw c
+                } catch (t: Throwable) {
+                    Log.w(TAG, "No se pudo guardar $docId", t)
+                }
+            }
+        }
+    }
+
+    /** Escribe la versión más reciente en memoria del documento (si cambió desde la última escritura). */
+    private suspend fun writeLatest(docId: String, sync: Boolean) {
+        fileLock(docId).withLock {
+            val snap = writeMutex.withLock { docs[docId] } ?: return@withLock
+            if (docId in deletedIds || lastWritten[docId] === snap) return@withLock
+            withContext(Dispatchers.IO) { writeDocJson(snap, sync) }
+            lastWritten[docId] = snap
         }
     }
 
@@ -742,19 +887,22 @@ class DocumentRepository(
         _documents.value = docs.values.sortedByDescending { it.updatedAt }
     }
 
-    private fun writeDocJson(doc: Document) {
+    private fun writeDocJson(doc: Document, sync: Boolean = true) {
         val dir = docDir(doc.id)
         dir.mkdirs()
-        writeAtomic(File(dir, DOC_JSON), json.encodeToString(Document.serializer(), doc))
+        writeAtomic(File(dir, DOC_JSON), json.encodeToString(Document.serializer(), doc), sync)
     }
 
-    /** Escritura atómica: archivo temporal + rename (nunca deja un JSON a medias). */
-    private fun writeAtomic(target: File, text: String) {
+    /**
+     * Escritura atómica: archivo temporal + rename (nunca deja un JSON a medias). [sync] = fsync antes del rename;
+     * se omite en actualizaciones recuperables (OCR, miniaturas) para no pagar un fsync por evento en eMMC lentas.
+     */
+    private fun writeAtomic(target: File, text: String, sync: Boolean = true) {
         val tmp = File(target.parentFile, target.name + ".tmp")
         tmp.outputStream().use { out ->
             out.write(text.toByteArray(Charsets.UTF_8))
             out.flush()
-            try { out.fd.sync() } catch (_: Throwable) { }
+            if (sync) try { out.fd.sync() } catch (_: Throwable) { }
         }
         if (!tmp.renameTo(target)) {
             target.delete()
@@ -820,18 +968,62 @@ class DocumentRepository(
 
     /** Usa el motor OCR del contenedor (comparte el cliente de ML Kit). Llamar una vez al crear el contenedor. */
     fun attachOcrEngine(engine: OcrEngine) {
+        // Mismo criterio de gama baja que el resto de la app (RAM total y núcleos, no solo memoryClass).
+        engine.setDeviceTier(tier)
         ocrEngine = engine
     }
 
     private fun ocr(): OcrEngine = ocrEngine ?: synchronized(this) {
-        ocrEngine ?: OcrEngine(context).also { ocrEngine = it }
+        ocrEngine ?: OcrEngine(context, tier).also { ocrEngine = it }
+    }
+
+    private val lowEndOcr: Boolean get() = tier.isLowRam || tier.cores <= 4
+
+    /** Píxeles con los que se decodifica la página para el OCR (el motor no usa más que esto en gama baja). */
+    private fun ocrDecodePixels(lightweight: Boolean): Int = when {
+        lowEndOcr && lightweight -> OCR_BACKGROUND_PIXELS
+        lowEndOcr -> OCR_LOW_RAM_PIXELS
+        else -> tier.maxWorkingPixels
+    }
+
+    /**
+     * Decodifica y reconoce la página procesada [file] con las ediciones [edits] y guarda el resultado. Si el
+     * llamador cancela tras al menos una pasada completada, se guarda lo ya reconocido antes de propagar la
+     * cancelación (en un A53 cada pasada son 3-6 s de CPU).
+     */
+    private suspend fun recognizeAndSave(
+        docId: String,
+        pageId: String,
+        file: File,
+        edits: PageEdits,
+        lightweight: Boolean,
+        clearEdited: Boolean = false,
+    ): OcrResult {
+        val bmp = withContext(Dispatchers.Default) { BitmapIO.decode(file.absolutePath, ocrDecodePixels(lightweight)) }
+        val partial = OcrEngine.Partial()
+        val result = try {
+            ocr().recognize(bmp, edits.filter, lightweight, partial)
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            partial.result?.let { r ->
+                withContext(NonCancellable) {
+                    try { saveOcrFor(docId, pageId, edits, r) } catch (t: Throwable) { Log.w(TAG, "No se pudo guardar OCR parcial", t) }
+                }
+            }
+            throw c
+        } finally {
+            bmp.recycle()
+        }
+        saveOcrFor(docId, pageId, edits, result, clearEdited)
+        return result
     }
 
     /**
      * Devuelve el OCR guardado de la página o lo calcula (sobre la imagen procesada) y lo guarda.
      * null si la página no existe o el reconocimiento falla. Lo usan exportar/compartir y el OCR de fondo.
      */
-    suspend fun ensureOcr(docId: String, pageId: String): OcrResult? {
+    suspend fun ensureOcr(docId: String, pageId: String): OcrResult? = ensureOcr(docId, pageId, lightweight = false)
+
+    private suspend fun ensureOcr(docId: String, pageId: String, lightweight: Boolean): OcrResult? {
         loadOcr(docId, pageId)?.let { return it }
         return ocrLock(docId, pageId).withLock {
             loadOcr(docId, pageId)?.let { return@withLock it }
@@ -839,16 +1031,9 @@ class DocumentRepository(
             try {
                 val file = processedFile(docId, page)
                 val current = findPage(docId, pageId) ?: return@withLock null
-                val maxPx = if (tier.isLowRam) OCR_LOW_RAM_PIXELS else tier.maxWorkingPixels
-                val bmp = withContext(Dispatchers.Default) { BitmapIO.decode(file.absolutePath, maxPx) }
-                val result = try {
-                    ocr().recognize(bmp)
-                } finally {
-                    bmp.recycle()
-                }
-                // Solo se guarda si la página no cambió mientras se reconocía.
-                saveOcrIfCurrent(docId, pageId, current.edits, result)
-                result
+                // Solo se asocia a la página si sus ediciones no cambiaron mientras se reconocía.
+                val result = recognizeAndSave(docId, pageId, file, current.edits, lightweight)
+                result.copy(editedText = findPage(docId, pageId)?.ocrEditedText)
             } catch (c: kotlinx.coroutines.CancellationException) {
                 throw c
             } catch (t: Throwable) {
@@ -858,12 +1043,82 @@ class DocumentRepository(
         }
     }
 
+    /**
+     * Vuelve a reconocer la página aunque ya tenga OCR (botón "Volver a reconocer"). Lanza si falla.
+     * Si [keepEditedText] es false se descarta el texto corregido por el usuario.
+     */
+    suspend fun recognizePage(docId: String, pageId: String, keepEditedText: Boolean = false): OcrResult =
+        ocrLock(docId, pageId).withLock {
+            val page = findPage(docId, pageId) ?: throw IOException("Página no encontrada")
+            val file = processedFile(docId, page)
+            val current = findPage(docId, pageId) ?: throw IOException("Página no encontrada")
+            // El texto corregido se descarta solo si el nuevo reconocimiento sale bien.
+            val result = recognizeAndSave(docId, pageId, file, current.edits, lightweight = false, clearEdited = !keepEditedText)
+            result.copy(editedText = if (keepEditedText) current.ocrEditedText else null)
+        }
+
+    /**
+     * OCR de varias páginas (todas si [pageIds] es null) en orden y de una en una (un solo reconocedor: en gama baja
+     * el OCR en paralelo agota la memoria). Las que ya tienen OCR se cargan sin recalcular. [onProgress] recibe
+     * (hechas, total) y si la página se tuvo que reconocer. Cancelable entre páginas.
+     */
+    suspend fun ensureOcrAll(
+        docId: String,
+        pageIds: List<String>? = null,
+        onProgress: (done: Int, total: Int, recognizing: Boolean) -> Unit = { _, _, _ -> },
+    ): List<OcrResult?> {
+        val ids = pageIds ?: get(docId)?.pages?.map { it.id }.orEmpty()
+        val out = ArrayList<OcrResult?>(ids.size)
+        ids.forEachIndexed { i, id ->
+            currentCoroutineContext().ensureActive()
+            val saved = loadOcr(docId, id)
+            if (saved != null) {
+                out += saved
+            } else {
+                onProgress(i, ids.size, true)
+                out += ensureOcr(docId, id)
+            }
+            onProgress(i + 1, ids.size, false)
+        }
+        return out
+    }
+
+    /** Páginas sin OCR guardado (para estimar el trabajo antes de exportar). */
+    suspend fun pagesMissingOcr(docId: String): Int = get(docId)?.pages?.count { p ->
+        val name = p.ocrFile
+        name == null || !withContext(Dispatchers.IO) { File(docDir(docId), name).exists() }
+    } ?: 0
+
     private fun ocrLock(docId: String, pageId: String): Mutex = ocrLocks.getOrPut("$docId/$pageId") { Mutex() }
 
-    private suspend fun saveOcrIfCurrent(docId: String, pageId: String, edits: PageEdits, result: OcrResult) {
-        val current = findPage(docId, pageId) ?: return
-        if (current.edits != edits || docId in deletedIds) return
-        saveOcr(docId, pageId, result)
+    /** Archivo con el número de intentos fallidos de OCR de fondo de la página. */
+    private fun ocrFailFile(docId: String, pageId: String) = File(docDir(docId), "$OCR_DIR/$pageId.fail")
+
+    private fun ocrFailures(docId: String, pageId: String): Int = try {
+        ocrFailFile(docId, pageId).takeIf { it.exists() }?.readText()?.trim()?.toIntOrNull() ?: 0
+    } catch (_: Throwable) {
+        0
+    }
+
+    private fun markOcrFailure(docId: String, pageId: String) {
+        if (docId in deletedIds) return
+        try {
+            val f = ocrFailFile(docId, pageId)
+            f.parentFile?.mkdirs()
+            f.writeText((ocrFailures(docId, pageId) + 1).toString())
+        } catch (t: Throwable) {
+            Log.w(TAG, "No se pudo marcar OCR fallido", t)
+        }
+    }
+
+    /** Espera a que no haya pantallas que pausen el OCR ni trabajo pesado, con un margen de calma (ráfagas). */
+    private suspend fun awaitOcrIdle() {
+        while (true) {
+            ocrPause.first { it == 0 }
+            activeHeavy.first { it == 0 }
+            delay(OCR_SETTLE_MS)
+            if (ocrPause.value == 0 && activeHeavy.value == 0) return
+        }
     }
 
     private fun enqueueOcr(docId: String, pageId: String) {
@@ -877,12 +1132,36 @@ class DocumentRepository(
             // Se quita de la marca antes de procesar: si la página se edita mientras tanto, se vuelve a encolar.
             queuedOcr.remove("$docId/$pageId")
             try {
-                // Cede el paso a capturas/ediciones (en gama baja OCR + render a la vez agota la memoria).
-                while (activeHeavy.get() > 0) delay(OCR_IDLE_POLL_MS)
+                // Cede el paso a la cámara, el editor y las capturas/ediciones (en gama baja OCR + render a la vez
+                // agota la memoria y le quita CPU a la vista previa).
+                awaitOcrIdle()
                 if (!backgroundOcrEnabled || docId in deletedIds) continue
                 val page = findPage(docId, pageId) ?: continue
                 if (page.ocrFile != null) continue
-                ensureOcr(docId, pageId)
+                if (withContext(Dispatchers.IO) { ocrFailures(docId, pageId) } >= OCR_MAX_BACKGROUND_ATTEMPTS) continue
+                var interrupted = false
+                val result = coroutineScope {
+                    val work = async { ensureOcr(docId, pageId, lightweight = true) }
+                    // Si se abre la cámara/editor a mitad, se corta tras la pasada actual (lo reconocido se guarda).
+                    val watcher = launch {
+                        ocrPause.first { it > 0 }
+                        interrupted = true
+                        work.cancel()
+                    }
+                    try {
+                        work.await()
+                    } catch (c: kotlinx.coroutines.CancellationException) {
+                        if (!interrupted) throw c
+                        null
+                    } finally {
+                        watcher.cancel()
+                    }
+                }
+                val now = findPage(docId, pageId)
+                if (now != null && now.ocrFile == null) {
+                    if (interrupted) enqueueOcr(docId, pageId)
+                    else if (result == null) withContext(Dispatchers.IO) { markOcrFailure(docId, pageId) }
+                }
             } catch (c: kotlinx.coroutines.CancellationException) {
                 throw c
             } catch (t: Throwable) {
@@ -893,12 +1172,27 @@ class DocumentRepository(
 
     // ------------------------------------------------------------------ utilidades internas
 
+    /** Permiso de [heavy] del trabajo en curso; se puede soltar antes de terminar (E/S lenta tras el render). */
+    private class HeavyPermit(private val sem: Semaphore) : AbstractCoroutineContextElement(HeavyPermit) {
+        companion object Key : CoroutineContext.Key<HeavyPermit>
+        private val released = AtomicBoolean(false)
+        fun release() {
+            if (released.compareAndSet(false, true)) sem.release()
+        }
+    }
+
     private suspend fun <T> heavyWork(block: suspend () -> T): T {
-        activeHeavy.incrementAndGet()
+        activeHeavy.update { it + 1 }
         try {
-            return heavy.withPermit { block() }
+            heavy.acquire()
+            val permit = HeavyPermit(heavy)
+            try {
+                return withContext(permit) { block() }
+            } finally {
+                permit.release()
+            }
         } finally {
-            activeHeavy.decrementAndGet()
+            activeHeavy.update { it - 1 }
         }
     }
 
@@ -953,8 +1247,11 @@ class DocumentRepository(
         private const val THUMB_SIDE = 480
         private const val MIN_CONFIDENCE = 0.35f
         private const val BUFFER = 64 * 1024
-        private const val OCR_LOW_RAM_PIXELS = 6_000_000
-        private const val OCR_IDLE_POLL_MS = 1_500L
+        private const val OCR_LOW_RAM_PIXELS = 4_000_000
+        private const val OCR_BACKGROUND_PIXELS = 3_000_000
+        private const val OCR_SETTLE_MS = 1_500L
+        private const val OCR_MAX_BACKGROUND_ATTEMPTS = 2
+        private const val WRITE_DEBOUNCE_MS = 400L
         private const val STARTUP_OCR_DELAY_MS = 8_000L
         private val AGED_CACHE_DIRS = listOf("exports", "share", "compress_out")
         private val WIPED_CACHE_DIRS = listOf("compress", "pdfbox")
@@ -976,6 +1273,8 @@ class DocumentRepository(
         private fun processedName(pageId: String, edits: PageEdits) =
             "$PROCESSED_DIR/${pageId}_${editsHash(edits)}.${if (isBinaryFilter(edits.filter)) "png" else "jpg"}"
         private fun thumbName(pageId: String, edits: PageEdits) = "$THUMB_DIR/${pageId}_${editsHash(edits)}.jpg"
+        /** OCR con el hash de las ediciones en el nombre: un OCR de otra versión de la imagen se invalida por nombre. */
+        private fun ocrName(pageId: String, edits: PageEdits) = "$OCR_DIR/${pageId}_${editsHash(edits)}.json"
 
         /** Título por defecto en español, p. ej. "Escaneo 06-10-2026 14:32" o "DNI 06-10-2026 14:32". */
         fun defaultTitle(mode: ScanMode, time: Long = System.currentTimeMillis()): String {

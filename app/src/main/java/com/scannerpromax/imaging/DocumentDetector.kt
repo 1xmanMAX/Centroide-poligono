@@ -117,6 +117,7 @@ class DocumentDetector(private val tier: DeviceTier) {
     @Synchronized
     fun detectLive(yPlane: java.nio.ByteBuffer, width: Int, height: Int, rowStride: Int, rotationDegrees: Int): DetectionResult? {
         if (width < 32 || height < 32 || rowStride < width) return null
+        liveFrameSeq++
         try {
             val need = rowStride * height
             if (yBytes.size != need) yBytes = ByteArray(need)
@@ -156,10 +157,35 @@ class DocumentDetector(private val tier: DeviceTier) {
             val fx = rotW.toDouble() / work.cols(); val fy = rotH.toDouble() / work.rows()
             val pts = FloatArray(8) { i -> (cand.pts[i] * if (i % 2 == 0) fx else fy).toFloat() }
             clampPts(pts, rotW, rotH)
-            return DetectionResult(toQuad(pts), confidenceOf(cand.score), rotW, rotH)
+            val res = DetectionResult(toQuad(pts), confidenceOf(cand.score), rotW, rotH)
+            rememberLiveQuad(pts, rot, width, height)
+            return res
         } catch (t: Throwable) {
             return null
+        } finally {
+            if (lastLiveFrame != liveFrameSeq) lastLivePts = null
         }
+    }
+
+    // Quad del último frame en vivo en coordenadas del frame SIN rotar (para medir el reflejo dentro del documento)
+    private var liveFrameSeq = 0L
+    private var lastLiveFrame = -1L
+    private var lastLivePts: FloatArray? = null
+
+    private fun rememberLiveQuad(rotPts: FloatArray, rot: Int, w: Int, h: Int) {
+        val out = FloatArray(8)
+        for (i in 0 until 4) {
+            val xr = rotPts[2 * i]; val yr = rotPts[2 * i + 1]
+            val (x, y) = when (rot) {
+                90 -> yr to (h - xr)
+                180 -> (w - xr) to (h - yr)
+                270 -> (w - yr) to xr
+                else -> xr to yr
+            }
+            out[2 * i] = x.coerceIn(0f, w.toFloat()); out[2 * i + 1] = y.coerceIn(0f, h.toFloat())
+        }
+        lastLivePts = out
+        lastLiveFrame = liveFrameSeq
     }
 
     /** Libera los buffers nativos de la detección en vivo (llamar al cerrar la cámara). */
@@ -171,6 +197,7 @@ class DocumentDetector(private val tier: DeviceTier) {
         liveSmall?.release(); liveSmall = null
         liveRot?.release(); liveRot = null
         liveClahe = null
+        lastLivePts = null
         yBytes = ByteArray(0)
     }
 
@@ -187,7 +214,12 @@ class DocumentDetector(private val tier: DeviceTier) {
             val tmp = Mat()
             try {
                 Cv.downscale(roi, tmp, 640)
-                QualityAnalyzer.analyzeGray(tmp)
+                // Reflejo sólo dentro del documento detectado en ese mismo frame (si lo hay)
+                val pts = lastLivePts?.let { p ->
+                    val sx = tmp.cols().toFloat() / roi.cols(); val sy = tmp.rows().toFloat() / roi.rows()
+                    FloatArray(8) { i -> p[i] * if (i % 2 == 0) sx else sy }
+                }
+                QualityAnalyzer.analyzeGray(tmp, pts)
             } finally { tmp.release() }
         } catch (_: Throwable) { null }
     }

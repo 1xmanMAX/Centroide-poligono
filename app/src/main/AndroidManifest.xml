@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
     <uses-permission android:name="android.permission.CAMERA" />
@@ -59,6 +60,12 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <!-- Permite medir el arranque y los frames de la build release con Macrobenchmark / Perfetto
+             (no afecta al rendimiento ni a la seguridad: solo habilita el perfilado desde adb shell). -->
+        <profileable
+            android:shell="true"
+            tools:targetApi="29" />
 
         <!-- Descarga el modelo OCR junto con la app (no en primer uso) -->
         <meta-data
