@@ -50,6 +50,7 @@ class ScannerApp : Application(), ImageLoaderFactory {
 
     override fun onCreate() {
         super.onCreate()
+        CrashReporter.install(this)
         if (isDebuggable()) enableStrictMode()
         Thread(::warmUp, "app-init").start()
     }

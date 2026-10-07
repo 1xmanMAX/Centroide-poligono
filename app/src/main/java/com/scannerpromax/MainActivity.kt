@@ -18,6 +18,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.scannerpromax.data.AppSettings
+import com.scannerpromax.ui.components.CrashReportDialog
 import com.scannerpromax.ui.navigation.AppNavHost
 import com.scannerpromax.ui.theme.EscanerTheme
 import com.scannerpromax.ui.theme.LocalPerf
@@ -58,6 +59,7 @@ class MainActivity : ComponentActivity() {
                 EscanerTheme(darkTheme = settings.darkTheme, dynamicColor = settings.dynamicColor) {
                     if (ready) {
                         AppNavHost(container = container, incomingPdf = incomingPdf, incomingImages = incomingImages)
+                        CrashReportDialog()
                     } else {
                         // Detrás del splash: solo el fondo. La navegación (que usa OpenCV y los documentos) se
                         // compone cuando todo está listo, así el hilo principal nunca espera a la inicialización.

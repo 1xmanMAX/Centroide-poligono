@@ -113,6 +113,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -411,6 +412,8 @@ private fun CameraContent(
     val processor = remember { CaptureProcessor(container) }
     // Ámbito de la pantalla (animaciones, captura). El procesamiento va en [captureScope].
     val workScope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
+    // Las animaciones (Animatable) necesitan el reloj de cuadros de la composición: workScope no lo tiene.
+    val animScope = rememberCoroutineScope()
     val previewView = remember {
         PreviewView(context).apply {
             scaleType = PreviewView.ScaleType.FILL_CENTER
@@ -559,7 +562,7 @@ private fun CameraContent(
             // Autocaptura: enfocar en el documento y esperar al AF (las cámaras baratas "cazan" el foco).
             if (focusTarget != null) engine.focusAndWait(previewView, focusTarget.x, focusTarget.y)
             haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-            launch {
+            animScope.launch {
                 shutterFlash.snapTo(0.8f)
                 shutterFlash.animateTo(0f, tween(320))
             }
