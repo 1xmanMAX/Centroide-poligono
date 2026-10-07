@@ -56,10 +56,12 @@ internal class CaptureProcessor(private val container: AppContainer) {
                 val out = container.documents.newCaptureFile()
                 try {
                     val lowEnd = tier.isLowRam || tier.cores <= 4
+                    // La foto fusionada pasa a ser el ORIGINAL de la página: JPEG 100 (una sola codificación antes
+                    // del procesado) y la mayor resolución que la memoria permite fusionar (4 cuadros en RAM).
                     MultiFrameFusion.fuseFiles(
                         files.map { it.absolutePath }, out.absolutePath,
-                        maxPixels = MultiFrameFusion.recommendedMaxPixels(tier),
-                        removeGlare = removeGlare, jpegQuality = if (lowEnd) 92 else 95, lowEnd = lowEnd,
+                        maxPixels = fusionMaxPixels(lowEnd),
+                        removeGlare = removeGlare, jpegQuality = 100, lowEnd = lowEnd,
                     )
                     withContext(NonCancellable + Dispatchers.IO) { files.forEach { it.delete() } }
                     out
@@ -85,16 +87,15 @@ internal class CaptureProcessor(private val container: AppContainer) {
 
     /**
      * Libro abierto: recorta el libro completo, detecta el lomo y guarda las páginas izquierda y derecha.
-     * Con el permiso pesado: decodificar, recortar y dividir; la página derecha se guarda a un JPEG temporal
-     * (calidad 98) y se libera. Sin el permiso: cada página se entrega al repositorio de una en una, así no se
-     * retienen tres bitmaps grandes mientras el repositorio espera su turno de render.
+     * Con el permiso pesado: decodificar (resolución completa dentro del presupuesto del equipo), recortar y
+     * dividir; cada página se escribe UNA vez como JPEG 100 temporal y se libera. Sin el permiso: cada archivo se
+     * entrega al repositorio, que lo MUEVE como original de la página (sin recodificar otra vez) y lo procesa.
      */
     suspend fun addBook(docId: String, file: File, edits: PageEdits) {
-        var left: Bitmap? = null
-        var right: Bitmap? = null
+        var leftFile: File? = null
         var rightFile: File? = null
         try {
-            val split = HeavyWork.run {
+            HeavyWork.run {
                 var bmp: Bitmap? = null
                 var warped: Bitmap? = null
                 var l: Bitmap? = null
@@ -114,26 +115,22 @@ internal class CaptureProcessor(private val container: AppContainer) {
                     l = sp.left; r = sp.right
                     warped?.recycle(); warped = null
                     bmp?.recycle(); bmp = null
-                    val rf = container.documents.newCaptureFile()
-                    rightFile = rf
-                    withContext(Dispatchers.IO) { BitmapIO.saveJpeg(sp.right, rf.absolutePath, 98) }
-                    sp.right.recycle(); r = null
-                    sp.left.also { l = null }
+                    val lf = container.documents.newCaptureFile().also { leftFile = it }
+                    val rf = container.documents.newCaptureFile().also { rightFile = it }
+                    withContext(Dispatchers.IO) {
+                        BitmapIO.saveJpeg(sp.left, lf.absolutePath, 100)
+                        sp.left.recycle(); l = null
+                        BitmapIO.saveJpeg(sp.right, rf.absolutePath, 100)
+                        sp.right.recycle(); r = null
+                    }
                 } finally {
                     listOfNotNull(bmp, warped, l, r).forEach { if (!it.isRecycled) it.recycle() }
                 }
             }
-            left = split
-            container.documents.addPageFromBitmap(docId, split, edits)
-            split.recycle(); left = null
-            val rf = rightFile ?: return
-            val rb = withContext(Dispatchers.IO) { BitmapIO.decode(rf.absolutePath, tier.maxWorkingPixels) }
-            right = rb
-            container.documents.addPageFromBitmap(docId, rb, edits)
+            leftFile?.let { container.documents.addPageFromFile(docId, it, autoDetect = false, presetEdits = edits) }
+            rightFile?.let { container.documents.addPageFromFile(docId, it, autoDetect = false, presetEdits = edits) }
         } finally {
-            left?.let { if (!it.isRecycled) it.recycle() }
-            right?.let { if (!it.isRecycled) it.recycle() }
-            withContext(NonCancellable + Dispatchers.IO) { file.delete(); rightFile?.delete() }
+            withContext(NonCancellable + Dispatchers.IO) { file.delete(); leftFile?.delete(); rightFile?.delete() }
         }
     }
 
@@ -327,6 +324,18 @@ internal class CaptureProcessor(private val container: AppContainer) {
             }
         }
         return ok
+    }
+
+    /**
+     * Píxeles de la fusión multi-cuadro (poca luz / anti-reflejos), que retiene 3-4 cuadros a la vez en memoria:
+     * gama alta hasta 12.6 MP (la foto completa de 12 MP), gama media 8 MP. En gama baja (3 cuadros, 2-3 GB de
+     * RAM) 6 MP: es la ÚNICA excepción al mínimo de 8 MP para documentos y solo afecta a las fotos fusionadas
+     * (el disparo normal conserva la resolución completa).
+     */
+    private fun fusionMaxPixels(lowEnd: Boolean): Int = when {
+        tier.isLowRam || lowEnd -> min(tier.maxWorkingPixels, 6_000_000)
+        com.scannerpromax.imaging.DeviceProfiler.isHighEnd(tier) -> min(tier.maxWorkingPixels, 12_600_000)
+        else -> min(tier.maxWorkingPixels, 8_000_000)
     }
 
     companion object {

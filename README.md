@@ -46,7 +46,7 @@ Objetivo de referencia: Android 8-10, 2 GB de RAM, 4× Cortex-A53, GPU débil. I
   HTTP); `AsyncImage` con tamaño acotado y precisión INEXACT en vez de `SubcomposeAsyncImage` (sin subcomposición por
   celda).
 - **Editor**: vista previa progresiva (primero 480 px en gama baja sobre una geometría recortada en caché, luego refinado
-  a 900-1200 px solo cuando se deja de mover el control; los trabajos obsoletos se cancelan), miniaturas de filtros de
+  a la resolución de la pantalla solo cuando se deja de mover el control; los trabajos obsoletos se cancelan), miniaturas de filtros de
   una en una en un hilo de prioridad baja que cede el paso a la vista previa, arrastre de esquinas y borrador dibujados
   solo en la fase de dibujo (sin recomponer), lupa que dibuja una región del bitmap ya cargado con rutas reutilizadas.
 - **Animaciones adaptativas** (`LocalPerf`): en gama baja (poca RAM o ≤4 núcleos) sin halos infinitos, sombras más
@@ -54,6 +54,22 @@ Objetivo de referencia: Android 8-10, 2 GB de RAM, 4× Cortex-A53, GPU débil. I
 - **Memoria**: `onTrimMemory` libera la caché de vista previa de OpenCV y, en segundo plano, las miniaturas de Coil;
   el editor recicla todos sus bitmaps al salir.
 - **Diagnóstico**: en builds debug, StrictMode registra en Logcat los accesos a disco/red en el hilo principal y fugas.
+
+## Calidad de imagen (resolución completa de principio a fin)
+La imagen se capta y se procesa ENTERA; solo se reduce al exportar, según la calidad elegida.
+
+| Etapa | Resolución / formato |
+|---|---|
+| Captura (`CameraEngine`) | Mayor tamaño 4:3 del modo normal de la cámara, hasta ~17 MP (S24 Ultra: 4000x3000, modo agrupado de 12 MP del sensor de 200 MP; sensores 48-64 MP: su modo agrupado de 12-16 MP). `CAPTURE_MODE_MAXIMIZE_QUALITY` y JPEG 100 en todos los equipos. Sin ViewPort: la foto no se recorta al aspecto de la vista previa. Si combinar con el análisis en vivo rebajara la foto por debajo del 75 % de su máximo, se prioriza la captura (sin detección en vivo). |
+| Original (`original/`) | El JPEG de la cámara o de la galería se MUEVE tal cual (sin reescalar ni recomprimir; EXIF conservado y respetado al decodificar). Solo los originales generados (DNI compuesto, páginas de libro, fusión poca luz) se codifican, una vez, a JPEG 100. |
+| Procesado (`processed/`) | Resolución completa del recorte dentro de `DeviceProfiler.maxWorkingPixels`: 20 MP gama alta (≥ 7 GB), 16 MP alta ligera, 12.6 MP media (cabe una foto de 12 MP entera), 8 MP gama baja (mínimo para documentos; Android 7 se acota por el heap grande, ≥ 4 MP). JPEG 95 (una sola codificación con pérdida) o PNG para B/N. Si un render se queda sin memoria se reintenta con el 60 % de píxeles (≥ 4 MP). |
+| Miniaturas (`thumb/`) | 960 px de lado largo, JPEG 90, reducidas por mitades (sin aliasing); Coil las decodifica al tamaño real de la celda. |
+| Editor | Vista previa refinada acorde a la pantalla (900-1280 px gama baja, 1200-2048 px resto); zoom hasta 5x que rehace la vista previa hasta 2048/4096 px. Imagen de trabajo: foto completa (≤ 12.6 MP) en gama alta, 8 MP media, 3 MP baja. |
+| Visor (Revisión → lupa) | Pantalla completa con zoom 5x: base a resolución de pantalla y, al ampliar, la zona visible a resolución completa con `BitmapRegionDecoder`. |
+| Exportación | Pequeño 1600 px (≈140 ppp A4, JPEG 60) · Equilibrado 2480 px (≈210 ppp) · Alta 3508 px (300 ppp A4, JPEG 92, por defecto) · Máxima (HD) sin límite: el JPEG procesado se incrusta/copia tal cual. |
+
+WEBP no se usa para el procesado: el PDF no puede incrustarlo (habría que recodificar) y su codificación es más lenta;
+en B/N el PNG va a 1 bit en el PDF de todos modos.
 
 ## Algoritmos
 Todo en `imaging/` (OpenCV 4.10, sin red). Tiempos medidos con el harness Python/OpenCV 4.10 equivalente

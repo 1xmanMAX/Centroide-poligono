@@ -102,6 +102,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
+import androidx.compose.material.icons.filled.ZoomIn
+import androidx.compose.ui.graphics.FilterQuality
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import coil.size.Precision
@@ -176,6 +178,8 @@ fun ReviewScreen(
 
     // Orden local (permite arrastrar sin esperar al disco).
     val order = remember { mutableStateListOf<Page>() }
+    /** Página abierta en el visor a pantalla completa (índice en [order]), o null. */
+    var viewerIndex by remember { mutableStateOf<Int?>(null) }
     // Páginas eliminadas a la espera de "Deshacer" (no se muestran aunque el repositorio aún las tenga).
     val pendingDeletes = remember { mutableStateListOf<String>() }
     val gridState = rememberLazyGridState()
@@ -495,6 +499,7 @@ fun ReviewScreen(
                             dragging = dragging,
                             modifier = itemModifier,
                             onClick = { onEditPage(page.id) },
+                            onView = { viewerIndex = index },
                             onOcr = { onOcr(page.id) },
                             onMoveLeft = { move(page, -1) },
                             onMoveRight = { move(page, +1) },
@@ -552,6 +557,17 @@ fun ReviewScreen(
                     )
                 }
             }
+        }
+
+        viewerIndex?.let { start ->
+            PageViewerDialog(
+                container = container,
+                docId = docId,
+                pages = order.toList(),
+                startIndex = start,
+                onDismiss = { viewerIndex = null },
+                onEdit = { p -> viewerIndex = null; onEditPage(p.id) },
+            )
         }
 
         SnackbarHost(
@@ -779,6 +795,7 @@ private fun PageCard(
     dragging: Boolean,
     modifier: Modifier,
     onClick: () -> Unit,
+    onView: () -> Unit,
     onOcr: () -> Unit,
     onMoveLeft: () -> Unit,
     onMoveRight: () -> Unit,
@@ -803,14 +820,20 @@ private fun PageCard(
         }
         if (withContext(Dispatchers.IO) { repo.thumbFile(docId, page) } == null) {
             runCatching { repo.processedFile(docId, page) }
+        } else if (runCatching { repo.upgradeSmallThumb(docId, page) }.getOrDefault(false)) {
+            // Miniatura antigua (480 px) regenerada en el mismo archivo: se recarga (Coil incluye la fecha de
+            // modificación en la clave de caché del archivo).
+            value = null
+            value = withContext(Dispatchers.IO) { repo.thumbFile(docId, page) }
         }
     }
-    // Decodificación acotada: aunque el modelo sea el original de 8-12 MP, Coil lo submuestrea al tamaño de celda.
-    val request = remember(model, perf.thumbPx) {
+    // Miniatura nítida: Coil decodifica al tamaño REAL de la celda en píxeles (celda × densidad, p. ej. ~630x875
+    // px en un QHD+), tomado de las restricciones del AsyncImage; nunca más que eso aunque el modelo sea el
+    // original de 12 MP. Las miniaturas en disco miden 960 px de lado largo.
+    val request = remember(model) {
         model?.let {
             ImageRequest.Builder(context)
                 .data(it)
-                .size(perf.thumbPx)
                 .precision(Precision.INEXACT)
                 .build()
         }
@@ -839,8 +862,25 @@ private fun PageCard(
                 model = request,
                 contentDescription = "Página $number",
                 contentScale = ContentScale.Fit,
+                filterQuality = FilterQuality.High,
                 modifier = Modifier.fillMaxSize(),
             )
+            // Ver la página a pantalla completa con zoom (la página procesada a resolución completa).
+            Box(
+                Modifier
+                    .align(Alignment.TopStart)
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .clickable(role = Role.Button, onClickLabel = "Ver a pantalla completa", onClick = onView),
+                contentAlignment = Alignment.Center,
+            ) {
+                Box(
+                    Modifier.size(32.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.45f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Filled.ZoomIn, "Ver a pantalla completa", tint = Color.White, modifier = Modifier.size(18.dp))
+                }
+            }
             Box(
                 Modifier
                     .align(Alignment.BottomStart)
@@ -880,6 +920,11 @@ private fun PageCard(
                     }
                 }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Ver a pantalla completa") },
+                        leadingIcon = { Icon(Icons.Filled.ZoomIn, null) },
+                        onClick = { menu = false; onView() },
+                    )
                     DropdownMenuItem(
                         text = { Text("Editar y mejorar") },
                         leadingIcon = { Icon(Icons.Filled.AutoFixHigh, null) },

@@ -254,10 +254,19 @@ class DocumentRepository(
      * el filtro por defecto del modo. [mode] = modo activo al capturar (null = modo del documento).
      *
      * El original se conserva a resolución completa (el disco no gasta RAM): [Page.width]/[Page.height] son las
-     * dimensiones reales del archivo (con EXIF aplicado) y el quad se guarda en ese espacio. Para procesar se
-     * decodifica reducido a [DeviceTier.maxWorkingPixels] y el quad se reescala.
+     * dimensiones reales del archivo (con EXIF aplicado) y el quad se guarda en ese espacio. El archivo se MUEVE
+     * tal cual (mismos bytes: ni se reescala ni se recomprime, el EXIF de orientación se conserva y se respeta al
+     * decodificar). Para procesar se decodifica con el presupuesto [DeviceTier.maxWorkingPixels] (en gama media y
+     * alta la foto completa de 12-16 MP cabe sin reducir) y el quad se reescala.
+     * [presetEdits]: ediciones ya decididas (p. ej. páginas de un libro ya recortadas); si se dan, no se detecta.
      */
-    suspend fun addPageFromFile(docId: String, file: File, autoDetect: Boolean = true, mode: ScanMode? = null): Page {
+    suspend fun addPageFromFile(
+        docId: String,
+        file: File,
+        autoDetect: Boolean = true,
+        mode: ScanMode? = null,
+        presetEdits: PageEdits? = null,
+    ): Page {
         loaded.await()
         val doc = get(docId) ?: throw IOException("Documento no encontrado")
         checkAlive(docId)
@@ -284,10 +293,19 @@ class DocumentRepository(
                     val ph = if (fw > 0 && fh > 0) fh else bmp.height
                     currentCoroutineContext().ensureActive()
 
-                    val quad = (if (autoDetect && m != ScanMode.PHOTO) detectQuad(bmp) else null)
-                        ?.let { toSpace(it, bmp.width, bmp.height, pw, ph) }
-                    val edits = defaultEdits(m, quad)
-                    val (processedName, thumbName) = renderAndSave(docId, pageId, bmp, edits, pw, ph)
+                    val edits = presetEdits ?: run {
+                        val quad = (if (autoDetect && m != ScanMode.PHOTO) detectQuad(bmp) else null)
+                            ?.let { toSpace(it, bmp.width, bmp.height, pw, ph) }
+                        defaultEdits(m, quad)
+                    }
+                    val (processedName, thumbName) = try {
+                        renderAndSave(docId, pageId, bmp, edits, pw, ph)
+                    } catch (t: Throwable) {
+                        if (!isOutOfMemory(t)) throw t
+                        // Sin memoria a resolución completa: se libera el bitmap y se reintenta con menos píxeles.
+                        bmp.recycle(); bitmap = null
+                        renderFromOriginal(docId, pageId, dst, edits, pw, ph, (tier.maxWorkingPixels * 0.6).toInt())
+                    }
                     val page = Page(
                         id = pageId,
                         originalFile = originalName,
@@ -369,6 +387,7 @@ class DocumentRepository(
                     withContext(Dispatchers.IO) {
                         checkAlive(docId)
                         File(dir, ORIGINAL_DIR).mkdirs()
+                        // Original GENERADO (DNI compuesto...): JPEG 100, la única codificación antes del procesado.
                         BitmapIO.saveJpeg(bitmap, File(dir, originalName).absolutePath, ORIGINAL_QUALITY)
                     }
                     val px = pw.toLong() * ph
@@ -424,12 +443,7 @@ class DocumentRepository(
 
             val (processedName, thumbName) = heavyWork {
                 withContext(Dispatchers.Default) {
-                    val original = BitmapIO.decode(File(dir, current.originalFile).absolutePath, tier.maxWorkingPixels)
-                    try {
-                        renderAndSave(docId, pageId, original, edits, current.width, current.height)
-                    } finally {
-                        original.recycle()
-                    }
+                    renderFromOriginal(docId, pageId, File(dir, current.originalFile), edits, current.width, current.height)
                 }
             }
 
@@ -584,12 +598,7 @@ class DocumentRepository(
 
             val (processedName, thumbName) = heavyWork {
                 withContext(Dispatchers.Default) {
-                    val original = BitmapIO.decode(File(dir, current.originalFile).absolutePath, tier.maxWorkingPixels)
-                    try {
-                        renderAndSave(docId, current.id, original, current.edits, current.width, current.height)
-                    } finally {
-                        original.recycle()
-                    }
+                    renderFromOriginal(docId, current.id, File(dir, current.originalFile), current.edits, current.width, current.height)
                 }
             }
             mutatePagesIfPresent(docId) { pages ->
@@ -601,6 +610,46 @@ class DocumentRepository(
                 }
             }
             File(dir, processedName)
+        }
+    }
+
+    /** Miniaturas ya comprobadas por [upgradeSmallThumb] (clave = archivo de miniatura). */
+    private val checkedThumbs: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    private val thumbUpgrade = Mutex()
+
+    /**
+     * Documentos de versiones anteriores tienen miniaturas de 480 px (se ven borrosas en celdas grandes): si la
+     * miniatura es claramente menor que [THUMB_SIDE] y el procesado da para más, se regenera (una a la vez, barato:
+     * se decodifica el procesado a ~2 MP). Devuelve true si la regeneró.
+     */
+    suspend fun upgradeSmallThumb(docId: String, page: Page): Boolean {
+        val name = page.thumbFile ?: return false
+        val processedName = page.processedFile ?: return false
+        if (!checkedThumbs.add("$docId/$name")) return false
+        return thumbUpgrade.withLock {
+            val dir = docDir(docId)
+            val thumb = File(dir, name)
+            val processed = File(dir, processedName)
+            val small = withContext(Dispatchers.IO) {
+                if (!thumb.exists() || !processed.exists()) return@withContext false
+                val (tw, th) = BitmapIO.decodeBounds(thumb.absolutePath)
+                val (pw, ph) = BitmapIO.decodeBounds(processed.absolutePath)
+                val tl = maxOf(tw, th); val pl = maxOf(pw, ph)
+                tl in 1 until (THUMB_SIDE * 9 / 10) && pl > tl * 11 / 10
+            }
+            if (!small) return@withLock false
+            val current = findPage(docId, page.id) ?: return@withLock false
+            if (current.thumbFile != name || current.processedFile != processedName) return@withLock false
+            try {
+                regenerateThumb(docId, current, processed)
+                true
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                checkedThumbs.remove("$docId/$name")
+                throw c
+            } catch (t: Throwable) {
+                Log.w(TAG, "No se pudo regenerar la miniatura", t)
+                false
+            }
         }
     }
 
@@ -696,6 +745,40 @@ class DocumentRepository(
                 filter = docFilter ?: FilterType.DEFAULT,
                 autoRemoveLines = defaultAutoRemoveLines,
             )
+        }
+    }
+
+    /**
+     * Decodifica el original (EXIF respetado) con el presupuesto [budget] y renderiza procesado + miniatura.
+     * Red de seguridad en gama baja: si el render se queda sin memoria (Java o nativa de OpenCV) se reintenta con
+     * el 60 % de los píxeles, sin bajar de [MIN_RETRY_PIXELS]. El procesado sale siempre a la resolución del recorte
+     * dentro del presupuesto (nunca se reduce "por si acaso").
+     */
+    private suspend fun renderFromOriginal(
+        docId: String,
+        pageId: String,
+        originalFile: File,
+        edits: PageEdits,
+        pageW: Int,
+        pageH: Int,
+        budget: Int = tier.maxWorkingPixels,
+    ): Pair<String, String> {
+        var px = budget
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            try {
+                val original = BitmapIO.decode(originalFile.absolutePath, px)
+                try {
+                    return renderAndSave(docId, pageId, original, edits, pageW, pageH)
+                } finally {
+                    original.recycle()
+                }
+            } catch (t: Throwable) {
+                if (!isOutOfMemory(t) || px <= MIN_RETRY_PIXELS) throw t
+                Log.w(TAG, "Sin memoria al procesar a ${px / 1_000_000f} MP; se reintenta con menos píxeles", t)
+                System.gc()
+                px = maxOf(MIN_RETRY_PIXELS, (px * 0.6).toInt())
+            }
         }
     }
 
@@ -983,7 +1066,8 @@ class DocumentRepository(
     private fun ocrDecodePixels(lightweight: Boolean): Int = when {
         lowEndOcr && lightweight -> OCR_BACKGROUND_PIXELS
         lowEndOcr -> OCR_LOW_RAM_PIXELS
-        else -> tier.maxWorkingPixels
+        // ML Kit no gana nada por encima de ~12 MP y tarda bastante más.
+        else -> minOf(tier.maxWorkingPixels, OCR_MAX_PIXELS)
     }
 
     /**
@@ -1241,10 +1325,16 @@ class DocumentRepository(
         private const val OCR_DIR = "ocr"
         private val SUBDIRS = listOf(ORIGINAL_DIR, PROCESSED_DIR, THUMB_DIR, OCR_DIR)
 
-        private const val ORIGINAL_QUALITY = 95
-        private const val PROCESSED_QUALITY = 92
-        private const val THUMB_QUALITY = 82
-        private const val THUMB_SIDE = 480
+        /** Solo para originales GENERADOS (DNI compuesto); las fotos de cámara/galería se mueven sin recodificar. */
+        private const val ORIGINAL_QUALITY = 100
+        /** El procesado se codifica una única vez con pérdida; la reducción de tamaño ocurre solo al exportar. */
+        private const val PROCESSED_QUALITY = 95
+        private const val THUMB_QUALITY = 90
+        /** Miniaturas nítidas en las rejillas (celdas de ~600-900 px en pantallas QHD+). */
+        private const val THUMB_SIDE = 960
+        /** Mínimo al reintentar un render sin memoria (solo equipos muy justos). */
+        private const val MIN_RETRY_PIXELS = 4_000_000
+        private const val OCR_MAX_PIXELS = 12_600_000
         private const val MIN_CONFIDENCE = 0.35f
         private const val BUFFER = 64 * 1024
         private const val OCR_LOW_RAM_PIXELS = 4_000_000
@@ -1257,6 +1347,20 @@ class DocumentRepository(
         private val WIPED_CACHE_DIRS = listOf("compress", "pdfbox")
 
         private fun isBinaryFilter(f: FilterType) = f == FilterType.BLACK_WHITE || f == FilterType.ECO_INK
+
+        /** OutOfMemoryError de Java o fallo de reserva de memoria nativa de OpenCV ("Insufficient memory"). */
+        private fun isOutOfMemory(t: Throwable): Boolean {
+            var c: Throwable? = t
+            while (c != null) {
+                if (c is OutOfMemoryError) return true
+                if (c is org.opencv.core.CvException) {
+                    val m = c.message.orEmpty()
+                    if (m.contains("Insufficient memory", true) || m.contains("Failed to allocate", true) || m.contains("NoMemory", true)) return true
+                }
+                c = c.cause
+            }
+            return false
+        }
 
         internal val json = Json {
             ignoreUnknownKeys = true

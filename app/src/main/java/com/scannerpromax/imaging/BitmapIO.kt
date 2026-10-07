@@ -124,8 +124,11 @@ object BitmapIO {
         }
     }
 
-    /** Guarda en JPEG de forma atómica (archivo temporal + renombrado). */
-    fun saveJpeg(bitmap: Bitmap, path: String, quality: Int = 92) {
+    /**
+     * Guarda en JPEG de forma atómica (archivo temporal + renombrado). Calidad 95 por defecto: el procesado se
+     * codifica UNA sola vez con pérdida (los originales generados usan 100) y la reducción ocurre al exportar.
+     */
+    fun saveJpeg(bitmap: Bitmap, path: String, quality: Int = 95) {
         save(bitmap, path, Bitmap.CompressFormat.JPEG, quality)
     }
 
@@ -159,25 +162,37 @@ object BitmapIO {
         return n
     }
 
-    /** Miniatura con lado largo <= [maxSide]. Siempre devuelve un Bitmap NUEVO (se puede reciclar). */
-    fun thumbnail(src: Bitmap, maxSide: Int = 480): Bitmap {
+    /**
+     * Miniatura con lado largo <= [maxSide]. Siempre devuelve un Bitmap NUEVO (se puede reciclar).
+     * Reducción por mitades exactas (cada paso bilineal a 0.5 equivale a promediar 2x2, sin aliasing) y un último
+     * paso suave (escala >= 0.5): mucho más nítida y sin dientes de sierra que un único bilineal a 0.2-0.4.
+     */
+    fun thumbnail(src: Bitmap, maxSide: Int = 960): Bitmap {
         val long = max(src.width, src.height)
         if (long <= maxSide) return src.copy(Bitmap.Config.ARGB_8888, false)
         val s = maxSide.toDouble() / long
         val tw = max(1, (src.width * s).roundToInt()); val th = max(1, (src.height * s).roundToInt())
-        // Reducción en dos pasos si es muy grande (mejor calidad que un único bilineal)
-        if (s < 0.25) {
-            val mid = Bitmap.createScaledBitmap(src, tw * 2, th * 2, true)
-            val out = Bitmap.createScaledBitmap(mid, tw, th, true)
-            if (mid !== src && mid !== out) mid.recycle()
-            return out
+        var cur = src
+        try {
+            while (cur.width / 2 >= tw && cur.height / 2 >= th && cur.width / 2 > 0 && cur.height / 2 > 0) {
+                val half = Bitmap.createScaledBitmap(cur, cur.width / 2, cur.height / 2, true)
+                if (cur !== src && cur !== half) cur.recycle()
+                cur = half
+            }
+            if (cur.width == tw && cur.height == th) {
+                return if (cur === src) src.copy(Bitmap.Config.ARGB_8888, false) else cur
+            }
+            val out = Bitmap.createScaledBitmap(cur, tw, th, true)
+            if (cur !== src && cur !== out) cur.recycle()
+            return if (out === src) src.copy(Bitmap.Config.ARGB_8888, false) else out
+        } catch (oom: OutOfMemoryError) {
+            if (cur !== src) cur.recycle()
+            throw oom
         }
-        val out = Bitmap.createScaledBitmap(src, tw, th, true)
-        return if (out === src) src.copy(Bitmap.Config.ARGB_8888, false) else out
     }
 
     /** Decodifica directamente una miniatura desde archivo (sin cargar la imagen completa). */
-    fun decodeThumbnail(path: String, maxSide: Int = 480): Bitmap {
+    fun decodeThumbnail(path: String, maxSide: Int = 960): Bitmap {
         val (w, h) = decodeBounds(path)
         val budget = (maxSide.toLong() * maxSide * max(1, minOf(w, h)) / max(1, max(w, h))).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
         val bmp = decode(path, max(1, budget))

@@ -232,7 +232,7 @@ fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
             options = ExportQuality.entries,
             selected = settings.exportQuality,
             label = { it.label },
-            description = { "Hasta ${it.maxLongSide} px · JPEG ${it.jpegQuality} %" + qualityHint(it) },
+            description = { it.resolutionLabel.replaceFirstChar { c -> c.uppercase() } + (if (it.isFullResolution) "" else " · JPEG ${it.jpegQuality} %") + qualityHint(it) },
             onSelect = { v -> update { it.copy(exportQuality = v) } },
             onDismiss = { picker = null },
         )

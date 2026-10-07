@@ -66,7 +66,8 @@ fun binaryHintFor(filter: FilterType): Boolean = filter == FilterType.BLACK_WHIT
  *  - Página a página (memoria acotada; búfer de pdfbox en archivo temporal).
  *  - Imágenes casi binarias (filtros B/N, ahorro de tinta) -> 1 bit + Flate: nítidas y diminutas.
  *  - El resto -> JPEG con la calidad elegida; si el procesado ya es un JPEG de calidad suficiente y no
- *    hay que reducirlo, se incrusta tal cual (sin pérdida extra ni recodificación).
+ *    hay que reducirlo, se incrusta tal cual (sin pérdida extra ni recodificación). La reducción de resolución
+ *    ocurre SOLO aquí, según [com.scannerpromax.domain.ExportQuality] ("Máxima (HD)" = resolución completa).
  *  - Modos de texto ([PdfTextMode]):
  *     · BUSCABLE: capa invisible palabra a palabra, con su ancho exacto y la inclinación de la línea, de modo que
  *       buscar/seleccionar/copiar en cualquier visor resalta justo encima del texto impreso.
@@ -246,8 +247,9 @@ class PdfExporter(private val context: Context) {
             }
         }
 
-        // Incrustación directa del JPEG procesado (guardado a calidad 92) cuando no hace falta tocarlo.
-        if (!needsResize && options.quality.jpegQuality >= 90 && ImageCodec.isJpeg(file)) {
+        // Incrustación directa (passthrough) del JPEG procesado (guardado una sola vez a calidad 95) cuando no hace
+        // falta reducirlo: "Máxima (HD)" siempre, y "Alta" si el escaneo ya mide <= 3508 px. Sin recomprimir.
+        if (!needsResize && (options.quality.isFullResolution || options.quality.jpegQuality >= 90) && ImageCodec.isJpeg(file)) {
             return JPEGFactory.createFromByteArray(doc, file.readBytes())
         }
 

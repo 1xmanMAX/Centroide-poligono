@@ -29,6 +29,12 @@ internal object ImageCodec {
         false
     }
 
+    fun isPng(file: File): Boolean = try {
+        file.inputStream().use { s -> s.read() == 0x89 && s.read() == 0x50 && s.read() == 0x4E && s.read() == 0x47 }
+    } catch (_: Throwable) {
+        false
+    }
+
     /** Píxeles que podemos permitirnos decodificar ahora mismo (ARGB_8888, con margen para copias). */
     fun safePixelBudget(copies: Int = 3): Int {
         val rt = Runtime.getRuntime()

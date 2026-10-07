@@ -110,15 +110,20 @@ class ImageExporter(private val context: Context) {
     // ------------------------------------------------------------------------------------------
 
     /**
-     * Re-codifica [file] en el formato/calidad pedidos (lado largo <= maxLongSide de la calidad).
-     * Si ya es un JPEG adecuado y se pide JPEG de alta calidad, se copia tal cual (sin pérdida extra).
+     * Re-codifica [file] en el formato/calidad pedidos (lado largo <= maxLongSide de la calidad). La reducción de
+     * resolución ocurre SOLO aquí. Sin recodificar (copia exacta de bytes) cuando no hay que reducir y el formato
+     * ya coincide: JPEG procesado -> JPG en "Alta"/"Máxima (HD)", y PNG (B/N) -> PNG en cualquier calidad.
      */
     private fun encode(file: File, format: ImageFormat, quality: ExportQuality, out: OutputStream) {
         val (w, h) = ImageCodec.bounds(file)
         if (w <= 0 || h <= 0) throw IOException("Imagen ilegible: ${file.name}")
-        if (format == ImageFormat.JPEG && quality.jpegQuality >= 90 &&
-            max(w, h) <= quality.maxLongSide && ImageCodec.isJpeg(file)
-        ) {
+        val fits = quality.isFullResolution || max(w, h) <= quality.maxLongSide
+        val passthrough = fits && when (format) {
+            ImageFormat.JPEG -> (quality.isFullResolution || quality.jpegQuality >= 90) && ImageCodec.isJpeg(file)
+            ImageFormat.PNG -> ImageCodec.isPng(file)
+            ImageFormat.WEBP -> false
+        }
+        if (passthrough) {
             file.inputStream().use { it.copyTo(out, BUFFER) }
             return
         }
@@ -126,7 +131,9 @@ class ImageExporter(private val context: Context) {
         try {
             val toWrite = if (format == ImageFormat.JPEG) ImageCodec.flattenOnWhite(bmp) else bmp
             try {
-                val ok = toWrite.compress(ImageCodec.compressFormat(format, quality.jpegQuality), quality.jpegQuality, out)
+                // "Máxima (HD)" en WEBP = sin pérdida (Android 11+); en JPEG, 95.
+                val q = if (format == ImageFormat.WEBP && quality.isFullResolution) 100 else quality.jpegQuality
+                val ok = toWrite.compress(ImageCodec.compressFormat(format, q), q, out)
                 if (!ok) throw IOException("No se pudo codificar la imagen")
             } finally {
                 if (toWrite !== bmp) toWrite.recycle()

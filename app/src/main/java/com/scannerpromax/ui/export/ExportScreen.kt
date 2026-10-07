@@ -580,6 +580,13 @@ fun ExportScreen(
                     ChipRow {
                         ExportQuality.entries.forEach { q -> Pill(q.label, quality == q) { quality = q } }
                     }
+                    // Qué hace cada calidad: la app guarda el escaneo completo y SOLO aquí se reduce.
+                    Text(
+                        quality.hint,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 6.dp),
+                    )
                 }
                 if (d != null && d.pages.isNotEmpty()) {
                     val est = remember(d, quality, kind, imageFormat, textMode, textPlacement) {
@@ -597,7 +604,7 @@ fun ExportScreen(
                         Box(Modifier.size(8.dp).clip(RoundedCornerShape(50)).background(MaterialTheme.brand.gradient))
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            "Tamaño estimado: ≈ ${formatBytes(est)}" + if (showQuality) " · hasta ${quality.maxLongSide} px" else "",
+                            "Tamaño estimado: ≈ ${formatBytes(est)}" + if (showQuality) " · ${quality.resolutionLabel}" else "",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -800,13 +807,15 @@ private fun estimateBytes(doc: Document, quality: ExportQuality, imageFormat: Im
         px = min(px, maxPixels.toDouble())
         val aspect = if (p.height > 0) p.width.toDouble() / p.height else 0.75
         val longSide = sqrt(px * max(aspect, 1.0 / aspect))
-        if (longSide > quality.maxLongSide) {
+        if (!quality.isFullResolution && longSide > quality.maxLongSide) {
             val s = quality.maxLongSide / longSide
             px *= s * s
         }
         val binary = p.edits.filter == FilterType.BLACK_WHITE || p.edits.filter == FilterType.ECO_INK
         val bpp = when {
             imageFormat == ImageFormat.PNG -> if (binary) 0.12 else 1.1
+            // WEBP en "Máxima (HD)" va sin pérdida.
+            imageFormat == ImageFormat.WEBP && quality.isFullResolution -> if (binary) 0.1 else 0.9
             binary && imageFormat == null -> 0.035
             else -> when (quality) {
                 ExportQuality.SMALL -> 0.07

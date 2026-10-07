@@ -182,11 +182,23 @@ enum class PageSize(val label: String, val widthPt: Float, val heightPt: Float) 
     LEGAL("Oficio", 612f, 1008f),
 }
 
-enum class ExportQuality(val label: String, val jpegQuality: Int, val maxLongSide: Int) {
-    SMALL("Pequeño", 60, 1600),
-    BALANCED("Equilibrado", 80, 2480),
-    HIGH("Alta", 92, 3508),
-    MAX("Máxima (HD)", 98, 6000),
+/**
+ * Calidad de exportación. La app guarda siempre el escaneo a resolución completa; la reducción ocurre SOLO aquí.
+ * [maxLongSide] = lado largo máximo en píxeles ([Int.MAX_VALUE] = sin límite). Referencia A4 (297 mm):
+ * 1600 px ≈ 137 ppp, 2480 px ≈ 212 ppp, 3508 px = 300 ppp.
+ */
+enum class ExportQuality(val label: String, val jpegQuality: Int, val maxLongSide: Int, val hint: String) {
+    SMALL("Pequeño", 60, 1600, "≈ 140 ppp en A4 · ideal para enviar por chat o correo"),
+    BALANCED("Equilibrado", 80, 2480, "≈ 210 ppp en A4 · buena lectura y tamaño moderado"),
+    HIGH("Alta", 92, 3508, "300 ppp en A4 · recomendada para imprimir y archivar"),
+    MAX("Máxima (HD)", 95, Int.MAX_VALUE, "Resolución completa del escaneo, sin recomprimir · el archivo más grande"),
+    ;
+
+    /** true = sin reducción: el procesado se incrusta/copia tal cual. */
+    val isFullResolution: Boolean get() = maxLongSide == Int.MAX_VALUE
+
+    /** Texto corto de la resolución: "hasta 3508 px" o "resolución completa". */
+    val resolutionLabel: String get() = if (isFullResolution) "resolución completa" else "hasta $maxLongSide px"
 }
 
 enum class ImageFormat(val label: String, val ext: String, val mime: String) {

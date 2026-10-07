@@ -32,6 +32,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -106,7 +107,19 @@ internal class EditorSession(
     /** Escala imagen de trabajo / original. */
     var workScale = 1f
         private set
-    val previewSide: Int = if (tier.isLowRam) min(900, DeviceProfiler.previewSide(tier)) else DeviceProfiler.previewSide(tier)
+    /**
+     * Lado de la vista previa refinada, acorde a la pantalla (no un valor fijo): ~1450 px en FHD+, ~1930 px en
+     * QHD+, 900-1280 px en gama baja. Así la imagen se ve nítida sin reescalados grandes en la GPU.
+     */
+    val previewSide: Int = container.appContext.resources.displayMetrics.let {
+        DeviceProfiler.previewSideForScreen(tier, it.widthPixels, it.heightPixels)
+    }
+    /** Lado máximo al ampliar con los dedos (el refinado se rehace a más resolución al soltar el zoom). */
+    private val maxDetailSide: Int = if (tier.isLowRam || tier.cores <= 4) 2048 else 4096
+    /** Lado pedido para la vista previa refinada (sube con el zoom). */
+    private val sideFlow = MutableStateFlow(previewSide)
+    /** Lado con el que se generó la última vista previa refinada. Solo se usa en Main. */
+    private var renderedSide = 0
     /** Lado de la vista previa rápida (primer paso, mientras se mueven sliders o se cambia de filtro). */
     private val fastSide: Int = if (tier.isLowRam || tier.cores <= 4) FAST_SIDE_LOW else FAST_SIDE
 
@@ -129,12 +142,24 @@ internal class EditorSession(
                 edits = p.edits
                 savedEdits = p.edits
                 val file = container.documents.originalFile(docId, p)
-                // Imagen de trabajo del editor: en gama baja ~2.4 MP bastan para el recorte con lupa y la vista
-                // previa de 900 px (menos memoria y una textura más pequeña que subir a la GPU).
-                val maxPx = if (tier.isLowRam) 2_400_000 else min(tier.maxWorkingPixels, 6_000_000)
-                val bmp = withContext(Dispatchers.Default) {
-                    work.withLock { BitmapIO.decode(file.absolutePath, maxPx) }
+                // Imagen de trabajo del editor (recorte con lupa, vista previa y zoom): en gama alta la foto completa
+                // (hasta 12.6 MP), en gama media 8 MP y en gama baja ~3 MP (vista previa de <= 1280 px). Lado largo
+                // <= 4096 px: es el tamaño máximo de textura de muchas GPU (si no, el dibujo fallaría).
+                val maxPx = when {
+                    tier.isLowRam -> 3_000_000
+                    DeviceProfiler.isHighEnd(tier) -> min(tier.maxWorkingPixels, 12_600_000)
+                    else -> min(tier.maxWorkingPixels, 8_000_000)
                 }
+                val bmp = withContext(Dispatchers.Default) {
+                    work.withLock {
+                        val d = BitmapIO.decode(file.absolutePath, maxPx)
+                        if (maxOf(d.width, d.height) > MAX_TEXTURE_SIDE) {
+                            BitmapIO.thumbnail(d, MAX_TEXTURE_SIDE).also { d.recycle() }
+                        } else d
+                    }
+                }
+                // Mipmaps: al dibujarse reducida en pantalla (recorte, original) la GPU filtra sin dientes de sierra.
+                bmp.setHasMipMap(true)
                 if (disposed) {
                     bmp.recycle()
                     return@launch
@@ -167,8 +192,20 @@ internal class EditorSession(
     }
 
     fun requestPreview() {
+        // Mismas ediciones ya pedidas: el StateFlow no emitiría y [previewPending] se quedaría en true para siempre
+        // (las miniaturas de filtros esperarían sin fin).
+        if (editsFlow.value == edits) return
         previewPending = true
         editsFlow.value = edits
+    }
+
+    /**
+     * Zoom de la vista previa (1 = ajustada a la pantalla). Al ampliar, la vista previa refinada se rehace a más
+     * resolución (hasta [maxDetailSide]) para que el detalle se vea nítido; al volver a 1x no se rehace nada.
+     */
+    fun setZoomDetail(zoom: Float) {
+        sideFlow.value = if (zoom <= 1.25f) previewSide
+        else (previewSide * zoom).toInt().coerceIn(previewSide, maxOf(previewSide, maxDetailSide))
     }
 
     fun setFilter(f: FilterType) = update(edits.copy(filter = f))
@@ -296,7 +333,9 @@ internal class EditorSession(
 
     private fun startPreviewPipeline() {
         scope.launch {
-            editsFlow.filterNotNull().collectLatest { e ->
+            combine(editsFlow.filterNotNull(), sideFlow) { e, side -> e to side }.collectLatest { (e, side) ->
+                // Solo cambió el zoom y la vista previa actual ya tiene resolución suficiente: nada que hacer.
+                if (e == previewEdits && side <= renderedSide) return@collectLatest
                 delay(PREVIEW_DEBOUNCE_MS)
                 val src = source ?: return@collectLatest
                 previewBusy = true
@@ -316,11 +355,13 @@ internal class EditorSession(
                     // Paso 2 (refinado): tubería completa a la resolución de vista previa.
                     val working = e.copy(quad = e.quad?.let { scaleQuad(it, workScale) })
                     val bmp = withContext(Dispatchers.Default) {
-                        work.withLock { if (src.isRecycled) null else processor.preview(src, working, previewSide) }
+                        work.withLock { if (src.isRecycled) null else processor.preview(src, working, side) }
                     }
                     if (bmp != null) {
+                        bmp.setHasMipMap(true)
                         preview = bmp.asImageBitmap()
                         previewEdits = e
+                        renderedSide = side
                     }
                     previewPending = false
                 } catch (c: CancellationException) {
@@ -459,6 +500,8 @@ internal class EditorSession(
         private const val THUMB_YIELD_MS = 60L
         private const val FAST_SIDE_LOW = 480
         private const val FAST_SIDE = 640
+        /** Tamaño máximo de textura seguro en GPU antiguas. */
+        private const val MAX_TEXTURE_SIDE = 4096
 
         fun scaleQuad(q: Quad, f: Float): Quad = Quad.of(q.points().map { Pt(it.x * f, it.y * f) })
 

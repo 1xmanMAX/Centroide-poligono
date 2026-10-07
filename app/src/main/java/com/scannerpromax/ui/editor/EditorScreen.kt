@@ -89,6 +89,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.layout.onSizeChanged
+import com.scannerpromax.ui.review.zoomGestures
+import kotlinx.coroutines.delay
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -520,17 +525,51 @@ fun EditorScreen(
     }
 }
 
-/** Imagen mostrada (vista previa u original). Lee [EditorSession.preview] en su propio ámbito. */
+/**
+ * Imagen mostrada (vista previa u original). Lee [EditorSession.preview] en su propio ámbito.
+ * Pellizcar / doble toque amplía hasta 5x; al soltar, la vista previa se rehace a más resolución
+ * ([EditorSession.setZoomDetail]) para que el detalle se vea nítido y no un ampliado borroso.
+ */
 @Composable
 private fun PreviewImage(session: EditorSession, showOriginal: Boolean) {
     val src = session.sourceImage ?: return
     val shown = if (showOriginal) src else (session.preview ?: src)
-    Image(
-        bitmap = shown,
-        contentDescription = if (showOriginal) "Original" else "Vista previa",
-        contentScale = ContentScale.Fit,
-        modifier = Modifier.fillMaxSize().padding(10.dp),
-    )
+    val zoom = remember { com.scannerpromax.ui.review.ZoomState(maxScale = 5f) }
+    LaunchedEffect(zoom.scale) {
+        delay(250)
+        session.setZoomDetail(zoom.scale)
+    }
+    DisposableEffect(Unit) { onDispose { session.setZoomDetail(1f) } }
+    Box(
+        Modifier
+            .fillMaxSize()
+            .padding(10.dp)
+            .clipToBounds()
+            .onSizeChanged { sz ->
+                // Tamaño de la imagen ajustada (ContentScale.Fit) para limitar el desplazamiento al ampliar.
+                val iw = shown.width.toFloat(); val ih = shown.height.toFloat()
+                if (iw > 0f && ih > 0f && sz.width > 0 && sz.height > 0) {
+                    val f = minOf(sz.width / iw, sz.height / ih)
+                    zoom.content = androidx.compose.ui.geometry.Size(iw * f, ih * f)
+                }
+            }
+            .zoomGestures(zoom),
+    ) {
+        Image(
+            bitmap = shown,
+            contentDescription = if (showOriginal) "Original" else "Vista previa",
+            contentScale = ContentScale.Fit,
+            filterQuality = FilterQuality.High,
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    scaleX = zoom.scale
+                    scaleY = zoom.scale
+                    translationX = zoom.offset.x
+                    translationY = zoom.offset.y
+                },
+        )
+    }
 }
 
 @Composable
