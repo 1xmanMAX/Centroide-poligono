@@ -39,7 +39,9 @@ import kotlin.math.sqrt
  * Estrategia de precisión, pensada para gama baja (un solo reconocedor, pasadas secuenciales):
  *  1. Escala normalizada (lado largo ~2400-3000 px). Si el filtro de la página conserva la iluminación de la foto
  *     (Original/Vívido/Aclarar/Auto) se normaliza la iluminación en gris antes de reconocer.
- *  2. Si las líneas son muy bajas (< 20 px) se vuelve a reconocer ampliando para que midan ~30 px.
+ *  2. Si las líneas son muy bajas (< 20 px) se vuelve a reconocer ampliando para que midan ~30 px; si la página
+ *     entera ampliada no cabe en los límites (hoja densa con letra pequeña, tablas), por mosaicos solapados en gris
+ *     a esa escala, fusionando los resultados sin duplicados ([OcrTiling]).
  *  3. Si la confianza media de las líneas es baja, segundo intento con una variante binarizada y se queda, línea a
  *     línea, con la de mayor confianza (en gama baja como mucho una pasada extra en total).
  *  4. Palabras con su caja (Text.Element) y ángulo de cada línea para la capa invisible precisa del PDF.
@@ -116,12 +118,23 @@ class OcrEngine(private val context: Context) {
             partial?.result = build(best.blocks, w, h)
             currentCoroutineContext().ensureActive()
 
-            // Letra diminuta (hoja completa con letra pequeña, recibos lejanos...): ampliar.
+            // Letra diminuta (hoja completa con letra pequeña, tablas densas, recibos lejanos...): ampliar. Si la página
+            // entera ampliada no cabe (lado o píxeles), por MOSAICOS solapados a la escala buscada ([OcrTiling]).
             val medianLine = medianLineHeight(best.blocks)
             if (extraPasses < maxExtra && medianLine > 0f && medianLine * scale in 1f..SMALL_TEXT_PX) {
-                val wanted = TARGET_TEXT_PX / medianLine
+                val wanted = min(MAX_UPSCALE, TARGET_TEXT_PX / medianLine)
                 val second = clampScale(wanted, w, h, maxLong, maxPixels)
-                if (second > scale * 1.25f) {
+                if (wanted > second * 1.2f && wanted > scale * 1.25f && !lightweight) {
+                    currentCoroutineContext().ensureActive()
+                    val tiled = try { runTiled(bitmap, wanted, medianLine, normalize, low, partial, w, h) } catch (e: OutOfMemoryError) { null }
+                    extraPasses++
+                    if (tiled != null && letterCount(tiled.blocks) >= letterCount(best.blocks)) {
+                        best = tiled
+                        scale = wanted
+                        partial?.result = build(best.blocks, w, h)
+                    }
+                    currentCoroutineContext().ensureActive()
+                } else if (second > scale * 1.25f) {
                     currentCoroutineContext().ensureActive()
                     val pass2 = try { runPass(bitmap, second, if (normalize) Variant.NORMALIZED else Variant.PLAIN) } catch (e: OutOfMemoryError) { null }
                     extraPasses++
@@ -139,7 +152,8 @@ class OcrEngine(private val context: Context) {
             if (conf in 0f..LOW_CONFIDENCE && extraPasses < maxExtra) {
                 currentCoroutineContext().ensureActive()
                 val lineH = medianLineHeight(best.blocks) // en px de la imagen original
-                val variant = try { runPass(bitmap, scale, Variant.BINARIZED, lineH * scale) } catch (e: OutOfMemoryError) { null }
+                val vScale = clampScale(scale, w, h, maxLong, maxPixels)
+                val variant = try { runPass(bitmap, vScale, Variant.BINARIZED, lineH * vScale) } catch (e: OutOfMemoryError) { null }
                 if (variant != null && variant.blocks.isNotEmpty()) {
                     best = Pass(mergeByConfidence(best.blocks, variant.blocks))
                     partial?.result = build(best.blocks, w, h)
@@ -163,7 +177,7 @@ class OcrEngine(private val context: Context) {
 
     // ---------------------------------------------------------------------------------
 
-    private enum class Variant { PLAIN, NORMALIZED, BINARIZED }
+    private enum class Variant { PLAIN, GRAY, NORMALIZED, BINARIZED }
 
     /** Bloques en coordenadas de la imagen ORIGINAL recibida. */
     private class Pass(val blocks: List<OcrBlock>)
@@ -197,6 +211,7 @@ class OcrEngine(private val context: Context) {
             // Bitmap ARGB (4 B/px): menos memoria y menos copias en gama baja.
             val gray = when (variant) {
                 Variant.PLAIN -> null
+                Variant.GRAY -> OcrPreprocess.grayNv21(scaled)
                 Variant.NORMALIZED -> OcrPreprocess.normalizeIlluminationNv21(scaled)
                 Variant.BINARIZED -> OcrPreprocess.binarizeNv21(scaled, lineHeightPx)
             }
@@ -217,6 +232,40 @@ class OcrEngine(private val context: Context) {
         } finally {
             if (scaled !== src && !scaled.isRecycled) scaled.recycle()
         }
+    }
+
+    /**
+     * Reconocimiento por mosaicos a [scale] (texto a ~[TARGET_TEXT_PX] px): cada mosaico mide como mucho
+     * [TILE_SIDE] px ya ampliado y se solapa ~3 alturas de línea con sus vecinos; entrada en gris (normalizada si el
+     * filtro conserva la iluminación). Los resultados se fusionan sin duplicados ([OcrTiling.merge]).
+     */
+    private suspend fun runTiled(
+        src: Bitmap, scale: Float, lineH: Float, normalize: Boolean, low: Boolean, partial: Partial?, w: Int, h: Int,
+    ): Pass? {
+        var s = scale
+        var tileSrc = (TILE_SIDE / s).toInt()
+        val overlap = (lineH * 3f).toInt().coerceAtLeast(48)
+        var tiles = OcrTiling.plan(w, h, tileSrc, overlap)
+        // Presupuesto de tiempo: como mucho N mosaicos (menos escala si hiciera falta, nunca por debajo de 1.2x la base)
+        val maxTiles = if (low) MAX_TILES_LOW else MAX_TILES
+        while (tiles.size > maxTiles && s > 0.5f) {
+            s *= 0.85f
+            tileSrc = (TILE_SIDE / s).toInt()
+            tiles = OcrTiling.plan(w, h, tileSrc, overlap)
+        }
+        if (tiles.size <= 1) return null
+        val parts = ArrayList<Pair<OcrTiling.Tile, List<OcrBlock>>>(tiles.size)
+        for (t in tiles) {
+            currentCoroutineContext().ensureActive()
+            val crop = Bitmap.createBitmap(src, t.x0, t.y0, t.width, t.height)
+            try {
+                val pass = runPass(crop, s, if (normalize) Variant.NORMALIZED else Variant.GRAY)
+                parts.add(t to pass.blocks.map { OcrTiling.offset(it, t.x0.toFloat(), t.y0.toFloat()) })
+            } finally {
+                if (crop !== src) crop.recycle()
+            }
+        }
+        return Pass(OcrTiling.merge(parts, w, h))
     }
 
     private fun clampScale(scale: Float, w: Int, h: Int, maxLong: Int, maxPixels: Int): Float {
@@ -364,6 +413,10 @@ class OcrEngine(private val context: Context) {
         const val TARGET_TEXT_PX = 30f
         const val LOW_CONFIDENCE = 0.72f
         const val ADD_CONFIDENCE = 0.85f
+        /** Lado máximo de un mosaico YA ampliado (px que recibe ML Kit). */
+        const val TILE_SIDE = 2048f
+        const val MAX_TILES = 16
+        const val MAX_TILES_LOW = 6
     }
 }
 

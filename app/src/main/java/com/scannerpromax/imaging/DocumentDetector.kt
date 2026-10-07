@@ -145,7 +145,16 @@ class DocumentDetector(private val tier: DeviceTier) {
         val buf = Buffers()
         val bag = MatBag()
         try {
-            val cand = detectColor(rgbSmall, buf, bag) ?: return null
+            val det0 = detectColor(rgbSmall, buf, bag)
+            // Sin candidato (blanco sobre blanco con poca luz: ningún borde con contraste suficiente): se intenta igualmente
+            // la hoja a partir del contenido, exigiendo más rectas
+            val cand0 = det0 ?: (if (sheetRefine) runCatching {
+                val w0 = rgbSmall.cols() - 1f; val h0 = rgbSmall.rows() - 1f
+                refineSheet(rgbSmall, Candidate(floatArrayOf(0f, 0f, w0, 0f, w0, h0, 0f, h0), 0.0), force = true)
+            }.getOrNull() else null) ?: return null
+            // Blanco sobre blanco (hoja sobre una pila de hojas o una mesa blanca) o cuadrilátero que corta el
+            // contenido (borde de una tabla impresa): se busca la hoja SUPERIOR a partir del contenido
+            val cand = (if (sheetRefine && det0 != null) runCatching { refineSheet(rgbSmall, cand0) }.getOrNull() else null) ?: cand0
             val pts = scaleToFrame(cand.pts, rgbSmall.cols(), rgbSmall.rows(), fullW, fullH)
             if (grayCrop != null) refineCorners(fullW, fullH, grayCrop, pts)
             clampPts(pts, fullW, fullH)
@@ -924,6 +933,354 @@ class DocumentDetector(private val tier: DeviceTier) {
         }
     }
 
+    // =====================================================================================
+    // Hoja superior: blanco sobre blanco y cuadriláteros que cortan el contenido
+    // =====================================================================================
+
+    /**
+     * Corrige el cuadrilátero elegido cuando (a) CORTA el contenido (p. ej. el marco de una tabla impresa: parte de
+     * la tinta queda fuera) o (b) al menos dos de sus lados separan papel de papel (hoja sobre una pila de hojas o
+     * sobre una mesa blanca: el borde exterior puede ser el de la pila). En esos casos el contenido (tinta oscura
+     * sobre papel, sin rectas largas y finas como las sombras entre hojas) marca el INTERIOR de la hoja superior y
+     * cada lado se busca hacia fuera desde el casco del contenido: la PRIMERA recta con gradiente consistente
+     * (escalón de brillo/color o la línea de sombra fina entre hojas) a lo largo de todo el contenido, con ±8° de
+     * libertad. Sin recta, el lado del cuadrilátero original paralelo (si deja dentro el contenido) o el borde de
+     * la imagen. Null = sin cambios. Coordenadas de trabajo.
+     */
+    private fun refineSheet(rgb: Mat, cand: Candidate, force: Boolean = false): Candidate? = MatBag().use { bag ->
+        val w = rgb.cols(); val h = rgb.rows(); val side = max(w, h).toDouble()
+        if (min(w, h) < 64) return@use null
+        val lab = bag.mat(); Imgproc.cvtColor(rgb, lab, Imgproc.COLOR_RGB2Lab)
+        val l = bag.mat(); Core.extractChannel(lab, l, 0)
+        Imgproc.GaussianBlur(l, l, Size(3.0, 3.0), 0.7)
+        val lb = ByteArray(w * h); l.get(0, 0, lb)
+        val ycc = bag.mat(); Imgproc.cvtColor(rgb, ycc, Imgproc.COLOR_RGB2YCrCb)
+        val cr = bag.mat(); val cb = bag.mat()
+        Core.extractChannel(ycc, cr, 1); Core.extractChannel(ycc, cb, 2)
+        Imgproc.GaussianBlur(cr, cr, Size(5.0, 5.0), 0.0); Imgproc.GaussianBlur(cb, cb, Size(5.0, 5.0), 0.0)
+        val crb = ByteArray(w * h); cr.get(0, 0, crb)
+        val cbb = ByteArray(w * h); cb.get(0, 0, cbb)
+        fun lAt(x: Int, y: Int) = lb[y * w + x].toInt() and 0xFF
+        fun cAt(x: Int, y: Int) = (crb[y * w + x].toInt() and 0xFF) + (cbb[y * w + x].toInt() and 0xFF)
+
+        // --- Contenido: tinta oscura respecto del papel de alrededor, sobre papel claro
+        val k = Cv.odd(max(5, (side * 0.03).roundToInt()))
+        val closed = bag.mat(); Imgproc.morphologyEx(l, closed, Imgproc.MORPH_CLOSE, Cv.kernel(Imgproc.MORPH_ELLIPSE, k))
+        Imgproc.medianBlur(closed, closed, 5)
+        val paper = Cv.percentile(Cv.histogram(closed), 0.9).toDouble()
+        if (paper < 60) return@use null
+        val diff = bag.mat(); Core.subtract(closed, l, diff)
+        // (umbral relativo al papel: fotos oscuras o borrosas tienen menos contraste)
+        val ink = bag.mat(); Core.compare(diff, Scalar(max(12.0, min(SHEET_INK_DELTA, 0.15 * paper))), ink, Core.CMP_GT)
+        val bright = bag.mat(); Core.compare(closed, Scalar(0.62 * paper), bright, Core.CMP_GT)
+        Core.bitwise_and(ink, bright, ink)
+        debugMat?.invoke("ink", ink)
+        val labels = bag.mat(); val stats = bag.mat(); val cents = bag.mat()
+        val nc = Imgproc.connectedComponentsWithStats(ink, labels, stats, cents, 8, CvType.CV_32S)
+        if (nc <= 1) return@use null
+        val st = IntArray(nc * 5); stats.get(0, 0, st)
+        // Croma media de cada componente (marcador de color, bolígrafo sobre otra hoja: no marcan la hoja impresa)
+        val labA = IntArray(w * h); labels.get(0, 0, labA)
+        val chromaSum = LongArray(nc)
+        for (i in labA.indices) { val c = labA[i]; if (c > 0) chromaSum[c] += (abs((crb[i].toInt() and 0xFF) - 128) + abs((cbb[i].toInt() and 0xFF) - 128)).toLong() }
+        val boxes = ArrayList<IntArray>()
+        val extra = HashMap<Int, List<Point>>()   // casco de las componentes grandes (la caja de una tabla girada sobra)
+        var inkArea = 0
+        val sel = bag.mat(); val cnts = ArrayList<MatOfPoint>(); val hier = bag.mat(); val hi = MatOfInt()
+        // Rectas largas y finas: sombra o canto entre hojas, doblez... salvo que vayan ACOMPAÑADAS de contenido a lo
+        // largo (borde de una tabla, que con poca nitidez se separa de sus celdas)
+        val isLine = BooleanArray(nc)
+        for (c in 1 until nc) { val lg = max(st[c * 5 + 2], st[c * 5 + 3]); if (lg >= 0.08 * side && st[c * 5 + 4] <= 2.5 * lg) isLine[c] = true }
+        val lineOk = BooleanArray(nc)
+        if (isLine.any { it }) {
+            val other = bag.mat(); other.create(h, w, CvType.CV_8UC1)
+            val ob = ByteArray(w * h)
+            for (i in labA.indices) { val c = labA[i]; if (c > 0 && !isLine[c] && st[c * 5 + 4] >= 3) ob[i] = -1 }
+            other.put(0, 0, ob)
+            Imgproc.dilate(other, other, Cv.kernel(Imgproc.MORPH_RECT, Cv.odd(max(3, (side * 0.025).roundToInt()))))
+            val near = ByteArray(w * h); other.get(0, 0, near)
+            val tot = IntArray(nc); val hit = IntArray(nc)
+            for (i in labA.indices) { val c = labA[i]; if (c > 0 && isLine[c]) { tot[c]++; if (near[i].toInt() != 0) hit[c]++ } }
+            for (c in 1 until nc) if (isLine[c] && hit[c] >= 0.6 * tot[c]) lineOk[c] = true
+        }
+        for (c in 1 until nc) {
+            val x = st[c * 5]; val y = st[c * 5 + 1]; val bw = st[c * 5 + 2]; val bh = st[c * 5 + 3]; val a = st[c * 5 + 4]
+            if (a < 2) continue
+            if (x <= 2 || y <= 2 || x + bw >= w - 2 || y + bh >= h - 2) continue
+            val lg = max(bw, bh)
+            if (isLine[c] && !lineOk[c]) continue
+            if (lg < 0.15 * side && chromaSum[c].toDouble() / a > SHEET_INK_CHROMA) continue
+            if (lg >= 0.05 * side) {
+                Core.compare(labels, Scalar(c.toDouble()), sel, Core.CMP_EQ)
+                cnts.clear(); Imgproc.findContours(sel, cnts, hier, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
+                val all = cnts.flatMap { it.toList() }
+                for (m in cnts) m.release()
+                if (all.size >= 3) {
+                    val mp = MatOfPoint(*all.toTypedArray()); Imgproc.convexHull(mp, hi, false)
+                    extra[boxes.size] = hi.toArray().map { all[it] }; mp.release()
+                }
+            }
+            boxes.add(intArrayOf(x, y, x + bw, y + bh, a)); inkArea += a
+        }
+        hi.release()
+        if (boxes.size < 6 || inkArea < max(30.0, 0.0015 * w * h)) return@use null
+        // Sólo el bloque de contenido PRINCIPAL (tinta agrupada con huecos <= ~3 % del lado): marcas sueltas en
+        // otras hojas de la pila, bolígrafos o restos del fondo quedan fuera
+        run {
+            val bm = bag.mat(); bm.create(h, w, CvType.CV_8UC1); bm.setTo(Scalar(0.0))
+            for (b0 in boxes) Imgproc.rectangle(bm, Point(b0[0].toDouble(), b0[1].toDouble()), Point(b0[2].toDouble(), b0[3].toDouble()), Scalar(255.0), -1)
+            Imgproc.dilate(bm, bm, Cv.kernel(Imgproc.MORPH_RECT, Cv.odd(max(5, (side * 0.04).roundToInt()))))
+            val bl = bag.mat(); val bs = bag.mat(); val bc = bag.mat()
+            val nb = Imgproc.connectedComponentsWithStats(bm, bl, bs, bc, 8, CvType.CV_32S)
+            if (nb <= 2) return@run
+            val lab1 = IntArray(1)
+            val inkOf = LongArray(nb)
+            val owner = IntArray(boxes.size)
+            for ((i, b0) in boxes.withIndex()) { bl.get((b0[1] + b0[3]) / 2, (b0[0] + b0[2]) / 2, lab1); owner[i] = lab1[0]; inkOf[lab1[0]] += b0[4].toLong() }
+            var main = 1; for (c in 1 until nb) if (inkOf[c] > inkOf[main]) main = c
+            val keepIdx = boxes.indices.filter { owner[it] == main }
+            val keep = keepIdx.map { boxes[it] }
+            val ex2 = HashMap<Int, List<Point>>(); for ((ni, oi) in keepIdx.withIndex()) extra[oi]?.let { ex2[ni] = it }
+            extra.clear(); extra.putAll(ex2)
+            boxes.clear(); boxes.addAll(keep); inkArea = keep.sumOf { it[4] }
+        }
+        if (boxes.size < 6 || inkArea < max(30.0, 0.0015 * w * h)) return@use null
+        debugBoxes?.invoke(boxes)
+
+        // --- ¿Hace falta? (a) contenido fuera del quad; (b) lados papel/papel
+        val q = cand.pts
+        val qcx = (q[0] + q[2] + q[4] + q[6]) / 4.0; val qcy = (q[1] + q[3] + q[5] + q[7]) / 4.0
+        val poly = bag.add(MatOfPoint2f(*Array(4) { Point(q[it * 2].toDouble(), q[it * 2 + 1].toDouble()) }))
+        var outA = 0
+        for (b0 in boxes) {
+            val p = Point((b0[0] + b0[2]) / 2.0, (b0[1] + b0[3]) / 2.0)
+            if (Imgproc.pointPolygonTest(poly, p, true) < -2.0) outA += b0[4]
+        }
+        // (si casi todo el "contenido" queda fuera, no es la tinta de esta hoja: veta de la madera, otro objeto)
+        val cuts = outA >= 0.03 * inkArea && outA <= 0.4 * inkArea
+        var paperSides = 0
+        for (i in 0 until 4) {
+            val x0 = q[i * 2]; val y0 = q[i * 2 + 1]; val x1 = q[((i + 1) % 4) * 2]; val y1 = q[((i + 1) % 4) * 2 + 1]
+            val len = hypot((x1 - x0).toDouble(), (y1 - y0).toDouble()); if (len < 10) continue
+            var nx = -(y1 - y0) / len; var ny = (x1 - x0) / len
+            // hacia fuera = alejándose del centro
+            if (nx * ((x0 + x1) / 2.0 - qcx) + ny * ((y0 + y1) / 2.0 - qcy) < 0) { nx = -nx; ny = -ny }
+            var ok = 0; var tot = 0
+            for (s in 1..29) {
+                val t = 0.1 + 0.8 * s / 30.0
+                val px = x0 + (x1 - x0) * t; val py = y0 + (y1 - y0) * t
+                val ox = (px + nx * 6).roundToInt(); val oy = (py + ny * 6).roundToInt()
+                val ix = (px - nx * 6).roundToInt(); val iy = (py - ny * 6).roundToInt()
+                if (ox !in 0 until w || oy !in 0 until h || ix !in 0 until w || iy !in 0 until h) continue
+                tot++
+                val lo = lAt(ox, oy); val li = lAt(ix, iy)
+                if (lo >= 0.8 * paper && abs(lo - li) <= 28 && abs(cAt(ox, oy) - cAt(ix, iy)) <= 10) ok++
+            }
+            if (tot >= 10 && ok >= 0.6 * tot) paperSides++
+        }
+        debugLog?.invoke("sheet: cuts=$cuts (${outA}/$inkArea) paperSides=$paperSides comps=${boxes.size}")
+        if (!force && !cuts && paperSides < 2) return@use null
+
+        // --- Casco del contenido y orientación
+        val hp = ArrayList<Point>(boxes.size * 4)
+        for ((bi, b0) in boxes.withIndex()) { val e = extra[bi]; if (e != null) { hp.addAll(e); continue }; hp.add(Point(b0[0].toDouble(), b0[1].toDouble())); hp.add(Point(b0[2].toDouble(), b0[1].toDouble())); hp.add(Point(b0[2].toDouble(), b0[3].toDouble())); hp.add(Point(b0[0].toDouble(), b0[3].toDouble())) }
+        val hpm = bag.add(MatOfPoint2f(*hp.toTypedArray()))
+        val hullIdx = bag.add(MatOfInt())
+        val hpi = bag.add(MatOfPoint(*hp.map { Point(it.x, it.y) }.toTypedArray()))
+        Imgproc.convexHull(hpi, hullIdx, false)
+        val hull = hullIdx.toArray().map { hp[it] }
+        if (hull.size < 3) return@use null
+        val hullArea = abs(Imgproc.contourArea(bag.add(MatOfPoint2f(*hull.toTypedArray()))))
+        val rr = Imgproc.minAreaRect(hpm)
+        val th = Math.toRadians(rr.angle)
+        val ux = kotlin.math.cos(th); val uy = kotlin.math.sin(th)
+        val normals = arrayOf(doubleArrayOf(-uy, ux), doubleArrayOf(ux, uy), doubleArrayOf(uy, -ux), doubleArrayOf(-ux, -uy))
+        // Evidencia de borde en (x, y) con normal (nx, ny): cresta oscura fina (sombra entre hojas) o escalón
+        fun edgeAt(x: Double, y: Double, nx: Double, ny: Double): Boolean {
+            val xi = x.roundToInt(); val yi = y.roundToInt()
+            val xa = (x + 2 * nx).roundToInt(); val ya = (y + 2 * ny).roundToInt()
+            val xb = (x - 2 * nx).roundToInt(); val yb = (y - 2 * ny).roundToInt()
+            if (min(min(xi, xa), xb) < 0 || min(min(yi, ya), yb) < 0 || max(max(xi, xa), xb) >= w || max(max(yi, ya), yb) >= h) return false
+            val l0 = lAt(xi, yi); val la = lAt(xa, ya); val lbb = lAt(xb, yb)
+            if (min(la, lbb) - l0 >= SHEET_RIDGE) return true
+            return abs(la - lbb) + 2 * abs(cAt(xa, ya) - cAt(xb, yb)) >= SHEET_STEP
+        }
+        // Textura TRANSVERSAL junto a una recta candidata (rectas de celdas, texto): fracción de muestras con
+        // gradiente fuerte orientado a lo largo de la recta, en franjas de ~8 px a ambos lados. El borde de una hoja
+        // separa papel de papel liso, fondo o cantos PARALELOS de la pila; el marco de una tabla cuyo interior no
+        // se detectó como contenido (foto borrosa) tiene celdas detrás -> no es el borde de la hoja.
+        fun crossTexture(c: Double, nx: Double, ny: Double, tx: Double, ty: Double, u0: Double, u1: Double, cmin: Double): Double {
+            var cross = 0; var tot = 0
+            val m = max(8, ((u1 - u0) / 2).roundToInt())
+            for (side2 in 0..1) {
+                for (o in 2..9) {
+                    val cc = if (side2 == 0) c + o else c - o
+                    if (side2 == 1 && cc < cmin - 1) break
+                    for (s in 0..m) {
+                        val u = u0 + (u1 - u0) * s / m
+                        val xi = (cc * nx + u * tx).roundToInt(); val yi = (cc * ny + u * ty).roundToInt()
+                        if (xi < 1 || yi < 1 || xi >= w - 1 || yi >= h - 1) continue
+                        tot++
+                        val gx = (lAt(xi + 1, yi) - lAt(xi - 1, yi)).toDouble(); val gy = (lAt(xi, yi + 1) - lAt(xi, yi - 1)).toDouble()
+                        if (abs(gx) + abs(gy) < SHEET_STEP) continue
+                        if (abs(gx * tx + gy * ty) > 1.5 * abs(gx * nx + gy * ny)) cross++
+                    }
+                }
+            }
+            return if (tot == 0) 0.0 else cross.toDouble() / tot
+        }
+        val lines = ArrayList<DoubleArray>(4)   // (nx, ny, c): n·p = c
+        val found = BooleanArray(4)
+        for ((si, nb) in normals.withIndex()) {
+            var best: DoubleArray? = null; var bestDist = Double.MAX_VALUE; var bestScore = 0.0
+            for (dDeg in -8..8 step 2) {
+                val a = Math.toRadians(dDeg.toDouble())
+                val nx = nb[0] * kotlin.math.cos(a) - nb[1] * kotlin.math.sin(a)
+                val ny = nb[0] * kotlin.math.sin(a) + nb[1] * kotlin.math.cos(a)
+                val tx = -ny; val ty = nx
+                var cmin = -1e9; var umin = 1e9; var umax = -1e9; var cRef = -1e9
+                for (p in hull) { val c = p.x * nx + p.y * ny; if (c > cmin) cmin = c; val u = p.x * tx + p.y * ty; umin = min(umin, u); umax = max(umax, u) }
+                // Distancia medida respecto de la dirección base (comparable entre ángulos)
+                for (p in hull) cRef = max(cRef, p.x * nb[0] + p.y * nb[1])
+                val ul = umax - umin; if (ul < 10) continue
+                val u0 = umin + 0.12 * ul; val u1 = umax - 0.12 * ul
+                val m = max(12, (u1 - u0).roundToInt())
+                var c = cmin + 2
+                while (c < cmin + 0.6 * side) {
+                    var hits = 0; var inside = 0
+                    for (s in 0..m) {
+                        val u = u0 + (u1 - u0) * s / m
+                        val x = c * nx + u * tx; val y = c * ny + u * ty
+                        if (x < 2 || y < 2 || x > w - 3 || y > h - 3) continue
+                        inside++
+                        if (edgeAt(x, y, nx, ny) || edgeAt(x + nx, y + ny, nx, ny) || edgeAt(x - nx, y - ny, nx, ny)) hits++
+                    }
+                    if (inside < 0.5 * (m + 1)) break
+                    val score = hits.toDouble() / inside
+                    val ct = if (score >= SHEET_LINE_SCORE) crossTexture(c, nx, ny, tx, ty, u0, u1, cmin) else 1.0
+                    if (score >= SHEET_LINE_SCORE && ct <= SHEET_CROSS_MAX) {
+                        // Distancia en el centro del tramo, respecto del casco en la dirección base
+                        val um = (u0 + u1) / 2; val mx = c * nx + um * tx; val my = c * ny + um * ty
+                        val dist = mx * nb[0] + my * nb[1] - cRef
+                        if (dist < bestDist - 1.5 || (dist < bestDist + 1.5 && score > bestScore)) { bestDist = dist; bestScore = score; best = doubleArrayOf(nx, ny, c) }
+                        break
+                    }
+                    c += 1.0
+                }
+            }
+            if (best != null) { lines.add(best); found[si] = true; continue }
+            // Sin recta: lado del quad original casi paralelo que deja dentro el contenido, o borde de la imagen
+            var fb: DoubleArray? = null
+            for (i in 0 until 4) {
+                val x0 = q[i * 2].toDouble(); val y0 = q[i * 2 + 1].toDouble(); val x1 = q[((i + 1) % 4) * 2].toDouble(); val y1 = q[((i + 1) % 4) * 2 + 1].toDouble()
+                val len = hypot(x1 - x0, y1 - y0); if (len < 10) continue
+                var nx = -(y1 - y0) / len; var ny = (x1 - x0) / len
+                if (nx * ((x0 + x1) / 2 - qcx) + ny * ((y0 + y1) / 2 - qcy) < 0) { nx = -nx; ny = -ny }
+                if (nx * nb[0] + ny * nb[1] < 0.95) continue
+                val c = x0 * nx + y0 * ny
+                if (hull.all { it.x * nx + it.y * ny <= c - 1 }) fb = doubleArrayOf(nx, ny, c)
+            }
+            if (fb == null) {
+                // borde de la imagen más alineado con la normal
+                val cands = arrayOf(doubleArrayOf(-1.0, 0.0, 0.0), doubleArrayOf(1.0, 0.0, w - 1.0), doubleArrayOf(0.0, -1.0, 0.0), doubleArrayOf(0.0, 1.0, h - 1.0))
+                fb = cands.maxByOrNull { it[0] * nb[0] + it[1] * nb[1] }!!
+            }
+            lines.add(fb)
+        }
+        debugLog?.invoke("sheet: lines=" + lines.joinToString { "(%.2f,%.2f,%.0f)".format(it[0], it[1], it[2]) } + " found=${found.toList()}")
+        if (found.count { it } < (if (force) 3 else 2)) return@use null
+        val pts = arrayOfNulls<Point>(4)
+        for (i in 0 until 4) {
+            val a = lines[i]; val b = lines[(i + 1) % 4]
+            val den = a[0] * b[1] - a[1] * b[0]
+            if (abs(den) < 1e-6) return@use null
+            pts[i] = Point((a[2] * b[1] - a[1] * b[2]) / den, (a[0] * b[2] - a[2] * b[0]) / den)
+        }
+        // Ajuste por MITADES de cada lado (hoja curvada o caída en una esquina): cada esquina sale de los tramos que
+        // llegan a ella. En cada mitad, recta a ±4° y ±6 px; entre las bien apoyadas, la más interior (la hoja de
+        // encima, no los cantos de la pila que asoman justo detrás).
+        fun segScore(nx: Double, ny: Double, c: Double, u0: Double, u1: Double): Double {
+            val tx = -ny; val ty = nx
+            val m = max(8, abs(u1 - u0).roundToInt())
+            var hits = 0; var inside = 0
+            for (s in 0..m) {
+                val u = u0 + (u1 - u0) * s / m
+                val x = c * nx + u * tx; val y = c * ny + u * ty
+                if (x < 2 || y < 2 || x > w - 3 || y > h - 3) continue
+                inside++
+                if (edgeAt(x, y, nx, ny) || edgeAt(x + nx, y + ny, nx, ny) || edgeAt(x - nx, y - ny, nx, ny)) hits++
+            }
+            return if (inside < 0.5 * (m + 1)) 0.0 else hits.toDouble() / inside
+        }
+        val startL = Array(4) { lines[it] }; val endL = Array(4) { lines[it] }
+        for (i in 0 until 4) {
+            if (!found[i]) continue
+            val ln = lines[i]; val tx = -ln[1]; val ty = ln[0]
+            val pa = pts[(i + 3) % 4]!!; val pb = pts[i]!!
+            val ua = pa.x * tx + pa.y * ty; val ub = pb.x * tx + pb.y * ty
+            val len = ub - ua; if (abs(len) < 20) continue
+            for (half in 0..1) {
+                val h0 = if (half == 0) ua + 0.05 * len else ua + 0.5 * len
+                val h1 = if (half == 0) ua + 0.5 * len else ub - 0.05 * len
+                val hm = (h0 + h1) / 2
+                val mx = ln[2] * ln[0] + hm * tx; val my = ln[2] * ln[1] + hm * ty
+                var bestS = segScore(ln[0], ln[1], ln[2], h0, h1); var bestL = ln; var bestInner = Double.MAX_VALUE
+                val base = bestS
+                for (dDeg in -4..4) for (dc in -6..6) {
+                    if (dDeg == 0 && dc == 0) continue
+                    val a = Math.toRadians(dDeg.toDouble())
+                    val nx = ln[0] * kotlin.math.cos(a) - ln[1] * kotlin.math.sin(a)
+                    val ny = ln[0] * kotlin.math.sin(a) + ln[1] * kotlin.math.cos(a)
+                    val px = mx + dc * ln[0]; val py = my + dc * ln[1]
+                    val c = px * nx + py * ny
+                    val t2x = -ny; val t2y = nx
+                    // el mismo tramo proyectado sobre la recta girada
+                    val q0 = (ln[2] * ln[0] + h0 * tx) * t2x + (ln[2] * ln[1] + h0 * ty) * t2y
+                    val q1 = (ln[2] * ln[0] + h1 * tx) * t2x + (ln[2] * ln[1] + h1 * ty) * t2y
+                    val sc = segScore(nx, ny, c, q0, q1)
+                    val strong = sc >= 0.65
+                    if (strong && (bestS < 0.65 || dc < bestInner)) { bestS = sc; bestL = doubleArrayOf(nx, ny, c); bestInner = dc.toDouble() }
+                    else if (!strong && bestS < 0.65 && sc > bestS) { bestS = sc; bestL = doubleArrayOf(nx, ny, c) }
+                }
+                if (bestS >= 0.5 && bestS > base + 0.05) { if (half == 0) startL[i] = bestL else endL[i] = bestL }
+            }
+        }
+        for (i in 0 until 4) {
+            val a = endL[i]; val b = startL[(i + 1) % 4]
+            val den = a[0] * b[1] - a[1] * b[0]
+            if (abs(den) < 1e-6) continue
+            val p = Point((a[2] * b[1] - a[1] * b[2]) / den, (a[0] * b[2] - a[2] * b[0]) / den)
+            if (hypot(p.x - pts[i]!!.x, p.y - pts[i]!!.y) <= 0.08 * side) pts[i] = p
+        }
+        val res = orderPoints(pts.map { it!! }.toTypedArray())
+        clampPts(res, w - 1, h - 1)
+        debugLog?.invoke("sheet: quad " + (0 until 4).joinToString(" ") { "%.0f,%.0f".format(res[it * 2], res[it * 2 + 1]) })
+        // Validación: convexo, ángulos razonables, contiene el contenido
+        val area = polyArea(res)
+        if (area < hullArea * 1.02 || area < 0.08 * w * h) { debugLog?.invoke("sheet: area $area hull $hullArea"); return@use null }
+        val rp = bag.add(MatOfPoint2f(*Array(4) { Point(res[it * 2].toDouble(), res[it * 2 + 1].toDouble()) }))
+        if (!Imgproc.isContourConvex(MatOfPoint(*Array(4) { Point(res[it * 2].toDouble(), res[it * 2 + 1].toDouble()) }))) { debugLog?.invoke("sheet: convex"); return@use null }
+        for (i in 0 until 4) {
+            val p0x = res[((i + 3) % 4) * 2] - res[i * 2]; val p0y = res[((i + 3) % 4) * 2 + 1] - res[i * 2 + 1]
+            val p1x = res[((i + 1) % 4) * 2] - res[i * 2]; val p1y = res[((i + 1) % 4) * 2 + 1] - res[i * 2 + 1]
+            val cs = abs((p0x * p1x + p0y * p1y) / (hypot(p0x.toDouble(), p0y.toDouble()) * hypot(p1x.toDouble(), p1y.toDouble()) + 1e-9))
+            if (cs > 0.55) { debugLog?.invoke("sheet: angle"); return@use null }
+        }
+        var outside = 0
+        for (p in hull) if (Imgproc.pointPolygonTest(rp, p, true) < -max(3.0, 0.03 * side)) outside++
+        if (outside > 0) { debugLog?.invoke("sheet: outside $outside"); return@use null }
+        debugLog?.invoke("sheet: found=${found.toList()} -> " + (0 until 4).joinToString(" ") { "%.0f,%.0f".format(res[it * 2], res[it * 2 + 1]) })
+        Candidate(res, max(cand.score, 0.6))
+    }
+
+    /** Depuración (banco de pruebas). */
+    internal var debugLog: ((String) -> Unit)? = null
+
+    /** Búsqueda de la hoja superior (desactivable en el banco de pruebas). */
+    internal var sheetRefine = true
+    internal var debugBoxes: ((List<IntArray>) -> Unit)? = null
+    internal var debugMat: ((String, Mat) -> Unit)? = null
+
     private fun confidenceOf(score: Double): Float = ((score - 0.45) / 0.4).coerceIn(0.0, 1.0).toFloat()
 
     companion object {
@@ -947,6 +1304,18 @@ class DocumentDetector(private val tier: DeviceTier) {
 
         /** Tolerancia (px de trabajo, a lo largo de la normal) al buscar el borde bajo cada muestra de un lado. */
         private val SUPPORT_OFFSETS = floatArrayOf(0f, -2f, 2f)
+
+        /** Hoja superior: oscuridad mínima de la tinta respecto del papel de alrededor (niveles de L). */
+        private const val SHEET_INK_DELTA = 28.0
+        /** Hoja superior: croma media máxima (|Cr-128| + |Cb-128|) de una componente de contenido. */
+        private const val SHEET_INK_CHROMA = 22.0
+        /** Hoja superior: profundidad mínima de la cresta oscura (sombra fina entre hojas) y escalón mínimo. */
+        private const val SHEET_RIDGE = 4
+        private const val SHEET_STEP = 8
+        /** Hoja superior: fracción mínima del tramo con evidencia de borde para aceptar una recta. */
+        private const val SHEET_LINE_SCORE = 0.55
+        /** Hoja superior: textura transversal máxima junto a la recta (ver crossTexture). */
+        private const val SHEET_CROSS_MAX = 0.04
 
         /** Ordena 4 puntos como tl, tr, br, bl (sentido horario en coordenadas de imagen). */
         internal fun orderPoints(p: Array<Point>): FloatArray {

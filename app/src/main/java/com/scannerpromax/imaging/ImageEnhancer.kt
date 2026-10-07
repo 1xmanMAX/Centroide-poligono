@@ -449,6 +449,11 @@ object ImageEnhancer {
         ) {
             base = bag.add(SuperResolution.upscale2x(base, lowEnd = !opt.highEnd, maxPixels = opt.maxPixels))
         }
+        // Documento IMPRESO (tabla, formulario, informe): copia tipo fotocopiadora que conserva todo el contenido
+        // (letra pequeña, líneas finas de la tabla, sombreados, logos). Los recuadros de escritura son para los
+        // apuntes a mano en cuadernos.
+        val printed = runCatching { PrintedPage.analyze(base) }.getOrNull()
+        if (printed != null && printed.printed) return@use PrintedPage.render(base, style, opt.fast, opt.maxPixels, printed)
         TextRegions.render(base, style, opt.fast)
     }
 

@@ -75,6 +75,12 @@ internal object OcrPreprocess {
         }
     }
 
+    /**
+     * Sólo gris (la página ya procesada: iluminación normalizada por el filtro) como NV21: el color de los
+     * sombreados no distrae al reconocedor y ocupa 1.5 B/px. Para el OCR por mosaicos.
+     */
+    fun grayNv21(src: Bitmap): Nv21Image? = withGrayAny(src) { gray -> toNv21(gray) }
+
     /** Como [binarize] pero devuelve NV21. */
     fun binarizeNv21(src: Bitmap, lineHeightPx: Float): Nv21Image? = withGrayAny(src) { gray ->
         val norm = Mat()
