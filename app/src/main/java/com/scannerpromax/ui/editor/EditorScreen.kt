@@ -55,6 +55,7 @@ import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.FormatPaint
 import androidx.compose.material.icons.filled.Grain
+import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.Healing
 import androidx.compose.material.icons.filled.LayersClear
 import androidx.compose.material.icons.filled.Refresh
@@ -276,8 +277,9 @@ fun EditorScreen(
                             autoRemoveLines = src.autoRemoveLines,
                             autoDenoise = src.autoDenoise,
                             autoDeskew = src.autoDeskew,
+                            autoDewarp = src.autoDewarp,
                             // Cambiar el enderezado mueve la geometría: los trazos de esa página dejarían de coincidir.
-                            eraseStrokes = if (e.autoDeskew != src.autoDeskew) emptyList() else e.eraseStrokes,
+                            eraseStrokes = if (e.autoDeskew != src.autoDeskew || e.autoDewarp != src.autoDewarp) emptyList() else e.eraseStrokes,
                         )
                     }
                     if (updated != e) {
@@ -463,6 +465,9 @@ fun EditorScreen(
                             },
                             onDeskew = { enabled ->
                                 if (session.setAutoDeskew(enabled)) toast("Se quitaron los trazos de borrado: cambió el enderezado")
+                            },
+                            onDewarp = { enabled ->
+                                if (session.setAutoDewarp(enabled)) toast("Se quitaron los trazos de borrado: cambió el enderezado")
                             },
                             onApplyAll = if (canApplyAll) ({ applyToAll(BulkKind.CLEAN) }) else null,
                         )
@@ -840,7 +845,13 @@ private fun AdjustSlider(icon: ImageVector, label: String, value: Float, onChang
 }
 
 @Composable
-private fun CleanPanel(session: EditorSession, onManual: () -> Unit, onDeskew: (Boolean) -> Unit, onApplyAll: (() -> Unit)?) {
+private fun CleanPanel(
+    session: EditorSession,
+    onManual: () -> Unit,
+    onDeskew: (Boolean) -> Unit,
+    onDewarp: (Boolean) -> Unit,
+    onApplyAll: (() -> Unit)?,
+) {
     val e = session.edits
     val primary = MaterialTheme.brand.gradientStart
     val secondary = MaterialTheme.brand.gradientEnd
@@ -853,6 +864,9 @@ private fun CleanPanel(session: EditorSession, onManual: () -> Unit, onDeskew: (
         }
         CleanSwitch(Icons.Filled.Straighten, "Enderezar texto", "Corrige unos grados de inclinación", e.autoDeskew) {
             onDeskew(it)
+        }
+        CleanSwitch(Icons.Filled.GridOn, "Enderezar hoja curvada", "Aplana hojas dobladas usando las líneas de tablas y cuadrículas", e.autoDewarp) {
+            onDewarp(it)
         }
         Spacer(Modifier.height(6.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {

@@ -10,14 +10,15 @@ import org.opencv.core.Mat
 import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
 import java.lang.ref.WeakReference
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
- * Tubería completa de una página: original -> recorte/perspectiva -> rotación -> deskew ->
- * filtro -> limpieza (líneas/ruido) -> borrado manual.
+ * Tubería completa de una página: original -> recorte/perspectiva -> rotación -> enderezado de hoja curvada
+ * ([GridDewarp]) o, si no aplica, deskew -> filtro -> limpieza (líneas/ruido) -> borrado manual.
  *
  * Internamente todo trabaja sobre Mats (una sola conversión Bitmap->Mat al inicio y Mat->Bitmap al final)
  * y libera cada intermedio en cuanto deja de usarse.
@@ -91,12 +92,25 @@ class PageProcessor(val tier: DeviceTier) {
             val w = src.cols(); val h = src.rows()
             val quad = edits.quad?.takeIf { !PerspectiveCorrector.isFullFrame(it, w, h) }
             val rot = ((edits.rotation % 360) + 360) % 360
-            val angle = if (edits.autoDeskew) estimateSkewReduced(src, quad, rot) else 0.0
-            if (quad == null && angle == 0.0) {
+            // Estimaciones sobre una versión reducida ya rectificada y rotada: malla de líneas (hoja curvada) y,
+            // si no aplica, ángulo de enderezado. El enderezado curvo ya deja las líneas a escuadra: no se
+            // combina con el deskew.
+            var model: GridDewarp.Model? = null
+            var angle = 0.0
+            if (edits.autoDewarp || edits.autoDeskew) {
+                val red = reducedRectified(src, quad, rot, if (edits.autoDewarp) GridDewarp.EST_SIDE else 1000)
+                try {
+                    if (edits.autoDewarp) model = dewarpModel(red, quadKey(quad, w, h), rot, cacheable = true)
+                    if (model == null && edits.autoDeskew) angle = Cleanup.estimateSkew(red)
+                } finally {
+                    red.release()
+                }
+            }
+            if (quad == null && angle == 0.0 && model == null) {
                 // Sin warp: reducción INTER_AREA (si hace falta) + rotación sin pérdidas
                 val warped = cropMat(src, null, tier.maxWorkingPixels, maxSide)
                 src.release(); rgba = null
-                return orient(warped, edits.copy(autoDeskew = false))
+                return orient(warped, edits.copy(autoDeskew = false, autoDewarp = false), null)
             }
             // 1) Homografía (o escala) a la resolución de trabajo
             val hm: DoubleArray; var ow: Int; var oh: Int; val interp: Int
@@ -124,6 +138,18 @@ class PageProcessor(val tier: DeviceTier) {
                 mTot = mul3(r90, mTot)
                 if (rot == 90 || rot == 270) { val t = ow; ow = oh; oh = t }
             }
+            if (model != null) {
+                // Perspectiva + rotación + hoja curvada: un único remap desde el original (por franjas)
+                val out = GridDewarp.remapComposed(src, model, ow, oh, inv3(mTot), interp)
+                src.release(); rgba = null
+                val rgb = Mat()
+                try {
+                    Imgproc.cvtColor(out, rgb, Imgproc.COLOR_RGBA2RGB)
+                } finally {
+                    out.release()
+                }
+                return rgb
+            }
             // 3) Enderezado alrededor del centro (como Cleanup.rotateKeepSize)
             var rd: DoubleArray? = null
             if (angle != 0.0) {
@@ -148,23 +174,69 @@ class PageProcessor(val tier: DeviceTier) {
         }
     }
 
-    /** Ángulo de enderezado estimado sobre una versión reducida (INTER_AREA) ya rectificada y rotada. */
-    private fun estimateSkewReduced(rgba: Mat, quad: Quad?, rot: Int): Double = MatBag().use { bag ->
+    /**
+     * Versión reducida (INTER_AREA, lado largo del documento ≈ [side]) rectificada y rotada: base de las
+     * estimaciones (hoja curvada, ángulo). Devuelve RGB.
+     */
+    private fun reducedRectified(rgba: Mat, quad: Quad?, rot: Int, side: Int): Mat = MatBag().use { bag ->
         val w = rgba.cols(); val h = rgba.rows()
         val (qw, qh) = quad?.let { PerspectiveCorrector.quadExtent(it) } ?: (w.toDouble() to h.toDouble())
-        val sc = min(1.0, 1000.0 / max(1.0, max(qw, qh)))
+        val sc = min(1.0, side / max(1.0, max(qw, qh)))
         val small = bag.mat()
         if (sc < 1.0) {
             Imgproc.resize(rgba, small, Size(max(1.0, (w * sc).roundToInt().toDouble()), max(1.0, (h * sc).roundToInt().toDouble())), 0.0, 0.0, Imgproc.INTER_AREA)
         } else rgba.copyTo(small)
         val q = quad?.let { PerspectiveCorrector.scaleQuad(it, small.cols().toDouble() / w, small.rows().toDouble() / h) }
-        val warped = cropMat(small, q, 0, 1000)
+        val warped = bag.add(cropMat(small, q, 0, side))
         val rgb = bag.mat()
         Imgproc.cvtColor(warped, rgb, Imgproc.COLOR_RGBA2RGB)
-        warped.release()
         val code = when (rot) { 90 -> Core.ROTATE_90_CLOCKWISE; 180 -> Core.ROTATE_180; 270 -> Core.ROTATE_90_COUNTERCLOCKWISE; else -> -1 }
-        val work = if (code >= 0) bag.mat().also { Core.rotate(rgb, it, code) } else rgb
-        Cleanup.estimateSkew(work)
+        if (code >= 0) Mat().also { Core.rotate(rgb, it, code) } else rgb.clone()
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Caché del modelo de hoja curvada: vista previa, base de los trazos y render final usan EL MISMO modelo
+    // (normalizado), así lo que se ve y lo que se borra coincide con el resultado.
+    // ---------------------------------------------------------------------------------
+
+    private class DewarpEntry(val quad: List<Int>?, val rot: Int, val sig: FloatArray, val model: GridDewarp.Model?)
+    private val dewarpCache = ArrayDeque<DewarpEntry>()
+    private val dewarpLock = Any()
+
+    /** Quad normalizado al tamaño de la imagen (milésimas): igual para el original y sus versiones reducidas. */
+    private fun quadKey(quad: Quad?, w: Int, h: Int): List<Int>? = quad?.points()?.flatMap {
+        listOf((it.x / w * 1000).roundToInt(), (it.y / h * 1000).roundToInt())
+    }
+
+    /** Firma 8x8 de grises del documento rectificado (distingue páginas con el mismo recorte). */
+    private fun signature(rgb: Mat): FloatArray = MatBag().use { bag ->
+        val g = bag.add(Cv.gray(rgb))
+        val s = bag.mat()
+        Imgproc.resize(g, s, Size(8.0, 8.0), 0.0, 0.0, Imgproc.INTER_AREA)
+        val b = ByteArray(64); s.get(0, 0, b)
+        FloatArray(64) { (b[it].toInt() and 0xFF).toFloat() }
+    }
+
+    /**
+     * Modelo de [GridDewarp] para el documento rectificado [rgb] (null = no corregir). Se reutiliza el de la caché
+     * si coinciden recorte, rotación y firma; sólo se guardan estimaciones hechas con resolución suficiente (las
+     * miniaturas no fijan el modelo del render final).
+     */
+    private fun dewarpModel(rgb: Mat, quad: List<Int>?, rot: Int, cacheable: Boolean): GridDewarp.Model? {
+        val sig = signature(rgb)
+        synchronized(dewarpLock) {
+            dewarpCache.firstOrNull { e ->
+                e.rot == rot && e.quad == quad && e.sig.indices.all { abs(e.sig[it] - sig[it]) <= 8f }
+            }?.let { return it.model }
+        }
+        val model = GridDewarp.estimate(rgb)
+        if (cacheable && max(rgb.cols(), rgb.rows()) >= 900) {
+            synchronized(dewarpLock) {
+                dewarpCache.addFirst(DewarpEntry(quad, rot, sig, model))
+                while (dewarpCache.size > 6) dewarpCache.removeLast()
+            }
+        }
+        return model
     }
 
     /** Rellena con el color del papel lo que queda fuera del rectángulo rotado por [rd] (3x3). */
@@ -189,6 +261,18 @@ class PageProcessor(val tier: DeviceTier) {
         a[r * 3] * b[c] + a[r * 3 + 1] * b[3 + c] + a[r * 3 + 2] * b[6 + c]
     }
 
+    /** Inversa de una matriz 3x3 (homografía) por adjuntos. */
+    private fun inv3(m: DoubleArray): DoubleArray {
+        val a = m[0]; val b = m[1]; val c = m[2]; val d = m[3]; val e = m[4]; val f = m[5]; val g = m[6]; val h = m[7]; val i = m[8]
+        val c0 = e * i - f * h; val c1 = -(d * i - f * g); val c2 = d * h - e * g
+        val k = 1.0 / (a * c0 + b * c1 + c * c2)
+        return doubleArrayOf(
+            c0 * k, -(b * i - c * h) * k, (b * f - c * e) * k,
+            c1 * k, (a * i - c * g) * k, -(a * f - c * d) * k,
+            c2 * k, -(a * h - b * g) * k, (a * e - b * d) * k,
+        )
+    }
+
     /**
      * Geometría para vista previa: el original se reduce UNA vez (INTER_AREA, en caché) a la escala justa para que
      * la zona del documento mida ~[maxSide]; así el warp no produce aliasing y es muy rápido.
@@ -204,7 +288,8 @@ class PageProcessor(val tier: DeviceTier) {
             val q = edits.quad?.let { PerspectiveCorrector.scaleQuad(it, src.cols().toDouble() / ow, src.rows().toDouble() / oh) }
             cropMat(src, q, maxPixels = 0, maxSide = maxSide)
         }
-        return orient(warped, edits)
+        val qk = quadKey(edits.quad?.takeIf { !PerspectiveCorrector.isFullFrame(it, ow, oh) }, ow, oh)
+        return orient(warped, edits, qk)
     }
 
     private fun previewSourceFor(original: Bitmap, scale: Double): Mat {
@@ -246,8 +331,11 @@ class PageProcessor(val tier: DeviceTier) {
         return out
     }
 
-    /** RGBA -> RGB, rotación de 90° y enderezado automático. Libera [rgba]. */
-    private fun orient(rgba: Mat, edits: PageEdits): Mat {
+    /**
+     * RGBA -> RGB, rotación de 90°, hoja curvada ([GridDewarp], con el modelo en caché si lo hay) o enderezado
+     * automático. [quadKey] identifica el recorte (ver [quadKey]). Libera [rgba].
+     */
+    private fun orient(rgba: Mat, edits: PageEdits, quadKey: List<Int>?): Mat {
         var cur = Mat()
         Imgproc.cvtColor(rgba, cur, Imgproc.COLOR_RGBA2RGB)
         rgba.release()
@@ -262,7 +350,12 @@ class PageProcessor(val tier: DeviceTier) {
             Core.rotate(cur, r, code)
             cur.release(); cur = r
         }
-        if (edits.autoDeskew) {
+        val rot = ((edits.rotation % 360) + 360) % 360
+        val model = if (edits.autoDewarp) dewarpModel(cur, quadKey, rot, cacheable = true) else null
+        if (model != null) {
+            val d = GridDewarp.apply(cur, model)
+            cur.release(); cur = d
+        } else if (edits.autoDeskew) {
             val d = Cleanup.deskewMat(cur)
             cur.release(); cur = d
         }

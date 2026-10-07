@@ -352,6 +352,7 @@ internal class CaptureProcessor(private val container: AppContainer) {
                 autoRemoveLines = false,
                 autoDenoise = false,
                 autoDeskew = false,
+                autoDewarp = false,
             )
             else -> PageEdits(
                 quad = null,

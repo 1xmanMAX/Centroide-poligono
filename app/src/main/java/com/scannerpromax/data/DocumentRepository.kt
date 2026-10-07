@@ -737,9 +737,9 @@ class DocumentRepository(
     private fun defaultEdits(mode: ScanMode, quad: Quad?): PageEdits {
         val docFilter = preferredFilter
         return when (mode) {
-            ScanMode.PHOTO -> PageEdits(quad = null, filter = FilterType.ORIGINAL, autoDenoise = false, autoDeskew = false)
-            ScanMode.WHITEBOARD -> PageEdits(quad = quad, filter = FilterType.WHITEBOARD, autoDeskew = false)
-            ScanMode.ID_CARD -> PageEdits(quad = quad, filter = docFilter ?: FilterType.MAGIC, autoDeskew = false)
+            ScanMode.PHOTO -> PageEdits(quad = null, filter = FilterType.ORIGINAL, autoDenoise = false, autoDeskew = false, autoDewarp = false)
+            ScanMode.WHITEBOARD -> PageEdits(quad = quad, filter = FilterType.WHITEBOARD, autoDeskew = false, autoDewarp = false)
+            ScanMode.ID_CARD -> PageEdits(quad = quad, filter = docFilter ?: FilterType.MAGIC, autoDeskew = false, autoDewarp = false)
             ScanMode.DOCUMENT, ScanMode.RECEIPT, ScanMode.BOOK -> PageEdits(
                 quad = quad,
                 filter = docFilter ?: FilterType.DEFAULT,

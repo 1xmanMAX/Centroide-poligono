@@ -243,6 +243,19 @@ internal class EditorSession(
         return hadStrokes
     }
 
+    /**
+     * Activa/desactiva el enderezado de hoja curvada (malla de líneas). Mueve la geometría como el enderezado:
+     * se quitan los trazos de borrado. Devuelve true si se quitaron trazos.
+     */
+    fun setAutoDewarp(enabled: Boolean): Boolean {
+        if (edits.autoDewarp == enabled) return false
+        val hadStrokes = edits.eraseStrokes.isNotEmpty()
+        redoStack.clear(); canRedo = false
+        update(edits.copy(autoDewarp = enabled, eraseStrokes = emptyList()))
+        regenerateThumbs()
+        return hadStrokes
+    }
+
     /** Rota 90° y transforma los trazos de borrado para que sigan sobre la misma zona. */
     fun rotate(clockwise: Boolean) {
         val aspect = currentAspect()
@@ -378,7 +391,7 @@ internal class EditorSession(
 
     /** Vista previa rápida: filtro sobre [fastGeo] (se rehace solo si cambia la geometría). Llamar bajo [work]. */
     private fun fastPreview(src: Bitmap, e: PageEdits): Bitmap {
-        val key = Triple(e.quad, e.rotation, e.autoDeskew)
+        val key = listOf(e.quad, e.rotation, e.autoDeskew, e.autoDewarp)
         var geo = fastGeo
         if (geo == null || geo.isRecycled || fastGeoKey != key) {
             geo?.recycle()
@@ -411,7 +424,7 @@ internal class EditorSession(
                         if (src.isRecycled) return@withLock null
                         val small = thumbSource ?: BitmapIO.thumbnail(src, THUMB_SOURCE_SIDE).also { thumbSource = it }
                         val f = if (page.width > 0) small.width.toFloat() / page.width else 1f
-                        val geo = e.copy(quad = e.quad?.let { scaleQuad(it, f) }, autoDeskew = false)
+                        val geo = e.copy(quad = e.quad?.let { scaleQuad(it, f) }, autoDeskew = false, autoDewarp = false)
                         processor.geometryOnly(small, geo, 0)
                     }
                 }

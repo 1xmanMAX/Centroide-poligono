@@ -107,6 +107,7 @@ data class PageEdits(
     val autoRemoveLines: Boolean = false,   // quitar rayas/líneas sueltas (dobleces, marcas de bolígrafo, bordes)
     val autoDenoise: Boolean = true,        // limpiar ruido/puntos
     val autoDeskew: Boolean = true,         // enderezar texto torcido unos grados
+    val autoDewarp: Boolean = true,         // enderezar hoja curvada/combada (malla de líneas de tablas y cuadrículas)
     val eraseStrokes: List<EraseStroke> = emptyList(),
 )
 

@@ -6,7 +6,7 @@ Escáner de documentos para Android con mejora de imagen avanzada, OCR sin inter
 - **Cámara inteligente**: detección de bordes en vivo, autocaptura, multipágina, flash, enfoque al tocar.
 - **Modos**: Documento, Libro (2 páginas → separadas), DNI/Tarjeta (anverso + reverso en una hoja A4 a tamaño real), Recibo, Pizarra, Foto.
 - **3 filtros**: *Blanco y negro* (texto negro nítido sobre blanco puro, sin sombras ni motas; quita la cuadrícula de color clara de los cuadernos conservando la escritura), *Texto resaltado* (por defecto: sin sombras, papel blanco neutro, tinta reforzada con su color; des-ruido, super-resolución y gamma para poca luz automáticos) y *Color original* (colores fieles, solo recorte y un toque de nitidez). Los filtros antiguos de documentos guardados se siguen renderizando y se muestran como su equivalente.
-- **Recorte preciso**: esquinas arrastrables con lupa, perspectiva corregida con relación de aspecto real, enderezado automático del texto.
+- **Recorte preciso**: esquinas arrastrables con lupa, perspectiva corregida con relación de aspecto real, enderezado automático del texto y **enderezado de hojas curvadas/combadas** usando las líneas de tablas, cuadrículas o renglones (interruptor "Enderezar hoja curvada" en Limpieza).
 - **Limpieza**: quita ruido y rayas automáticamente; borrador manual (reparación inteligente o pintar blanco) con deshacer/rehacer.
 - **OCR** en el dispositivo (ML Kit) y **PDF con texto buscable**, contraseña opcional.
 - **Texto en el PDF** (Ajustes → "Texto en el PDF", también en Exportar): *Solo imagen*, *Buscable* (capa invisible palabra a palabra), *Buscable + texto reconocido* (páginas legibles con el texto, tras cada página o al final) y *Solo texto*. Fuente Liberation Sans incrustada (acentos, ñ, ¿¡, €). Las correcciones hechas en la pantalla OCR se usan en el PDF, la búsqueda y las exportaciones.
@@ -99,6 +99,27 @@ Todo en `imaging/` (OpenCV 4.10, sin red). Tiempos medidos con el harness Python
   contraste por zona (el lápiz claro se refuerza). Estimaciones a <= 2000 px, render a resolución completa por
   franjas de 1 MP: 12 MP ~1.0-1.3 s y 20 MP ~1.5-1.7 s en PC monohilo. `TextRegions.detect(bitmap)` devuelve los
   recuadros (TEXT/IMAGE) para dibujarlos en la interfaz.
+- **Hoja curvada** (`GridDewarp`, `PageEdits.autoDewarp`, tras la perspectiva y antes del filtro): supone que cada
+  línea de la tabla/cuadrícula es recta y horizontal o vertical en la hoja real. A ≤ 1600 px: tinta relativa al fondo
+  local en el canal mínimo (tinta negra y cuadrícula azul clara por igual), aperturas con segmentos largos a -12°/0°/12°,
+  centros de trazo por columnas/filas, **seguimiento** con predicción de pendiente y **enlace** de tramos colineales a
+  través del texto; cada cadena se depura (regresión local robusta + cuadrática) y se descarta si no es tinta fina
+  (los centros de renglón de texto no pasan). Sin líneas suficientes se usan las **líneas base de los renglones**.
+  Modelo: campo directo suave (u, v) = F(x, y) en una rejilla bilineal de ~28 celdas por mínimos cuadrados en banda
+  (v constante a lo largo de cada horizontal, u a lo largo de cada vertical, placa delgada, Cauchy-Riemann débil y ancla
+  débil a la identidad), descarte iterativo de líneas y tramos atípicos (subrayados, trazos de escritura) y, en
+  cuadrículas **regulares** (cuaderno), igualado del paso conservando la extensión de cada corrida (las celdas que la
+  curvatura comprime junto a la espiral recuperan su ancho; las tablas de columnas desiguales sólo se enderezan). Las dos
+  páginas de un cuaderno abierto se tratan como grupos de líneas distintos. Seguridad: no se aplica si la hoja ya es plana
+  (percentil 90 de la desviación de las líneas < 1.4 px a 1600 px: el giro lo resuelve el enderezado normal, que se
+  omite cuando el curvo se aplica), si las líneas no quedan al menos un 45 % más rectas o si el jacobiano sale de
+  0.45..2.2. El campo se invierte (Newton) en una rejilla de salida de 8 px y se guarda normalizado: vista previa, base de
+  los trazos de borrado y render final usan el mismo modelo (caché por recorte, rotación y firma de la página). El render
+  compone perspectiva + rotación + hoja curvada en un **único `remap` cúbico** desde el original, por franjas de 1 MP.
+  Sintético (2000x2700, desviación máx. de las líneas antes -> después): libro 20.2 -> 2.8 px (tabla) y 23.8 -> 1.8 px
+  (cuaderno, error de posición 24.1 -> 0.6 px rms), ondulación 18.2 -> 2.3/4.0, combado diagonal 4.6 -> 1.5/1.8, esquina
+  doblada 12.4 -> 1.2 / 14.9 -> 3.3, texto sin líneas 11.3 -> 1.7 (libro); hojas planas intactas. PC monohilo:
+  estimación ~150-350 ms, remap compuesto 8 MP ~370 ms (tabla real del S24 Ultra, 3000x4000 -> 2387x3529).
 - **Iluminación**: fondo por cierre morfológico + mediana a 256 px (no desplaza los bordes); las sombras duras de la mano/celular (zonas oscuras lisas
   conectadas con el borde) se tratan como papel en vez de rellenarse; relleno de fotos/bloques por convolución
   normalizada (desenfoques grandes a resolución reducida) y afinado con **filtro guiado conjunto** a 512 px (320 px
