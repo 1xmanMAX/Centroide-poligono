@@ -700,4 +700,15 @@ internal object Cv {
     }
 
     fun minOf3(a: Int, b: Int, c: Int) = min(a, min(b, c))
+
+    /**
+     * ¿[t] es falta de memoria (Java o nativa de OpenCV)? Estas excepciones deben propagarse: el repositorio
+     * reintenta el procesado con menos píxeles.
+     */
+    fun isOutOfMemory(t: Throwable): Boolean {
+        if (t is OutOfMemoryError) return true
+        val msg = t.message ?: return false
+        return t is org.opencv.core.CvException &&
+            (msg.contains("Insufficient memory", ignoreCase = true) || msg.contains("Failed to allocate", ignoreCase = true))
+    }
 }

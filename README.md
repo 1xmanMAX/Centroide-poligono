@@ -88,6 +88,17 @@ Todo en `imaging/` (OpenCV 4.10, sin red). Tiempos medidos con el harness Python
   pizarra, poca luz y foto de pantalla; cada una con su procesamiento (recibo: contraste local fuerte con CLAHE;
   pantalla: anti-muaré antes del filtro). `recommendFilter` devuelve el filtro concreto equivalente (data/ puede usarlo
   para el filtro inicial; asignar `AUTO` directamente es preferible).
+- **Segmentación de la escritura** (`TextRegions`, filtros *Texto resaltado* y *Blanco y negro* y los antiguos
+  que se muestran como ellos): mapa de tinta a resolución completa sobre la imagen sin sombras (oscuridad del canal
+  máximo + croma de tinta, que separa el bolígrafo azul de la cuadrícula azul clara); borrado de la rejilla clara
+  (rectas largas por aperturas a -9..9°, límite LOCAL respecto a la oscuridad de la rejilla del entorno: las líneas
+  de un diagrama a bolígrafo se conservan); componentes conexas con histéresis relativa al ruido local (sombras);
+  espiral/anillas y bordes oscuros -> zona en blanco; fotos y bloques de color -> recuadro IMAGEN (mejora suave);
+  agrupación en palabras/líneas/bloques (`BoxGrouping`, con detección de texto girado 90°) con margen según la
+  altura de letra. Render: fuera de los recuadros blanco puro; dentro sólo la tinta con alfa suave (sin halos) y
+  contraste por zona (el lápiz claro se refuerza). Estimaciones a <= 2000 px, render a resolución completa por
+  franjas de 1 MP: 12 MP ~1.0-1.3 s y 20 MP ~1.5-1.7 s en PC monohilo. `TextRegions.detect(bitmap)` devuelve los
+  recuadros (TEXT/IMAGE) para dibujarlos en la interfaz.
 - **Iluminación**: fondo por cierre morfológico + mediana a 256 px (no desplaza los bordes); las sombras duras de la mano/celular (zonas oscuras lisas
   conectadas con el borde) se tratan como papel en vez de rellenarse; relleno de fotos/bloques por convolución
   normalizada (desenfoques grandes a resolución reducida) y afinado con **filtro guiado conjunto** a 512 px (320 px

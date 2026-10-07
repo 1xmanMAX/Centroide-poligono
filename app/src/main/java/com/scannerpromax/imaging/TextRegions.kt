@@ -1,0 +1,848 @@
+package com.scannerpromax.imaging
+
+import android.graphics.Bitmap
+import org.opencv.core.Core
+import org.opencv.core.CvType
+import org.opencv.core.Mat
+import org.opencv.core.Rect
+import org.opencv.core.Scalar
+import org.opencv.core.Size
+import org.opencv.imgproc.Imgproc
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToInt
+import kotlin.math.sqrt
+
+/**
+ * Segmentación de la escritura en recuadros ("Texto resaltado" y "Blanco y negro").
+ *
+ * 1. Iluminación normalizada (fondo estimado a baja resolución, sin sombras) -> mapa de TINTA a resolución
+ *    completa: oscuridad del canal MÁXIMO (la cuadrícula azul clara y el marco azul del cuaderno casi no
+ *    oscurecen el canal azul; lápiz, bolígrafo y tinta negra sí) + oscuridad del canal mínimo para tintas no
+ *    azuladas (rojo, verde, naranja). Las rectas largas claras (cuadrícula, renglones) se borran del mapa.
+ * 2. A resolución de trabajo (<= [WORK_SIDE]): componentes conexas con histéresis (umbral bajo conectado a
+ *    umbral alto, ambos relativos al ruido local), filtro de motas y restos rectos de la rejilla, manchas
+ *    gruesas que no son letras (espiral, huecos, bordes oscuros) -> zona en blanco; fotos y bloques de color
+ *    grandes -> recuadro IMAGEN.
+ * 3. Agrupación de componentes cercanas en palabras / líneas / bloques ([BoxGrouping]), con margen holgado
+ *    según la altura de letra estimada.
+ * 4. Render a resolución completa: fuera de los recuadros, blanco puro; dentro, sólo la tinta (alfa suave
+ *    según su oscuridad -> bordes anti-aliasing, sin halos), con contraste ajustado POR RECUADRO (el lápiz claro
+ *    se refuerza); en los recuadros IMAGEN, una mejora suave del original normalizado.
+ */
+object TextRegions {
+    enum class Kind { TEXT, IMAGE }
+
+    /** Recuadro [left, right) x [top, bottom) en píxeles de la imagen analizada. */
+    data class Region(val left: Int, val top: Int, val right: Int, val bottom: Int, val kind: Kind) {
+        val width: Int get() = right - left
+        val height: Int get() = bottom - top
+    }
+
+    /** Lado largo máximo de la resolución de trabajo de la segmentación (las ESTIMACIONES; el render es completo). */
+    const val WORK_SIDE = 2000
+
+    /** Croma (V - min) por debajo del cual el color no cuenta como tinta (cuadrícula azul clara, papel). */
+    private const val CHROMA_GRID = 55.0
+
+    /** Los umbrales de tinta crecen con ganancia^exp de la normalización (ruido amplificado en las sombras). */
+    private const val NOISE_GAIN_EXP = 0.85
+
+    /** Un píxel de la huella está "explicado por la recta" si su oscuridad <= EXPL_K·O + EXPL_C (O = la de la recta). */
+    private const val EXPL_K = 1.25
+    private const val EXPL_C = 4.0
+
+    /** Límite local de lo que se borra como rejilla: LIM_K·(oscuridad media de la rejilla del entorno) + LIM_C. */
+    private const val LIM_K = 1.35
+    private const val LIM_C = 7.0
+
+    /** Núcleo de mancha gruesa con oscuridad media < SOFT_CORE·tHigh: fondo de color claro, no zona en blanco. */
+    private const val SOFT_CORE = 4.0
+
+    /** Píxeles por franja en el render (acota la memoria de los intermedios en coma flotante). */
+    private const val STRIP_PIXELS = 1_000_000
+
+    /** Longitud mínima (fracción del lado) de una recta para tomarla por rejilla (con la hoja curvada se parten). */
+    private const val LINE_MIN_FRACTION = 0.12
+
+    internal var debug: ((String, Mat) -> Unit)? = null
+    internal var log: ((String) -> Unit)? = null
+
+    /**
+     * Recuadros de escritura (TEXT) e imágenes (IMAGE) de [bitmap], en sus coordenadas. Pensado para que la UI
+     * los dibuje. Trabaja a <= [WORK_SIDE] px (~100-300 ms en un móvil medio). Thread-safe.
+     */
+    fun detect(bitmap: Bitmap): List<Region> {
+        val (rgba, s) = Cv.toRgbaScaled(bitmap, WORK_SIDE)
+        val rgb = Mat()
+        try {
+            Imgproc.cvtColor(rgba, rgb, Imgproc.COLOR_RGBA2RGB)
+            rgba.release()
+            val lay = analyze(rgb)
+            return lay.regions.map { scaleRegion(it, 1.0 / s, bitmap.width, bitmap.height) }
+        } finally {
+            rgba.release(); rgb.release()
+        }
+    }
+
+    /** Igual que [detect] sobre un Mat RGB (coordenadas de [rgb]). */
+    internal fun detectMat(rgb: Mat): List<Region> = analyze(rgb).regions
+
+    private fun scaleRegion(r: Region, k: Double, w: Int, h: Int) = Region(
+        (r.left * k).toInt().coerceIn(0, w), (r.top * k).toInt().coerceIn(0, h),
+        kotlin.math.ceil(r.right * k).toInt().coerceIn(0, w), kotlin.math.ceil(r.bottom * k).toInt().coerceIn(0, h), r.kind,
+    )
+
+    // =====================================================================================
+    // 1. Mapa de tinta
+    // =====================================================================================
+
+    internal class Prepared(
+        val n: Mat,          // RGB normalizado (papel ≈ PAPER_LEVEL), resolución completa
+        val dark: Mat,       // 8UC1 oscuridad de tinta, sin rectas claras, resolución completa
+        val gain: Mat,       // 32FC1 ganancia de la normalización (papel / fondo), a baja resolución
+        val ruling: Mat,     // 8UC1 huella fina de las rectas claras, resolución completa (puede estar vacío)
+        val paper: Double,
+        val noise: Double,
+    ) {
+        fun release() { n.release(); dark.release(); gain.release(); ruling.release() }
+    }
+
+    internal fun prepare(rgb: Mat, bgSide: Int = 384, refineSide: Int = 512): Prepared = MatBag().use { bag ->
+        val bg = bag.add(Cv.estimateBackground(rgb, bgSide, refine = true, refineSide = refineSide))
+        val n = Mat()
+        Cv.divideByBackground(rgb, bg, n)
+        // Ganancia local (sombras: el ruido del papel normalizado crece con ella)
+        val bgs = bag.mat(); Cv.downscale(bg, bgs, 256)
+        bg.release()
+        val bgl = bag.add(Cv.gray(bgs))
+        val gain = Mat(); bgl.convertTo(gain, CvType.CV_32F)
+        Core.max(gain, Scalar(4.0), gain)
+        Core.divide(Cv.PAPER_LEVEL, gain, gain)
+        Core.max(gain, Scalar(1.0), gain)
+        Core.min(gain, Scalar(8.0), gain)
+
+        val ch = ArrayList<Mat>(3); Core.split(n, ch)
+        for (c in ch) bag.add(c)
+        val v = bag.mat(); Core.max(ch[0], ch[1], v); Core.max(v, ch[2], v)
+        val (noise, pm) = Cv.paperStats(Cv.histogram(v))
+        val dark = Mat()
+        Core.bitwise_not(v, dark)
+        Core.subtract(dark, Scalar(255.0 - pm), dark)
+        // Tinta de color (bolígrafo azul, rojo, verde): su croma (V - min) es mucho mayor que el de la cuadrícula
+        // azul clara (~20-35) -> se suma el croma que excede ~55, sólo en píxeles algo más oscuros que el papel
+        // (los resaltadores y el marco azul claro del cuaderno, casi tan claros como el papel, no cuentan).
+        val mn = bag.mat(); Core.min(ch[0], ch[1], mn); Core.min(mn, ch[2], mn)
+        val chroma = bag.mat(); Core.subtract(v, mn, chroma)
+        Core.subtract(chroma, Scalar(CHROMA_GRID), chroma)
+        val wv = bag.mat()
+        Cv.applyLut(v, Cv.lut { x -> ((0.97 * pm - x) / (0.1 * pm)).coerceIn(0.0, 1.0) * 255.0 }, wv)
+        Core.multiply(chroma, wv, chroma, 1.0 / 255.0)
+        Core.add(dark, chroma, dark)
+        // Ruido del sensor (fuerte en las sombras, donde la normalización lo amplifica): suavizado leve; los trazos
+        // (>= 3 px) apenas cambian y la rampa del alfa los vuelve a dejar nítidos
+        Imgproc.GaussianBlur(dark, dark, Size(0.0, 0.0), 0.9)
+        // Memoria: los intermedios a resolución completa se liberan antes del paso más pesado
+        for (c in ch) c.release()
+        v.release(); mn.release(); chroma.release(); wv.release()
+        val ruling = suppressRuling(dark, gain, bag)
+        Prepared(n, dark, gain, ruling, pm, noise)
+    }
+
+    /**
+     * Borra de [dark] (in-place) las rectas largas CLARAS (cuadrícula, renglones) y devuelve su huella fina (8UC1,
+     * resolución completa; vacía si no hay):
+     *  1. a 1/4 de resolución, reducción por MÁXIMO 5x5 centrado (una línea de 1 px no se pierde ni se ensancha) y máscara
+     *     de "algo oscuro" (> 8);
+     *  2. aperturas BINARIAS con elementos lineales largos (~1/25 del lado) a -6..6° de la horizontal y de la
+     *     vertical (tras un cierre de 3 px en la misma dirección para los cortes del ruido): sólo sobreviven las
+     *     rectas largas; las palabras (aunque sean cursivas) no contienen tramos rectos tan largos;
+     *  3. si la rejilla es típicamente oscura (mediana >= 60: tabla o formulario impreso) no se toca nada;
+     *  4. a media resolución, oscuridad propia de cada recta (apertura con un elemento de ~1/80 del lado, más
+     *     largo que cualquier letra) y límite LOCAL = 1.35·(media de la rejilla del entorno) + 7;
+     *  5. a resolución completa se borran los píxeles de la huella explicados por la recta (<= 1.25·O + 4 y
+     *     <= límite): un trazo que la cruza o va encima y es más oscuro, o una recta mucho más oscura que la
+     *     rejilla de alrededor (línea de un diagrama a bolígrafo o lápiz marcado), se conserva.
+     */
+    private fun suppressRuling(dark: Mat, gain: Mat, bag: MatBag): Mat {
+        val w = dark.cols(); val h = dark.rows()
+        val lines = Mat()
+        if (min(w, h) < 200) return lines
+        val qs = Size(max(1.0, (w / 4.0).roundToInt().toDouble()), max(1.0, (h / 4.0).roundToInt().toDouble()))
+        val dm = bag.mat(); Imgproc.dilate(dark, dm, Cv.kernel(Imgproc.MORPH_RECT, 5))
+        val q = bag.mat(); Imgproc.resize(dm, q, qs, 0.0, 0.0, Imgproc.INTER_NEAREST)
+        dm.release()
+        // "Algo oscuro": > 8 en el papel bien iluminado, más en las sombras (ruido amplificado)
+        val thr = bag.mat(); Imgproc.resize(gain, thr, qs, 0.0, 0.0, Imgproc.INTER_LINEAR)
+        Core.pow(thr, 0.5, thr); Core.multiply(thr, Scalar(8.0), thr)
+        val qf = bag.mat(); q.convertTo(qf, CvType.CV_32F)
+        val m = bag.mat(); Core.compare(qf, thr, m, Core.CMP_GT)
+        val len = Cv.odd(max(15, (max(qs.width, qs.height) / 25).roundToInt()))
+        lines.create(q.size(), CvType.CV_8UC1); lines.setTo(Scalar(0.0))
+        val linesV = bag.mat(); linesV.create(q.size(), CvType.CV_8UC1); linesV.setTo(Scalar(0.0))
+        val tmp = bag.mat()
+        for (deg in intArrayOf(-6, -3, 0, 3, 6)) {
+            for (vertical in booleanArrayOf(false, true)) {
+                val a = deg + if (vertical) 90 else 0
+                val ks = lineKernel(3, a)
+                Imgproc.morphologyEx(m, tmp, Imgproc.MORPH_CLOSE, ks); ks.release()
+                val k = lineKernel(len, a)
+                Imgproc.morphologyEx(tmp, tmp, Imgproc.MORPH_OPEN, k); k.release()
+                Core.bitwise_or(if (vertical) linesV else lines, tmp, if (vertical) linesV else lines)
+            }
+        }
+        // Sólo rectas largas (>= 12 % del lado): la rejilla y los renglones (que se parten donde la hoja se curva);
+        // trazos rectos más cortos se conservan
+        keepLong(lines, horizontal = true, bag)
+        keepLong(linesV, horizontal = false, bag)
+        val linesH = bag.add(lines.clone())
+        Core.bitwise_or(lines, linesV, lines)
+        if (Core.countNonZero(lines) == 0) return lines
+        // gl = nivel típico de la rejilla (mediana en la huella gruesa; umbrales de detección)
+        val gl = Cv.percentile(Cv.histogram(q, lines), 0.5).toDouble()
+        // Rectas típicamente OSCURAS (tablas, formularios impresos): no es una rejilla clara de cuaderno
+        if (gl >= 60.0) { lines.setTo(Scalar(0.0)); return lines }
+        val remove = bag.mat(); remove.create(dark.size(), CvType.CV_8UC1); remove.setTo(Scalar(0.0))
+        val band = bag.mat(); val o = bag.mat(); val t = bag.mat()
+        // Media resolución por máximo 3x3 centrado (la línea fina conserva su oscuridad); elementos a -9..9° (la hoja
+        // curvada inclina la rejilla)
+        val ot = bag.mat()
+        val hs = Size(max(1.0, (w / 2.0).roundToInt().toDouble()), max(1.0, (h / 2.0).roundToInt().toDouble()))
+        val half = bag.mat(); Imgproc.dilate(dark, ot, Cv.kernel(Imgproc.MORPH_RECT, 3)); Imgproc.resize(ot, half, hs, 0.0, 0.0, Imgproc.INTER_NEAREST)
+        val longLen = Cv.odd(max(15, max(w, h) / 80))
+        // Umbrales relativos al ruido local (ganancia^0.85: en las sombras el ruido normalizado crece)
+        val gh = bag.mat(); Imgproc.resize(gain, gh, hs, 0.0, 0.0, Imgproc.INTER_LINEAR); Core.pow(gh, NOISE_GAIN_EXP, gh)
+        val ohf = bag.mat(); val thrH = bag.mat()
+        val angles = intArrayOf(-9, -6, -3, 0, 3, 6, 9)
+        // Oscuridad propia de la recta: apertura LARGA (~1/80 del lado, más que cualquier letra) a media
+        // resolución -> la letra que va encima o cruza la línea no cuenta (la ventana incluye rejilla limpia).
+        // Huella (media resolución) = huella gruesa de 1/4 donde esa apertura es apreciable.
+        val ohs = arrayOf(bag.mat(), bag.mat()); val bands = arrayOf(bag.mat(), bag.mat())
+        for ((i, vertical) in booleanArrayOf(false, true).withIndex()) {
+            val oh = ohs[i]
+            oh.create(hs, CvType.CV_8UC1); oh.setTo(Scalar(0.0))
+            for (deg in angles) {
+                val k = lineKernel(longLen, deg + if (vertical) 90 else 0)
+                Imgproc.morphologyEx(half, ot, Imgproc.MORPH_OPEN, k); k.release()
+                Core.max(oh, ot, oh)
+            }
+            // (la huella gruesa se ensancha 1 px de 1/4: el muestreo por vecino más próximo la desplaza ~1.5 px)
+            Imgproc.dilate(if (vertical) linesV else linesH, ot, Cv.kernel(Imgproc.MORPH_RECT, 3))
+            Imgproc.resize(ot, bands[i], hs, 0.0, 0.0, Imgproc.INTER_NEAREST)
+            oh.convertTo(ohf, CvType.CV_32F)
+            Core.multiply(gh, Scalar(max(4.0, 0.35 * gl)), thrH)
+            Core.compare(ohf, thrH, ot, Core.CMP_GE)
+            Core.bitwise_and(bands[i], ot, bands[i])
+        }
+        // Límite LOCAL de lo que se borra: oscuridad media de la rejilla en un entorno de ~1/8 de la página
+        // (media de la apertura sobre la huella, ambas direcciones) x1.35 + 7. La rejilla más marcada en una
+        // zona (mejor iluminada, más saturada, en sombra) se borra; una línea de bolígrafo o de lápiz marcado,
+        // mucho más oscura que la rejilla de su alrededor, se conserva aunque sea larga y recta.
+        val limH = bag.mat()
+        run {
+            val num = bag.mat(); val den = bag.mat(); val f = bag.mat(); val mf = bag.mat()
+            num.create(hs, CvType.CV_32F); num.setTo(Scalar(0.0)); den.create(hs, CvType.CV_32F); den.setTo(Scalar(0.0))
+            for (i in 0..1) {
+                ohs[i].convertTo(f, CvType.CV_32F); bands[i].convertTo(mf, CvType.CV_32F, 1.0 / 255.0)
+                Core.multiply(f, mf, f); Core.add(num, f, num); Core.add(den, mf, den)
+            }
+            val win = max(9.0, max(hs.width, hs.height) / 8.0)
+            // Desenfoque de caja grande a 1/8 de la media resolución (campo suave)
+            val ss = Size(max(4.0, hs.width / 8.0).roundToInt().toDouble(), max(4.0, hs.height / 8.0).roundToInt().toDouble())
+            val ns = bag.mat(); val ds = bag.mat()
+            Imgproc.resize(num, ns, ss, 0.0, 0.0, Imgproc.INTER_AREA); Imgproc.resize(den, ds, ss, 0.0, 0.0, Imgproc.INTER_AREA)
+            val kw = Cv.odd(max(3, (win / 8.0).roundToInt()))
+            Imgproc.blur(ns, ns, Size(kw.toDouble(), kw.toDouble())); Imgproc.blur(ds, ds, Size(kw.toDouble(), kw.toDouble()))
+            val lowSupport = bag.mat(); Core.compare(ds, Scalar(0.004), lowSupport, Core.CMP_LT)
+            Core.max(ds, Scalar(1e-6), ds)
+            Core.divide(ns, ds, ns)
+            ns.setTo(Scalar(gl), lowSupport)
+            ns.convertTo(ns, -1, LIM_K, LIM_C)
+            Core.min(ns, Scalar(70.0), ns); Core.max(ns, Scalar(min(70.0, gl * LIM_K + LIM_C)), ns)
+            ns.convertTo(limH, CvType.CV_8U)
+        }
+        val limFull = bag.mat(); Imgproc.resize(limH, limFull, dark.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
+        val bandAll = bag.mat(); bandAll.create(dark.size(), CvType.CV_8UC1); bandAll.setTo(Scalar(0.0))
+        val fine = bag.mat()
+        val bandFine = bag.mat(); bandFine.create(dark.size(), CvType.CV_8UC1); bandFine.setTo(Scalar(0.0))
+        for (i in 0..1) {
+            val oh = ohs[i]
+            Imgproc.resize(oh, o, dark.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
+            // Huella fina (para reconocer después restos de la rejilla: sólo el núcleo de la línea) y banda de
+            // borrado (más permisiva: borra sólo lo que la propia recta explica, ver abajo)
+            oh.convertTo(ohf, CvType.CV_32F)
+            Core.multiply(gh, Scalar(max(6.0, 0.6 * gl)), thrH)
+            Core.compare(ohf, thrH, ot, Core.CMP_GE)
+            Core.bitwise_and(bands[i], ot, ot)
+            Imgproc.resize(ot, fine, dark.size(), 0.0, 0.0, Imgproc.INTER_NEAREST)
+            Imgproc.resize(bands[i], band, dark.size(), 0.0, 0.0, Imgproc.INTER_NEAREST)
+            Imgproc.dilate(band, band, Cv.kernel(Imgproc.MORPH_RECT, 3))
+            Core.compare(o, limFull, t, Core.CMP_LE); Core.bitwise_and(band, t, band)
+            Core.bitwise_or(bandAll, band, bandAll)   // sólo donde la recta es clara (no renglones de texto impreso)
+            Core.bitwise_and(fine, t, fine)
+            Core.bitwise_or(bandFine, fine, bandFine)
+            Core.compare(o, Scalar(0.35 * gl), t, Core.CMP_GE); Core.bitwise_and(band, t, band)
+            o.convertTo(o, -1, EXPL_K, EXPL_C)
+            Core.min(o, limFull, o)   // nunca se borra nada más oscuro que una línea clara de la rejilla
+            Core.compare(dark, o, t, Core.CMP_LE); Core.bitwise_and(band, t, band)
+            Core.bitwise_or(remove, band, remove)
+        }
+        val limit = gl * LIM_K + LIM_C
+        // Restos tenues junto a las rectas (bordes de la línea fuera de la banda, escalones por la inclinación):
+        // en una franja algo más ancha se borra lo que no supera el nivel de la rejilla
+        Imgproc.dilate(bandAll, bandAll, Cv.kernel(Imgproc.MORPH_RECT, 3))
+        Core.compare(dark, Scalar(max(0.45 * min(gl, 40.0), 6.0)), t, Core.CMP_LE)
+        Core.bitwise_and(bandAll, t, bandAll)
+        Core.bitwise_or(remove, bandAll, remove)
+        dark.setTo(Scalar(0.0), remove)
+        // Huella devuelta: la banda fina de las rectas claras, a resolución completa (un tachón o subrayado oscuro
+        // no es rejilla; las letras junto a la línea quedan fuera)
+        lines.release()
+        bandFine.copyTo(lines)
+        log?.invoke("ruling gl=$gl limit=$limit")
+        return lines
+    }
+
+    /** Deja en [m] sólo las componentes cuya extensión (horizontal o vertical) es >= [LINE_MIN_FRACTION] de la imagen. */
+    private fun keepLong(m: Mat, horizontal: Boolean, bag: MatBag) {
+        val labels = bag.mat(); val stats = bag.mat(); val cents = bag.mat()
+        val nc = Imgproc.connectedComponentsWithStats(m, labels, stats, cents, 8, CvType.CV_32S)
+        if (nc <= 1) return
+        val st = IntArray(nc * 5); stats.get(0, 0, st)
+        val minLen = LINE_MIN_FRACTION * if (horizontal) m.cols() else m.rows()
+        val drop = BooleanArray(nc); var any = false
+        for (c in 1 until nc) { val ext = if (horizontal) st[c * 5 + 2] else st[c * 5 + 3]; if (ext < minLen) { drop[c] = true; any = true } }
+        if (!any) return
+        val lab = IntArray(m.cols() * m.rows()); labels.get(0, 0, lab)
+        val b = ByteArray(lab.size); m.get(0, 0, b)
+        for (i in lab.indices) if (drop[lab[i]]) b[i] = 0
+        m.put(0, 0, b)
+    }
+
+    private fun lineKernel(len: Int, deg: Int): Mat {
+        val a = Math.toRadians(deg.toDouble())
+        val dx = kotlin.math.cos(a); val dy = kotlin.math.sin(a)
+        val hw = (abs(dx) * (len - 1) / 2).roundToInt(); val hh = (abs(dy) * (len - 1) / 2).roundToInt()
+        val k = Mat.zeros(2 * hh + 1, 2 * hw + 1, CvType.CV_8UC1)
+        val c = org.opencv.core.Point(hw.toDouble(), hh.toDouble())
+        val half = (len - 1) / 2.0
+        Imgproc.line(k, org.opencv.core.Point(c.x - dx * half, c.y - dy * half), org.opencv.core.Point(c.x + dx * half, c.y + dy * half), Scalar(1.0), 1)
+        return k
+    }
+
+    // =====================================================================================
+    // 2-3. Componentes, zonas y recuadros (resolución de trabajo)
+    // =====================================================================================
+
+    /** Resultado de la segmentación. [regions] y [blank] en coordenadas de la imagen completa. */
+    internal class Layout(
+        val regions: List<Region>,
+        val letterHeight: Double,   // px de la imagen completa
+        val blank: Mat,             // 8UC1 a resolución de trabajo: zonas que deben quedar en blanco (espiral...)
+        val scale: Double,          // resolución de trabajo / completa
+        val tLow: Double,
+        val inkLevel: Mat,          // 8UC1 a 1/4 de la resolución de trabajo: oscuridad típica de la tinta del entorno
+        val keep: Mat,              // 8UC1 a resolución de trabajo: tinta aceptada (con margen)
+    ) {
+        fun release() { blank.release(); inkLevel.release(); keep.release() }
+    }
+
+    internal fun analyze(rgb: Mat): Layout {
+        val p = prepare(rgb)
+        try { return layout(p) } finally { p.release() }
+    }
+
+    internal class Comp(
+        val x: Int, val y: Int, val w: Int, val h: Int, val area: Int,
+        val meanDark: Double, val halfWidth: Float, val onRuling: Double, val label: Int,
+    )
+
+    internal fun layout(p: Prepared): Layout = MatBag().use { bag ->
+        val fw = p.dark.cols(); val fh = p.dark.rows()
+        val dw = bag.mat()
+        val s = Cv.downscale(p.dark, dw, WORK_SIDE)
+        val W = dw.cols(); val H = dw.rows()
+        Imgproc.GaussianBlur(dw, dw, Size(0.0, 0.0), 0.7)
+        // Ruido local: umbral ∝ ganancia^0.85 (el ruido normalizado crece con la ganancia en las sombras)
+        val g = bag.mat(); Imgproc.resize(p.gain, g, dw.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
+        Core.pow(g, NOISE_GAIN_EXP, g)
+        val dn = bag.mat(); dw.convertTo(dn, CvType.CV_32F); Core.divide(dn, g, dn)
+        val dn8 = bag.mat(); dn.convertTo(dn8, CvType.CV_8U)
+        // Ruido del mapa ya suavizado (~0.6 del medido en el papel)
+        val sigma = max(1.5, p.noise * 0.6)
+        val tLow = max(5.0, 2.2 * sigma)
+        val tHigh = max(11.0, 4.0 * sigma)
+        // Huella de la rejilla a resolución de trabajo
+        val rul = bag.mat()
+        if (!p.ruling.empty()) {
+            Imgproc.resize(p.ruling, rul, dw.size(), 0.0, 0.0, Imgproc.INTER_AREA)
+            Imgproc.threshold(rul, rul, 100.0, 255.0, Imgproc.THRESH_BINARY)
+        } else { rul.create(dw.size(), CvType.CV_8UC1); rul.setTo(Scalar(0.0)) }
+
+        val weak = bag.mat(); Core.compare(dn8, Scalar(tLow), weak, Core.CMP_GT)
+        // Une los trozos de un mismo trazo (cortes por el ruido o donde cruzaba la cuadrícula borrada)
+        Imgproc.morphologyEx(weak, weak, Imgproc.MORPH_CLOSE, Cv.kernel(Imgproc.MORPH_ELLIPSE, 3))
+        val rb = ByteArray(W * H); rul.get(0, 0, rb)
+        val db = ByteArray(W * H); dn8.get(0, 0, db)
+        val lab = IntArray(W * H)
+        val (nc, comps) = extractComps(weak, db, rb, lab, tHigh, bag)
+        // Grosor típico del trazo y altura de letra (componentes medianas, sin motas ni restos de rejilla)
+        val sized = comps.filter { it.area >= 12 && max(it.w, it.h) >= 5 }
+        val hw50 = if (sized.isEmpty()) 1.0 else sized.map { it.halfWidth.toDouble() }.sorted()[sized.size / 2]
+        val hw80 = if (sized.isEmpty()) 1.5 else sized.map { it.halfWidth.toDouble() }.sorted()[(sized.size * 0.8).toInt().coerceAtMost(sized.size - 1)]
+        val thickLim = max(4.0, 2.4 * max(hw80, 1.0))
+        // Letras: trazos finos, claramente marcados y fuera de la rejilla
+        val letterCand = sized.filter {
+            it.halfWidth <= thickLim && it.h >= 6 && it.h <= H / 6 && it.onRuling < 0.5 && it.meanDark >= 1.4 * tHigh &&
+                max(it.w, it.h) <= 6 * min(it.w, it.h)
+        }
+        // Orientación del texto (página girada 90° sin corregir): la altura de letra es el lado perpendicular
+        val lh0 = if (letterCand.size < 3) max(12.0, W / 60.0)
+        else BoxGrouping.percentile(letterCand.map { max(it.w, it.h) }.toIntArray(), 0.75, 20).toDouble().coerceIn(10.0, W / 8.0)
+        val vertical = letterCand.size >= 8 && BoxGrouping.isVerticalText(
+            letterCand.map { BoxGrouping.Box(it.x, it.y, it.x + it.w, it.y + it.h) }, max(2, (lh0 * 0.4).roundToInt()))
+        val lh = if (letterCand.size < 3) lh0
+        else BoxGrouping.percentile(letterCand.map { if (vertical) it.w else it.h }.toIntArray(), 0.5, 20).toDouble().coerceIn(10.0, W / 8.0)
+        log?.invoke("work ${W}x$H s=%.3f tLow=%.1f tHigh=%.1f hw50=%.2f hw80=%.2f thickLim=%.1f lh=%.1f vertical=$vertical comps=${comps.size}".format(s, tLow, tHigh, hw50, hw80, thickLim, lh))
+
+        // --- Manchas gruesas que no son letras (espiral, huecos, bordes oscuros) -> zona en blanco
+        val blobLabels = BooleanArray(nc)
+        val softLevel = FloatArray(nc)
+        var anyBlob = false; var anySoft = false
+        val touch = 2
+        for (c in comps) {
+            if (c.halfWidth <= thickLim) continue
+            // Trazo grueso pero no oscuro ni enorme (palabra tachada, letras apiñadas, marcador): es escritura
+            val edge = c.x <= 2 || c.y <= 2 || c.x + c.w >= W - 2 || c.y + c.h >= H - 2
+            if (!edge && c.meanDark < 3.5 * tHigh && c.halfWidth <= 2 * thickLim) continue
+            val big = max(c.w, c.h).toDouble()
+            val fill = c.area.toDouble() / max(1, c.w * c.h)
+            val atBorder = c.x <= touch || c.y <= touch || c.x + c.w >= W - touch || c.y + c.h >= H - touch
+            // Letra gruesa (titular en negrita, marcador): alargada respecto del grosor, no maciza, tamaño de letra
+            val glyph = !atBorder && big >= 5 * c.halfWidth && big <= 3.5 * lh * 3 && fill in 0.12..0.8 && c.halfWidth <= max(thickLim * 2.5, lh * 0.25)
+            if (glyph) continue
+            if (!atBorder && c.meanDark < 3.0 * tHigh) {
+                // Mancha CLARA y gruesa dentro de la página (fondo de color de una celda o encabezado, borde de una
+                // sombra mal normalizado): no es una zona en blanco; se quita su parte tenue y la tinta que lleve
+                // encima (mucho más oscura) se conserva
+                softLevel[c.label] = (2.0 * c.meanDark).toFloat(); anySoft = true
+            } else { blobLabels[c.label] = true; anyBlob = true }
+        }
+        val blank = Mat(); blank.create(dw.size(), CvType.CV_8UC1); blank.setTo(Scalar(0.0))
+        if (anyBlob) {
+            val bb = ByteArray(W * H)
+            for (i in lab.indices) if (blobLabels[lab[i]]) bb[i] = -1
+            blank.put(0, 0, bb)
+            // Núcleo grueso (apertura) para no borrar trazos finos pegados a la mancha (líneas de un diagrama)
+            // (morfología a 1/MF de la resolución de trabajo: los elementos grandes son caros y las zonas son suaves)
+            val mf = if (max(W, H) >= 1200) 3 else 1
+            val ms = Size(max(1.0, (W / mf).toDouble()), max(1.0, (H / mf).toDouble()))
+            val r = Cv.odd(max(3, (thickLim * 1.6 / mf).roundToInt()))
+            val core = bag.mat(); val bs = bag.mat()
+            Imgproc.resize(blank, bs, ms, 0.0, 0.0, Imgproc.INTER_AREA)
+            Imgproc.threshold(bs, bs, 127.0, 255.0, Imgproc.THRESH_BINARY)
+            Imgproc.morphologyEx(bs, bs, Imgproc.MORPH_OPEN, Cv.kernel(Imgproc.MORPH_ELLIPSE, r))
+            Imgproc.resize(bs, core, dw.size(), 0.0, 0.0, Imgproc.INTER_NEAREST)
+            Core.bitwise_and(core, blank, core)
+            // Núcleos CLAROS (fondo de color de una celda o encabezado, borde de una sombra mal normalizado):
+            // no son zona en blanco; se quita sólo su parte tenue y la tinta que lleven encima se conserva
+            run {
+                val cl = bag.mat(); val cs = bag.mat(); val cc = bag.mat()
+                val n2 = Imgproc.connectedComponentsWithStats(core, cl, cs, cc, 8, CvType.CV_32S)
+                if (n2 > 1) {
+                    val cla = IntArray(W * H); cl.get(0, 0, cla)
+                    val sum = LongArray(n2); val cnt = IntArray(n2)
+                    for (i in cla.indices) { val l = cla[i]; if (l > 0) { sum[l] += (db[i].toInt() and 0xFF).toLong(); cnt[l]++ } }
+                    val soft = BooleanArray(n2); var anyS = false
+                    for (l in 1 until n2) { val m = sum[l].toDouble() / max(1, cnt[l]); if (m < SOFT_CORE * tHigh) { soft[l] = true; anyS = true } }
+                    if (anyS) {
+                        val cb = ByteArray(W * H); core.get(0, 0, cb)
+                        val wb = ByteArray(W * H); weak.get(0, 0, wb)
+                        for (i in cla.indices) {
+                            val l = cla[i]
+                            if (l > 0 && soft[l]) {
+                                cb[i] = 0
+                                val lvl = 2.0 * sum[l] / max(1, cnt[l])
+                                if ((db[i].toInt() and 0xFF) <= lvl) wb[i] = 0
+                            }
+                        }
+                        core.put(0, 0, cb); weak.put(0, 0, wb); anySoft = true
+                    }
+                }
+            }
+            // Zona: el núcleo cerrado a escala de letra (rellena la banda de la espiral) y con margen
+            val kc = Cv.odd(max(3, (lh * 0.8 / mf).roundToInt()))
+            Imgproc.resize(core, bs, ms, 0.0, 0.0, Imgproc.INTER_AREA)
+            Imgproc.threshold(bs, bs, 0.0, 255.0, Imgproc.THRESH_BINARY)
+            Imgproc.morphologyEx(bs, bs, Imgproc.MORPH_CLOSE, Cv.kernel(Imgproc.MORPH_ELLIPSE, kc))
+            Imgproc.dilate(bs, bs, Cv.kernel(Imgproc.MORPH_ELLIPSE, Cv.odd(max(3, (lh * 0.35 / mf).roundToInt()))))
+            Imgproc.resize(bs, blank, dw.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
+            Imgproc.threshold(blank, blank, 127.0, 255.0, Imgproc.THRESH_BINARY)
+        }
+        // --- Espiral / anillas: columna (o fila) de >= 5 manchas grandes, macizas y alargadas en perpendicular,
+        // alineadas y repartidas por buena parte de la página -> banda en blanco (con sus alambres y sombras)
+        for (band in findBindings(comps, lh, W, H, tHigh, hw50)) {
+            Imgproc.line(blank, org.opencv.core.Point(band.x0, band.y0), org.opencv.core.Point(band.x1, band.y1), Scalar(255.0), band.thickness)
+        }
+        // Segunda pasada sin las zonas en blanco: los trazos finos pegados a una mancha (línea de un diagrama que
+        // llega a la espiral o a una sombra) se separan de ella y se conservan
+        val comps2: List<Comp>
+        if (anySoft) {
+            val wb = ByteArray(W * H); weak.get(0, 0, wb)
+            for (i in lab.indices) { val l = lab[i]; if (l > 0 && softLevel[l] > 0f && (db[i].toInt() and 0xFF) <= softLevel[l]) wb[i] = 0 }
+            weak.put(0, 0, wb)
+        }
+        if (Core.countNonZero(blank) > 0 || anySoft) {
+            val nb = bag.mat(); Core.bitwise_not(blank, nb)
+            Core.bitwise_and(weak, nb, weak)
+            comps2 = extractComps(weak, db, rb, lab, tHigh, bag).second
+        } else comps2 = comps.filter { !blobLabels[it.label] }
+
+        // --- Imágenes: zonas grandes y macizas de contenido no-papel (fotos, bloques de color)
+        val images = findImages(dw, p, s, blank, lh, bag)
+
+        // --- Filtro de componentes
+        val minArea = max(4.0, (0.08 * lh) * (0.08 * lh))
+        val thin = max(2.0, 2.2 * hw50 + 1)
+        val keepBoxes = ArrayList<BoxGrouping.Box>()
+        val keepComps = ArrayList<Comp>()
+        for (c in comps2) {
+            if (c.area < minArea) continue
+            // Resto recto de la rejilla: fino, alargado, sobre la huella de las rectas y claro
+            val sh = min(c.w, c.h); val lg = max(c.w, c.h)
+            if (sh <= thin && lg >= 3 * sh && c.onRuling >= 0.5 && c.meanDark < 3.5 * tHigh) continue
+            if (lg >= 3.5 * sh && c.onRuling >= 0.7 && c.meanDark < 2.5 * tHigh) continue
+            // Restos de la rejilla (cruces, tramos): casi todo sobre su huella y no mucho más oscuros que ella
+            if (c.onRuling >= 0.75 && c.meanDark < 2.0 * tHigh) continue
+            // Rayitas rectas muy tenues (tramos de la rejilla que no se reconocieron como recta)
+            if (lg >= 4 * sh && c.meanDark < 1.3 * tHigh && c.halfWidth <= 1.5 * hw50 + 1) continue
+            // Cruces de la cuadrícula y motas sobre ella: pequeñas, claras, sobre la huella de las rectas
+            if (lg < 0.5 * lh && c.onRuling >= 0.5 && c.meanDark < 3.0 * tHigh) continue
+            val x1 = c.x + c.w; val y1 = c.y + c.h
+            // Bordes de la hoja / sombra del canto: pegados al borde y alargados a lo largo de él, o gruesos
+            val touchLR = c.x <= 1 || x1 >= W - 1; val touchTB = c.y <= 1 || y1 >= H - 1
+            if ((touchLR && c.h >= 3 * c.w) || (touchTB && c.w >= 3 * c.h)) continue
+            if (((touchLR && c.w <= 2 * lh) || (touchTB && c.h <= 2 * lh)) && c.halfWidth > 1.6 * hw80) continue
+            // Dentro de una imagen: ya se conserva entera
+            if (images.any { c.x >= it.x0 && c.y >= it.y0 && x1 <= it.x1 && y1 <= it.y1 }) continue
+            keepBoxes.add(BoxGrouping.Box(c.x, c.y, x1, y1))
+            keepComps.add(c)
+        }
+        // Motas pequeñas y claras aisladas (lejos de otra tinta): ruido
+        val gapX = max(3, (lh * 0.9).roundToInt())
+        val gapY = max(2, (lh * 0.3).roundToInt())
+        val groups = if (!vertical) BoxGrouping.group(keepBoxes, gapX, gapY)
+        else BoxGrouping.group(keepBoxes.map { BoxGrouping.transpose(it) }, gapX, gapY).map { (b, idx) -> BoxGrouping.transpose(b) to idx }
+        val pad = max(3, (lh * 0.3).roundToInt())
+        val boxes = ArrayList<BoxGrouping.Box>()
+        val finalLabels = HashSet<Int>()
+        for ((box, idx) in groups) {
+            var area = 0; var maxDark = 0.0
+            for (i in idx) { area += keepComps[i].area; maxDark = max(maxDark, keepComps[i].meanDark) }
+            val small = max(box.w, box.h) < 0.35 * lh
+            if (small && (area < 2.5 * minArea || maxDark < 2.2 * tHigh)) continue
+            boxes.add(box.pad(pad, W, H))
+            for (i in idx) finalLabels.add(keepComps[i].label)
+        }
+        // Máscara de la tinta aceptada (resolución de trabajo, con margen para los bordes suaves): el render sólo
+        // pinta los trazos de estas componentes; motas y restos de la rejilla dentro de un recuadro no salen
+        val keep = Mat(H, W, CvType.CV_8UC1)
+        run {
+            val kb = ByteArray(W * H)
+            if (finalLabels.isNotEmpty()) {
+                val maxL = finalLabels.max()
+                val ok = BooleanArray(maxL + 1); for (l in finalLabels) ok[l] = true
+                for (i in lab.indices) { val l = lab[i]; if (l in 1..maxL && ok[l]) kb[i] = -1 }
+            }
+            keep.put(0, 0, kb)
+            Imgproc.dilate(keep, keep, Cv.kernel(Imgproc.MORPH_ELLIPSE, 5))
+        }
+        val merged = BoxGrouping.mergeOverlapping(boxes)
+        val k = 1.0 / s
+        val regions = ArrayList<Region>()
+        for (b in merged) regions.add(scaleRegion(Region(b.x0, b.y0, b.x1, b.y1, Kind.TEXT), k, fw, fh))
+        for (b in images) regions.add(scaleRegion(Region(b.x0, b.y0, b.x1, b.y1, Kind.IMAGE), k, fw, fh))
+        debug?.let { dbg ->
+            val vis = bag.mat(); Imgproc.cvtColor(dw, vis, Imgproc.COLOR_GRAY2RGB)
+            Core.bitwise_not(vis, vis)
+            val tint = bag.mat(); vis.copyTo(tint); tint.setTo(Scalar(255.0, 200.0, 200.0), blank)
+            Core.addWeighted(vis, 0.6, tint, 0.4, 0.0, vis)
+            val kept = keepComps.map { it.label }.toHashSet()
+            val all = comps.filter { blobLabels[it.label] } + comps2
+            for (c in all) {
+                val col = when { c in comps && blobLabels[c.label] -> Scalar(255.0, 0.0, 0.0); c.label in kept -> Scalar(0.0, 170.0, 0.0); else -> Scalar(230.0, 160.0, 0.0) }
+                Imgproc.rectangle(vis, org.opencv.core.Point(c.x.toDouble(), c.y.toDouble()), org.opencv.core.Point((c.x + c.w).toDouble(), (c.y + c.h).toDouble()), col, 1)
+            }
+            for (b in merged) Imgproc.rectangle(vis, org.opencv.core.Point(b.x0.toDouble(), b.y0.toDouble()), org.opencv.core.Point(b.x1.toDouble(), b.y1.toDouble()), Scalar(200.0, 0.0, 255.0), 2)
+            for (b in images) Imgproc.rectangle(vis, org.opencv.core.Point(b.x0.toDouble(), b.y0.toDouble()), org.opencv.core.Point(b.x1.toDouble(), b.y1.toDouble()), Scalar(0.0, 120.0, 255.0), 3)
+            dbg("layout", vis)
+        }
+        // Oscuridad típica de la tinta alrededor de cada punto (máximo local a escala de letra, suavizado): el
+        // contraste se ajusta por zonas (lápiz claro junto a bolígrafo oscuro en el mismo recuadro)
+        // (a 1/4 de la resolución de trabajo, reducción por máximo: es un campo suave)
+        val ink = Mat()
+        run {
+            val f = 4.0
+            val t3 = bag.mat(); Imgproc.dilate(dw, t3, Cv.kernel(Imgproc.MORPH_RECT, 5))
+            Imgproc.resize(t3, ink, Size(max(1.0, (W / f).roundToInt().toDouble()), max(1.0, (H / f).roundToInt().toDouble())), 0.0, 0.0, Imgproc.INTER_NEAREST)
+            Imgproc.dilate(ink, ink, Cv.kernel(Imgproc.MORPH_ELLIPSE, Cv.odd(max(3, (lh / f).roundToInt()))))
+            Imgproc.GaussianBlur(ink, ink, Size(0.0, 0.0), max(1.0, lh * 0.6 / f))
+        }
+        Layout(regions.sortedWith(compareBy({ it.top }, { it.left })), lh / s, blank, s, tLow, ink, keep)
+    }
+
+    /** Componentes de [weak] con algún píxel > [tHigh] (histéresis). Rellena [lab] con las etiquetas. */
+    private fun extractComps(weak: Mat, db: ByteArray, rb: ByteArray, lab: IntArray, tHigh: Double, bag: MatBag): Pair<Int, List<Comp>> {
+        val labels = bag.mat(); val stats = bag.mat(); val cents = bag.mat()
+        val nc = Imgproc.connectedComponentsWithStats(weak, labels, stats, cents, 8, CvType.CV_32S)
+        val dt = bag.mat(); Imgproc.distanceTransform(weak, dt, Imgproc.DIST_L2, 3)
+        labels.get(0, 0, lab)
+        val dtf = FloatArray(lab.size); dt.get(0, 0, dtf)
+        dt.release(); labels.release(); cents.release()
+        val maxDt = FloatArray(nc); val sumD = LongArray(nc); val strong = BooleanArray(nc); val onR = IntArray(nc)
+        val th = tHigh.toInt()
+        for (i in lab.indices) {
+            val c = lab[i]; if (c == 0) continue
+            val d = db[i].toInt() and 0xFF
+            sumD[c] += d.toLong()
+            if (d > th) strong[c] = true
+            if (dtf[i] > maxDt[c]) maxDt[c] = dtf[i]
+            if (rb[i].toInt() != 0) onR[c]++
+        }
+        val st = IntArray(nc * 5); if (nc > 0) stats.get(0, 0, st)
+        stats.release()
+        val comps = ArrayList<Comp>()
+        for (c in 1 until nc) {
+            if (!strong[c]) continue
+            val o = c * 5
+            val a = st[o + 4]
+            comps.add(Comp(st[o], st[o + 1], st[o + 2], st[o + 3], a, sumD[c].toDouble() / a, maxDt[c], onR[c].toDouble() / a, c))
+        }
+        return nc to comps
+    }
+
+    /**
+     * Bandas de encuadernación (espiral): componentes grandes (lado largo >= 3.5 % de la página, corto >= 1.5 %), macizas
+     * (>= 20 % de su caja), oscuras y gruesas; >= 4 alineadas (centro a <= 4 % de la página), casi contiguas, que
+     * cubren >= 35 % de la página. Devuelve las bandas (con margen) en coordenadas de trabajo.
+     */
+    internal class Band(val x0: Double, val y0: Double, val x1: Double, val y1: Double, val thickness: Int)
+
+    internal fun findBindings(comps: List<Comp>, lh: Double, W: Int, H: Int, tHigh: Double, hw50: Double): List<Band> {
+        val side = max(W, H).toDouble()
+        // Anillas: oscuras (sombra y hueco) y gruesas; una línea de texto larga (escrita en vertical) no lo es
+        val big = comps.filter {
+            max(it.w, it.h) >= 0.035 * side && min(it.w, it.h) >= 0.015 * side && it.area >= 0.2 * it.w * it.h &&
+                it.meanDark >= max(35.0, 3.5 * tHigh) && it.halfWidth >= 2.5 * hw50
+        }
+        val out = ArrayList<Band>()
+        val margin = lh * 0.8
+        val usedAll = BooleanArray(big.size)   // una anilla pertenece a una sola banda
+        for (vertical in booleanArrayOf(true, false)) {
+            // Banda vertical: anillas más anchas que altas; se sigue una recta (la espiral puede verse inclinada)
+            // (las anillas pueden aparecer fundidas entre sí: no se exige que sean alargadas)
+            val cand = big
+            fun along(c: Comp) = if (vertical) c.y + c.h / 2.0 else c.x + c.w / 2.0
+            fun across(c: Comp) = if (vertical) c.x + c.w / 2.0 else c.y + c.h / 2.0
+            val used = usedAll.copyOf()
+            for (i in cand.indices) {
+                if (used[i]) continue
+                var a = 0.0; var b = across(cand[i])   // across = a·along + b
+                var members: List<Int> = emptyList()
+                repeat(3) {
+                    members = cand.indices.filter { !used[it] && abs(across(cand[it]) - (a * along(cand[it]) + b)) <= 0.04 * side }
+                    if (members.size >= 2) {
+                        // Mínimos cuadrados
+                        val n = members.size.toDouble()
+                        val mx = members.sumOf { along(cand[it]) } / n; val my = members.sumOf { across(cand[it]) } / n
+                        var sxx = 0.0; var sxy = 0.0
+                        for (m in members) { val dx = along(cand[m]) - mx; sxx += dx * dx; sxy += dx * (across(cand[m]) - my) }
+                        a = if (sxx > 1e-6) (sxy / sxx).coerceIn(-0.25, 0.25) else 0.0
+                        b = my - a * mx
+                    }
+                }
+                if (members.size < 4) continue
+                val lo = members.minOf { if (vertical) cand[it].y else cand[it].x }
+                val hi = members.maxOf { if (vertical) cand[it].y + cand[it].h else cand[it].x + cand[it].w }
+                if (hi - lo < 0.35 * (if (vertical) H else W)) continue
+                // Las anillas se suceden casi sin huecos: su extensión a lo largo de la banda cubre >= 45 % del tramo
+                val cover = members.sumOf { if (vertical) cand[it].h else cand[it].w }.toDouble() / (hi - lo)
+                if (cover < 0.45) continue
+                for (m in members) { used[m] = true; usedAll[m] = true }
+                // Semiancho: extremo de las anillas respecto de la recta
+                var half = 0.0
+                for (m in members) {
+                    val c = cand[m]; val center = a * along(c) + b
+                    val e0 = if (vertical) c.x.toDouble() else c.y.toDouble()
+                    val e1 = if (vertical) (c.x + c.w).toDouble() else (c.y + c.h).toDouble()
+                    half = max(half, max(center - e0, e1 - center))
+                }
+                val len = (if (vertical) H else W).toDouble()
+                val th = (2 * (half + margin)).roundToInt()
+                out.add(if (vertical) Band(b, 0.0, a * len + b, len, th) else Band(0.0, b, len, a * len + b, th))
+            }
+        }
+        return out
+    }
+
+    /**
+     * Fotos / bloques de color: a 1/8 de la resolución de trabajo, bloques con oscuridad media alta (>= 40) o
+     * color saturado y oscuro; cierre; componentes grandes (>= 1.2 % de la página, lado >= 6 %), macizas
+     * (>= 55 % de su caja) y no alargadas (las bandas de la espiral o de un borde sí lo son; un bloque de color
+     * alargado se acepta si es colorido y casi lleno). Las que tocan el borde sólo si son enormes (página-foto).
+     */
+    private fun findImages(dw: Mat, p: Prepared, s: Double, blank: Mat, lh: Double, bag: MatBag): List<BoxGrouping.Box> {
+        val W = dw.cols(); val H = dw.rows()
+        val cw = max(8, W / 8); val ch = max(8, H / 8)
+        val dc = bag.mat(); Imgproc.resize(dw, dc, Size(cw.toDouble(), ch.toDouble()), 0.0, 0.0, Imgproc.INTER_AREA)
+        val ns = bag.mat(); Imgproc.resize(p.n, ns, Size(cw.toDouble(), ch.toDouble()), 0.0, 0.0, Imgproc.INTER_AREA)
+        val hsv = bag.mat(); Imgproc.cvtColor(ns, hsv, Imgproc.COLOR_RGB2HSV)
+        val sat = bag.mat(); Core.extractChannel(hsv, sat, 1)
+        val cand = bag.mat(); Core.compare(dc, Scalar(40.0), cand, Core.CMP_GE)
+        val m2 = bag.mat(); Core.compare(sat, Scalar(90.0), m2, Core.CMP_GE)
+        val m3 = bag.mat(); Core.compare(dc, Scalar(18.0), m3, Core.CMP_GE)
+        Core.bitwise_and(m2, m3, m2); Core.bitwise_or(cand, m2, cand)
+        Imgproc.morphologyEx(cand, cand, Imgproc.MORPH_CLOSE, Cv.kernel(Imgproc.MORPH_RECT, 3))
+        val labels = bag.mat(); val stats = bag.mat(); val cents = bag.mat()
+        val nc = Imgproc.connectedComponentsWithStats(cand, labels, stats, cents, 8, CvType.CV_32S)
+        val out = ArrayList<BoxGrouping.Box>()
+        val total = cw.toDouble() * ch
+        val row = IntArray(5)
+        val sel = bag.mat()
+        for (c in 1 until nc) {
+            stats.get(c, 0, row)
+            val x = row[0]; val y = row[1]; val w = row[2]; val h = row[3]; val a = row[4].toDouble()
+            if (a < 0.012 * total || min(w.toDouble() / cw, h.toDouble() / ch) < 0.06) continue
+            val fill = a / (w * h)
+            if (fill < 0.55) continue
+            val aspect = max(w, h).toDouble() / max(1, min(w, h))
+            Core.compare(labels, Scalar(c.toDouble()), sel, Core.CMP_EQ)
+            val meanSat = Core.mean(sat, sel).`val`[0]
+            if (aspect > 4.5 && !(meanSat >= 80 && fill >= 0.85)) continue
+            val atBorder = x <= 0 || y <= 0 || x + w >= cw || y + h >= ch
+            if (atBorder && a < 0.25 * total) continue
+            val k = W.toDouble() / cw
+            val kh = H.toDouble() / ch
+            out.add(BoxGrouping.Box((x * k).toInt(), (y * kh).toInt(), min(W, ((x + w) * k).roundToInt()), min(H, ((y + h) * kh).roundToInt())))
+        }
+        return out
+    }
+
+    // =====================================================================================
+    // 4. Render
+    // =====================================================================================
+
+    enum class Style { COLOR, BLACK_WHITE }
+
+    /**
+     * Render del filtro sobre [rgb] (8UC3, resolución completa; no se modifica). COLOR: 8UC3 (tinta con su
+     * color reforzado sobre blanco puro); BLACK_WHITE: 8UC1 (tinta negra con bordes suaves sobre blanco puro).
+     */
+    internal fun render(rgb: Mat, style: Style, fast: Boolean = false): Mat = MatBag().use { bag ->
+        val p = prepare(rgb, bgSide = if (fast) 256 else 384, refineSide = if (fast) 320 else 512)
+        try {
+            val lay = layout(p)
+            try { compose(p, lay, style, bag) } finally { lay.release() }
+        } finally { p.release() }
+    }
+
+    private fun compose(p: Prepared, lay: Layout, style: Style, bag: MatBag): Mat {
+        val fw = p.dark.cols(); val fh = p.dark.rows()
+        val color = style == Style.COLOR
+        val out = Mat(fh, fw, if (color) CvType.CV_8UC3 else CvType.CV_8UC1, Scalar.all(255.0))
+        // Zonas en blanco a resolución completa (para recortar la tinta de los recuadros que las tocan)
+        val keepFull = bag.mat()
+        Imgproc.resize(lay.keep, keepFull, Size(fw.toDouble(), fh.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR)
+        val pm = p.paper
+        val sigma = max(1.5, p.noise)
+        val gw = p.gain.cols(); val gh = p.gain.rows()
+        val gRow = FloatArray(1)
+        val d = bag.mat(); val alpha = bag.mat()
+        val lvl = bag.mat(); val den = bag.mat(); val af = bag.mat(); val t0m = bag.mat()
+        val inkFull = bag.mat(); Imgproc.resize(lay.inkLevel, inkFull, Size(fw.toDouble(), fh.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR)
+        val tmp = bag.mat(); val tmp3 = bag.mat()
+        val chs = ArrayList<Mat>(3)
+        for (r in lay.regions) {
+            if (r.kind != Kind.TEXT || r.width <= 0 || r.height <= 0) continue
+            // Umbral de tinta según el ruido local (sombras), del centro del recuadro
+            p.gain.get(((r.top + r.bottom) / 2.0 / fh * gh).toInt().coerceIn(0, gh - 1), ((r.left + r.right) / 2.0 / fw * gw).toInt().coerceIn(0, gw - 1), gRow)
+            val t0 = max(5.0, 2.2 * sigma) * Math.pow(gRow[0].toDouble(), NOISE_GAIN_EXP)
+            // Por franjas de <= ~1 MP: los intermedios en coma flotante quedan acotados aunque el recuadro sea
+            // la página entera a 12-20 MP
+            val stripH = max(16, STRIP_PIXELS / max(1, r.width))
+            var y0 = r.top
+            while (y0 < r.bottom) {
+                val y1 = min(r.bottom, y0 + stripH)
+                val rect = Rect(r.left, y0, r.width, y1 - y0)
+                y0 = y1
+                val dRoi = p.dark.submat(rect)
+                dRoi.copyTo(d)
+                dRoi.release()
+                // Alfa suave por píxel: rampa t0'..t1 con suavizado (anti-aliasing)
+                val inkRoi = inkFull.submat(rect)
+                inkRoi.convertTo(lvl, CvType.CV_32F)
+                inkRoi.release()
+                Core.max(lvl, Scalar(20.0), lvl)
+                // t0' = max(t0, 12 % de la tinta) y t1 = 90 % de la tinta: el alfa es ~ la cobertura del píxel (bordes
+                // suaves sin engordar el trazo); en zonas de tinta tenue (lápiz) la rampa se estrecha y la refuerza
+                Core.multiply(lvl, Scalar(0.12), t0m); Core.max(t0m, Scalar(t0), t0m)
+                Core.multiply(lvl, Scalar(0.9), den); Core.add(t0m, Scalar(10.0), af); Core.max(den, af, den); Core.subtract(den, t0m, den)
+                d.convertTo(af, CvType.CV_32F); Core.subtract(af, t0m, af)
+                Core.divide(af, den, af)
+                Core.min(af, Scalar(1.0), af); Core.max(af, Scalar(0.0), af)
+                // smoothstep x²(3-2x)
+                Core.multiply(af, af, den); af.convertTo(af, -1, -2.0, 3.0); Core.multiply(af, den, af)
+                af.convertTo(alpha, CvType.CV_8U, 255.0)
+                val kRoi = keepFull.submat(rect)
+                Core.multiply(alpha, kRoi, alpha, 1.0 / 255.0)
+                kRoi.release()
+                val oRoi = out.submat(rect)
+                if (!color) {
+                    Core.bitwise_not(alpha, tmp)
+                    Core.min(oRoi, tmp, oRoi)
+                } else {
+                    // Oscuridad por canal (papel -> 0) reforzada según el recuadro: el lápiz claro se oscurece,
+                    // la tinta ya oscura se mantiene; saturación de la tinta reforzada (diferencias entre canales).
+                    // Refuerzo por zona: 150 / tinta del entorno, entre x1 y x4
+                    Core.divide(150.0, lvl, lvl); Core.min(lvl, Scalar(4.0), lvl); Core.max(lvl, Scalar(1.0), lvl)
+                    val nRoi = p.n.submat(rect)
+                    Core.bitwise_not(nRoi, tmp3)                      // 255 - n
+                    nRoi.release()
+                    Core.subtract(tmp3, Scalar.all(255.0 - pm), tmp3)  // oscuridad respecto del papel
+                    val f = bag.mat(); tmp3.convertTo(f, CvType.CV_32F, 255.0 / pm)
+                    // Saturación: d_c = media + 1.35·(d_c - media)
+                    Core.split(f, chs)
+                    val mean = bag.mat(); Core.add(chs[0], chs[1], mean); Core.add(mean, chs[2], mean); Core.multiply(mean, Scalar(1.0 / 3.0), mean)
+                    for (c in chs) { Core.subtract(c, mean, c); Core.addWeighted(mean, 1.0, c, 1.35, 0.0, c) }
+                    // Alfa en [0,1] y composición sobre blanco: 255 - a·refuerzo·oscuridad
+                    alpha.convertTo(af, CvType.CV_32F, 1.0 / 255.0)
+                    Core.multiply(af, lvl, af)
+                    for (c in chs) { Core.multiply(c, af, c); c.convertTo(c, -1, -1.0, 255.0) }
+                    Core.merge(chs, f)
+                    for (c in chs) c.release()
+                    chs.clear()
+                    f.convertTo(tmp3, CvType.CV_8UC3)
+                    Core.min(oRoi, tmp3, oRoi)
+                    f.release(); mean.release()
+                }
+                oRoi.release()
+            }
+        }
+        // Imágenes: mejora suave del original normalizado
+        for (r in lay.regions) {
+            if (r.kind != Kind.IMAGE || r.width <= 0 || r.height <= 0) continue
+            val rect = Rect(r.left, r.top, r.width, r.height)
+            val nRoi = p.n.submat(rect)
+            val oRoi = out.submat(rect)
+            val src = if (color) nRoi else bag.add(Cv.gray(nRoi))
+            val gq = if (color) bag.add(Cv.gray(nRoi)) else src
+            val hq = Cv.histogram(gq)
+            val black = Cv.percentile(hq, 0.005) * 0.9
+            val white = max(black + 40.0, min(pm, Cv.percentile(hq, 0.995).toDouble()))
+            Cv.applyLut(src, Cv.levelsLut(black, white, 1.1), oRoi)
+            nRoi.release(); oRoi.release()
+        }
+        return out
+    }
+}

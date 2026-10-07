@@ -84,7 +84,11 @@ object MultiFrameFusion {
         val mats = ArrayList<Mat>(paths.size)
         try {
             for ((i, p) in paths.withIndex()) {
-                val bmp = try { BitmapIO.decode(p, maxPixels) } catch (t: Throwable) { Log.w(TAG, "No se pudo leer $p", t); null } ?: continue
+                val bmp = try { BitmapIO.decode(p, maxPixels) } catch (t: Throwable) {
+                    // Falta de memoria: se propaga (quien llama reintenta con menos píxeles), no es un cuadro ilegible
+                    if (Cv.isOutOfMemory(t)) throw t
+                    Log.w(TAG, "No se pudo leer $p", t); null
+                } ?: continue
                 try {
                     val m = Cv.toRgb(bmp)
                     // Todos al tamaño del primero (misma configuración de cámara: normalmente ya coinciden)
@@ -263,6 +267,7 @@ object MultiFrameFusion {
             if (inliers < 15) return null
             return out
         } catch (t: Throwable) {
+            if (Cv.isOutOfMemory(t)) throw t
             Log.w(TAG, "ORB falló", t)
             return null
         } finally {
@@ -288,6 +293,7 @@ object MultiFrameFusion {
             val inv = 1.0 / s
             return doubleArrayOf(i00, i01, tx * inv, i10, i11, ty * inv, 0.0, 0.0, 1.0)
         } catch (t: Throwable) {
+            if (Cv.isOutOfMemory(t)) throw t
             return null
         } finally { r.release(); i.release(); warp.release(); noMask.release() }
     }

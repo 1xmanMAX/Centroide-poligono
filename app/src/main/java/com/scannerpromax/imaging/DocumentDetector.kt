@@ -87,6 +87,9 @@ class DocumentDetector(private val tier: DeviceTier) {
         }
     }
 
+    /** Depuración (banco de pruebas): recibe cada cuadrilátero evaluado con su puntuación. */
+    internal var debugCand: ((FloatArray, Double, String) -> Unit)? = null
+
     private val kernel3: Mat by lazy { Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(3.0, 3.0)) }
 
     // ---- Estado de la detección en vivo (protegido por @Synchronized) ----
@@ -532,10 +535,12 @@ class DocumentDetector(private val tier: DeviceTier) {
             // Las distintas fuentes suelen dar el mismo cuadrilátero: no repetir el trabajo
             if (b.seenDuplicate(q)) return
             val s = scoreQuad(q, b, live)
+            debugCand?.invoke(q, s * wq, "raw")
             if (s > 0 && (best == null || s * wq > best!!.score)) best = Candidate(q, s * wq)
             // Misma hipótesis ajustada a los bordes reales (vértices del casco desplazados, esquinas redondeadas)
             val sq = snapQuad(q, b) ?: return
             val s2 = scoreQuad(sq, b, live)
+            debugCand?.invoke(sq, s2, "snap")
             // Ya apoyado en bordes reales: la procedencia (aproximación, rectángulo mínimo) importa menos
             val ws = max(wq, 0.95 * (1.0 + wq) / 2) * 1.02
             if (s2 > 0 && (best == null || s2 * ws > best!!.score)) best = Candidate(sq, s2 * ws)

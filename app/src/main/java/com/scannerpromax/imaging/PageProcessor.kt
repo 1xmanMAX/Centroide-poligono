@@ -289,7 +289,10 @@ class PageProcessor(val tier: DeviceTier) {
             cur.release(); cur = r
         }
         progress?.invoke(0.8f)
-        if (edits.autoDenoise && effective != FilterType.ORIGINAL && effective != FilterType.VIVID) {
+        // Los filtros segmentados ya dejan blanco puro fuera de la escritura (la limpieza de motas sólo costaría tiempo)
+        if (edits.autoDenoise && effective != FilterType.ORIGINAL && effective != FilterType.VIVID &&
+            !ImageEnhancer.isSegmented(edits.filter, analysis)
+        ) {
             val r = Cleanup.denoiseMat(cur)
             cur.release(); cur = r
         }

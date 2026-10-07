@@ -80,7 +80,7 @@ object SuperResolution {
                 Imgproc.cvtColor(src, ycc, Imgproc.COLOR_RGB2YCrCb)
                 Core.extractChannel(ycc, y, 0)
             } else src.copyTo(y)
-            val y2 = synchronized(lock) { obtainNet(lowEnd)?.let { n -> runCatching { runTiled(n, y) }.onFailure { Log.w(TAG, "Fallo DNN; se usa la alternativa", it) }.getOrNull() } }
+            val y2 = synchronized(lock) { obtainNet(lowEnd)?.let { n -> runCatching { runTiled(n, y) }.onFailure { if (Cv.isOutOfMemory(it)) throw it; Log.w(TAG, "Fallo DNN; se usa la alternativa", it) }.getOrNull() } }
                 ?: fallbackLuma(y)
             bag.add(y2)
             if (!color) return@use y2.clone()
