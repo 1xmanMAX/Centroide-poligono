@@ -96,6 +96,9 @@ dependencies {
     implementation("androidx.camera:camera-camera2:$camerax")
     implementation("androidx.camera:camera-lifecycle:$camerax")
     implementation("androidx.camera:camera-view:$camerax")
+    // Extensiones del fabricante (AUTO/HDR: multi-cuadro, reducción de ruido y nitidez del propio ISP, como la
+    // app de cámara de Samsung). Se usan solo si el equipo las ofrece; si no, CameraX normal.
+    implementation("androidx.camera:camera-extensions:$camerax")
 
     // Visión por computadora (detección de bordes, perspectiva, mejora de imagen)
     implementation("org.opencv:opencv:4.10.0")

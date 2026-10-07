@@ -37,6 +37,7 @@ import androidx.compose.material.icons.rounded.LightMode
 import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.PhoneAndroid
+import androidx.compose.material.icons.rounded.PhotoCamera
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.TextFields
 import androidx.compose.material.icons.rounded.Tune
@@ -132,6 +133,14 @@ fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
                     subtitle = "Dispara sola cuando el documento está estable y enfocado",
                     checked = settings.autoCapture,
                     onCheckedChange = { v -> update { it.copy(autoCapture = v) } },
+                )
+                GroupDivider()
+                SwitchRow(
+                    icon = Icons.Rounded.PhotoCamera,
+                    title = "Usar la cámara del teléfono por defecto",
+                    subtitle = "Abre la app de cámara del sistema (máxima resolución, HDR y nitidez del fabricante) y procesa la foto al volver",
+                    checked = settings.useSystemCamera,
+                    onCheckedChange = { v -> update { it.copy(useSystemCamera = v) } },
                 )
                 GroupDivider()
                 SwitchRow(

@@ -52,6 +52,7 @@ class SettingsRepository(private val context: Context) {
                 false -> THEME_LIGHT
             }
             prefs[Keys.DYNAMIC_COLOR] = updated.dynamicColor
+            prefs[Keys.USE_SYSTEM_CAMERA] = updated.useSystemCamera
         }
     }
 
@@ -79,6 +80,7 @@ class SettingsRepository(private val context: Context) {
                 else -> null
             },
             dynamicColor = this[Keys.DYNAMIC_COLOR] ?: d.dynamicColor,
+            useSystemCamera = this[Keys.USE_SYSTEM_CAMERA] ?: d.useSystemCamera,
         )
     }
 
@@ -98,6 +100,7 @@ class SettingsRepository(private val context: Context) {
         val PDF_TEXT_MODE = stringPreferencesKey("pdf_text_mode")
         val DARK_THEME = stringPreferencesKey("dark_theme")
         val DYNAMIC_COLOR = booleanPreferencesKey("dynamic_color")
+        val USE_SYSTEM_CAMERA = booleanPreferencesKey("use_system_camera")
     }
 
     private companion object {
@@ -120,4 +123,9 @@ data class AppSettings(
     val dynamicColor: Boolean = false,
     /** Modo de texto por defecto de los PDF (Exportar y Compartir PDF desde Inicio). */
     val pdfTextMode: PdfTextMode = PdfTextMode.BUSCABLE,
+    /**
+     * Al abrir el escáner, lanzar directamente la app de cámara del teléfono (su procesado multi-cuadro, HDR y
+     * nitidez) y procesar la foto devuelta en el flujo normal del modo. La cámara propia sigue disponible.
+     */
+    val useSystemCamera: Boolean = false,
 )

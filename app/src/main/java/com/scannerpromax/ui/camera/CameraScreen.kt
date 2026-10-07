@@ -41,6 +41,9 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -86,10 +89,12 @@ import androidx.compose.material.icons.filled.FlashAuto
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.FlashlightOn
+import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.NightsStay
 import androidx.compose.material.icons.filled.Photo
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Slideshow
@@ -131,6 +136,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -446,6 +452,12 @@ private fun CameraContent(
     val smoothed = rememberSmoothedQuad()
 
     val quality by engine.quality.collectAsState()
+    val captureInfo by engine.captureInfo.collectAsState()
+    val zoom by engine.zoom.collectAsState()
+    val motion = remember { MotionMonitor(appContext) }
+    /** Ruta del archivo que está escribiendo la app de cámara del teléfono (sobrevive a la recreación). */
+    var systemShotPath by rememberSaveable { mutableStateOf<String?>(null) }
+    var systemCamAutoLaunched by rememberSaveable { mutableStateOf(false) }
     val tooDark = quality.tooDark
     val hasFlash by engine.hasFlash.collectAsState()
     val ready by engine.ready.collectAsState()
@@ -481,6 +493,10 @@ private fun CameraContent(
             idFront = null
         }
     }
+    // Sensores de movimiento solo con la pantalla visible (nada en segundo plano).
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { motion.start() }
+    LifecycleEventEffect(Lifecycle.Event.ON_PAUSE) { motion.stop() }
+    DisposableEffect(motion) { onDispose { motion.stop() } }
     LaunchedEffect(flash) { engine.setFlash(flash) }
     // Con capturas mejorándose en segundo plano, el análisis en vivo cede CPU (la UI sigue fluida en gama baja).
     LaunchedEffect(pendingJobs) { engine.backgroundBusy = pendingJobs > 0 }
@@ -542,6 +558,9 @@ private fun CameraContent(
      */
     fun burstWanted(): Boolean {
         if (flashWillFire()) return false
+        // Con la extensión del fabricante (AUTO/HDR) el ISP ya fusiona varios cuadros: en automático no se añade
+        // la ráfaga propia (sería más lenta y no mejoraría la nitidez).
+        if (lowLight == LowLightSetting.AUTO && engine.extensionActive) return false
         val torchGlareOnly = hasFlash && flash == FlashSetting.TORCH && !quality.tooDark
         return when (lowLight) {
             LowLightSetting.ON -> !torchGlareOnly || quality.tooDark
@@ -550,17 +569,54 @@ private fun CameraContent(
         }
     }
 
+    /**
+     * Flujo normal de una captura (cámara propia o app de cámara del teléfono) según el modo [m]. [shots]: una foto
+     * o una ráfaga (se fusiona en el trabajo de fondo). [guide]: marco del DNI normalizado (null = sin marco).
+     */
+    fun processShots(m: ScanMode, shots: List<File>, guide: RectF?) {
+        // La fusión (si hay ráfaga) corre en el trabajo de fondo, antes del flujo normal de cada modo.
+        suspend fun shotFile(): File = processor.mergeBurst(shots, removeGlare = true)
+        when (m) {
+            ScanMode.BOOK -> launchJob { processor.addBook(ensureDoc(m), shotFile(), extraEdits(m)) }
+            ScanMode.ID_CARD -> {
+                val front = idFront
+                val filter = cardFilter()
+                if (front == null) {
+                    idFront = captureScope.async { runCatching { processor.cropCardSide(shotFile(), guide, filter) } }
+                } else {
+                    idFront = null
+                    launchJob {
+                        val f = front.await().getOrThrow()
+                        var b: Bitmap? = null
+                        try {
+                            b = processor.cropCardSide(shotFile(), guide, filter)
+                            processor.addIdCard(ensureDoc(m), f, b, extraEdits(m))
+                        } finally {
+                            f.recycle(); b?.recycle()
+                        }
+                    }
+                }
+            }
+            else -> launchJob { processor.addStandard(ensureDoc(m), shotFile(), m) }
+        }
+    }
+
     fun captureNow(auto: Boolean = false) {
         if (capturing || finishing || !ready) return
         capturing = true
         val m = mode
         val guide = if (m == ScanMode.ID_CARD) guideNormalized() else null
-        val focusTarget = if (auto) quadCenterInView() else null
+        // Enfoque + medición en el centro del documento (o de la vista) antes de CADA foto, manual o automática:
+        // el texto pequeño sale nítido. Si ya está enfocado ahí, no se repite (disparo rápido).
+        val focusTarget = quadCenterInView()
+            ?: if (viewSize.width > 0) Offset(viewSize.width / 2f, viewSize.height / 2f) else null
         val burst = burstWanted()
         val glareMode = quality.glare && !quality.tooDark
         workScope.launch {
-            // Autocaptura: enfocar en el documento y esperar al AF (las cámaras baratas "cazan" el foco).
-            if (focusTarget != null) engine.focusAndWait(previewView, focusTarget.x, focusTarget.y)
+            // Sin fotos movidas: esperar a que el teléfono esté quieto ~300 ms (autocaptura: hasta 1.5 s; manual:
+            // hasta 0.6 s, el propio toque mueve el móvil). Luego enfocar en el documento y esperar al AF.
+            motion.awaitStill(stillMs = 300L, timeoutMs = if (auto) 1_500L else 600L)
+            if (focusTarget != null) engine.focusBeforeCapture(previewView, focusTarget.x, focusTarget.y)
             haptics.performHapticFeedback(HapticFeedbackType.LongPress)
             animScope.launch {
                 shutterFlash.snapTo(0.8f)
@@ -593,31 +649,7 @@ private fun CameraContent(
             capturing = false
             capturedThisSession++
             engine.resetDetection()
-            // La fusión (si hay ráfaga) corre en el trabajo de fondo, antes del flujo normal de cada modo.
-            suspend fun shotFile(): File = processor.mergeBurst(shots, removeGlare = true)
-            when (m) {
-                ScanMode.BOOK -> launchJob { processor.addBook(ensureDoc(m), shotFile(), extraEdits(m)) }
-                ScanMode.ID_CARD -> {
-                    val front = idFront
-                    val filter = cardFilter()
-                    if (front == null) {
-                        idFront = captureScope.async { runCatching { processor.cropCardSide(shotFile(), guide, filter) } }
-                    } else {
-                        idFront = null
-                        launchJob {
-                            val f = front.await().getOrThrow()
-                            var b: Bitmap? = null
-                            try {
-                                b = processor.cropCardSide(shotFile(), guide, filter)
-                                processor.addIdCard(ensureDoc(m), f, b, extraEdits(m))
-                            } finally {
-                                f.recycle(); b?.recycle()
-                            }
-                        }
-                    }
-                }
-                else -> launchJob { processor.addStandard(ensureDoc(m), shotFile(), m) }
-            }
+            processShots(m, shots, guide)
         }
     }
 
@@ -721,6 +753,54 @@ private fun CameraContent(
         }
     }
 
+    // ---------------------------------------------------------------- cámara del teléfono
+    // La app de cámara del sistema (en Samsung: multi-cuadro, HDR, reducción de ruido y nitidez, 12-200 MP) escribe
+    // la foto en un archivo de la app (FileProvider); al volver se procesa como una captura propia del modo actual.
+    // La ruta se guarda en rememberSaveable: si el sistema recrea la actividad (o mata el proceso) mientras la
+    // cámara está abierta, el resultado se sigue procesando.
+    val systemCameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
+        val path = systemShotPath
+        systemShotPath = null
+        val file = path?.let { File(it) }
+        if (file == null) return@rememberLauncherForActivityResult
+        if (!ok || !file.exists() || file.length() == 0L) {
+            file.delete()
+            return@rememberLauncherForActivityResult
+        }
+        capturedThisSession++
+        val m = mode
+        // Sin marco del DNI: la foto del sistema no tiene el encuadre de nuestra vista previa.
+        processShots(m, listOf(file), null)
+    }
+
+    fun launchSystemCamera() {
+        if (systemShotPath != null || finishing) return
+        val file = container.documents.newCaptureFile()
+        val uri = try {
+            androidx.core.content.FileProvider.getUriForFile(appContext, "${appContext.packageName}.fileprovider", file)
+        } catch (t: Throwable) {
+            toast("No se pudo preparar la foto")
+            return
+        }
+        systemShotPath = file.absolutePath
+        try {
+            systemCameraLauncher.launch(uri)
+        } catch (t: Throwable) {
+            systemShotPath = null
+            file.delete()
+            toast("No hay una app de cámara disponible")
+        }
+    }
+
+    // "Usar la cámara del teléfono por defecto": se abre una vez al entrar (al volver, se queda aquí para
+    // seguir con la cámara propia, repetir con el botón o terminar).
+    LaunchedEffect(settings.useSystemCamera) {
+        if (settings.useSystemCamera && !systemCamAutoLaunched && systemShotPath == null) {
+            systemCamAutoLaunched = true
+            launchSystemCamera()
+        }
+    }
+
     BackHandler { requestClose() }
 
     // ---------------------------------------------------------------- autocaptura
@@ -768,11 +848,20 @@ private fun CameraContent(
         mode != ScanMode.PHOTO && quality.glare && lowLight != LowLightSetting.OFF && burstWanted() -> "Reflejo · se corregirá con varias fotos (anti-reflejos)"
         mode != ScanMode.PHOTO && quality.glare -> "Reflejo · inclina un poco el móvil"
         holdingStill -> "No te muevas… capturando"
+        zoom.ratio > 1.05f -> "Zoom ${zoomLabel(zoom.ratio)} · si puedes, acércate: el zoom digital pierde nitidez"
         else -> modeHint(mode)
     }
 
     val hintArea: @Composable () -> Unit = {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            if (zoom.supported && ready) {
+                ZoomSelector(
+                    ratio = zoom.ratio,
+                    max = zoom.max,
+                    onSelect = { engine.setZoom(it) },
+                )
+                Spacer(Modifier.height(8.dp))
+            }
             AnimatedContent(
                 targetState = hint,
                 transitionSpec = { (fadeIn(tween(220)) + slideInVertically { it / 3 }) togetherWith fadeOut(tween(150)) },
@@ -864,6 +953,24 @@ private fun CameraContent(
                             .fillMaxSize()
                             .onSizeChanged { viewSize = it }
                             .pointerInput(Unit) {
+                                // Pellizco = zoom. Se procesa en la pasada inicial y consume los eventos con 2+ dedos
+                                // para que no cuenten como toque (enfoque) ni como deslizamiento (cambio de modo).
+                                awaitEachGesture {
+                                    awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                                    do {
+                                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                                        val pressed = event.changes.count { it.pressed }
+                                        if (pressed >= 2) {
+                                            val factor = event.calculateZoom()
+                                            if (factor != 1f && factor.isFinite()) {
+                                                engine.setZoom(engine.zoom.value.ratio * factor)
+                                            }
+                                            event.changes.forEach { it.consume() }
+                                        }
+                                    } while (event.changes.any { it.pressed })
+                                }
+                            }
+                            .pointerInput(Unit) {
                                 detectTapGestures { off ->
                                     engine.focusAt(previewView, off.x, off.y)
                                     focusPoint = off
@@ -923,49 +1030,67 @@ private fun CameraContent(
         }
 
         // ------------------------------------------------ barra superior (sobre la vista previa)
-        Row(
+        Column(
             Modifier
                 .fillMaxWidth()
                 .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.55f), Color.Transparent)))
                 .statusBarsPadding()
                 .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
         ) {
-            RoundIconButton(Icons.Filled.Close, "Cerrar", onClick = { requestClose() })
-            Spacer(Modifier.weight(1f))
-            LowLightToggle(
-                setting = lowLight,
-                active = burstWanted(),
-                onClick = {
-                    lowLight = LowLightSetting.entries[(lowLight.ordinal + 1) % LowLightSetting.entries.size]
-                    toast(lowLight.label)
-                },
-            )
-            Spacer(Modifier.width(8.dp))
-            AutoCaptureToggle(
-                enabled = settings.autoCapture,
-                visible = mode != ScanMode.PHOTO,
-                onToggle = {
-                    val newValue = !settings.autoCapture
-                    workScope.launch { container.settings.update { it.copy(autoCapture = newValue) } }
-                    toast(if (newValue) "Captura automática activada" else "Captura automática desactivada")
-                },
-            )
-            Spacer(Modifier.width(8.dp))
-            if (hasFlash) {
-                val icon = when (flash) {
-                    FlashSetting.OFF -> Icons.Filled.FlashOff
-                    FlashSetting.AUTO -> Icons.Filled.FlashAuto
-                    FlashSetting.ON -> Icons.Filled.FlashOn
-                    FlashSetting.TORCH -> Icons.Filled.FlashlightOn
-                }
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RoundIconButton(Icons.Filled.Close, "Cerrar", onClick = { requestClose() })
+                Spacer(Modifier.weight(1f))
                 RoundIconButton(
-                    icon, flash.label,
-                    highlighted = flash != FlashSetting.OFF,
+                    Icons.Filled.PhotoCamera, "Cámara del teléfono",
+                    onClick = { launchSystemCamera() },
+                )
+                Spacer(Modifier.width(8.dp))
+                LowLightToggle(
+                    setting = lowLight,
+                    active = burstWanted(),
                     onClick = {
-                        flash = FlashSetting.entries[(flash.ordinal + 1) % FlashSetting.entries.size]
-                        toast(flash.label)
+                        lowLight = LowLightSetting.entries[(lowLight.ordinal + 1) % LowLightSetting.entries.size]
+                        toast(lowLight.label)
                     },
+                )
+                Spacer(Modifier.width(8.dp))
+                AutoCaptureToggle(
+                    enabled = settings.autoCapture,
+                    visible = mode != ScanMode.PHOTO,
+                    onToggle = {
+                        val newValue = !settings.autoCapture
+                        workScope.launch { container.settings.update { it.copy(autoCapture = newValue) } }
+                        toast(if (newValue) "Captura automática activada" else "Captura automática desactivada")
+                    },
+                )
+                Spacer(Modifier.width(8.dp))
+                if (hasFlash) {
+                    val icon = when (flash) {
+                        FlashSetting.OFF -> Icons.Filled.FlashOff
+                        FlashSetting.AUTO -> Icons.Filled.FlashAuto
+                        FlashSetting.ON -> Icons.Filled.FlashOn
+                        FlashSetting.TORCH -> Icons.Filled.FlashlightOn
+                    }
+                    RoundIconButton(
+                        icon, flash.label,
+                        highlighted = flash != FlashSetting.OFF,
+                        onClick = {
+                            flash = FlashSetting.entries[(flash.ordinal + 1) % FlashSetting.entries.size]
+                            toast(flash.label)
+                        },
+                    )
+                }
+            }
+            // Resolución REAL de la foto (tócala para ver detalles): si aquí no pone ~12 MP en un equipo de gama alta,
+            // la foto sale pequeña y conviene usar la cámara del teléfono.
+            captureInfo?.let { info ->
+                ResolutionChip(
+                    info,
+                    onClick = { Toast.makeText(appContext, info.details, Toast.LENGTH_LONG).show() },
+                    modifier = Modifier.padding(top = 6.dp),
                 )
             }
         }
@@ -981,7 +1106,7 @@ private fun CameraContent(
                 Text(cameraError ?: "", color = Color.White, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "Puedes importar imágenes desde la galería.",
+                    "Puedes usar la cámara del teléfono o importar imágenes desde la galería.",
                     color = Color.White.copy(alpha = 0.8f),
                     style = MaterialTheme.typography.bodyMedium,
                     textAlign = TextAlign.Center,
@@ -1069,6 +1194,55 @@ private fun modeIcon(mode: ScanMode): ImageVector = when (mode) {
 // =================================================================================================
 // Componentes privados
 // =================================================================================================
+
+private fun zoomLabel(r: Float): String =
+    if (abs(r - r.toInt()) < 0.05f) "${r.toInt()}x" else "%.1fx".format(r)
+
+/** Chip discreto con la resolución REAL de la foto ("12 MP · HDR"). */
+@Composable
+private fun ResolutionChip(info: CaptureInfo, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val low = info.megapixels < 7.5 && (info.maxWidth ?: 0).toLong() * (info.maxHeight ?: 0) > 8_000_000L
+    Row(
+        modifier
+            .clip(RoundedCornerShape(50))
+            .background(if (low) Color(0xFFFFB547).copy(alpha = 0.92f) else Color.Black.copy(alpha = 0.45f))
+            .clickable(onClickLabel = "Ver detalles de la resolución", onClick = onClick)
+            .semantics { contentDescription = "Resolución de la foto: ${info.width} por ${info.height}" }
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Filled.HighQuality, null, tint = if (low) Color.Black else Color.White, modifier = Modifier.size(14.dp))
+        Spacer(Modifier.width(4.dp))
+        Text(info.chipLabel, color = if (low) Color.Black else Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+/** Botones de zoom 1x / 2x (y el valor actual si se pellizcó a otro). */
+@Composable
+private fun ZoomSelector(ratio: Float, max: Float, onSelect: (Float) -> Unit) {
+    val presets = listOf(1f, 2f).filter { it <= max + 0.01f }
+    Row(
+        Modifier.clip(RoundedCornerShape(50)).background(Color.Black.copy(alpha = 0.45f)).padding(3.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        presets.forEach { p ->
+            val nearest = presets.minByOrNull { abs(it - ratio) } == p
+            val selected = nearest && abs(ratio - p) < 0.05f
+            val label = if (nearest && !selected) zoomLabel(ratio) else zoomLabel(p)
+            Box(
+                Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(if (nearest) Color.White.copy(alpha = 0.22f) else Color.Transparent)
+                    .clickable(role = Role.Button, onClickLabel = "Zoom ${zoomLabel(p)}") { onSelect(p) },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(label, color = if (nearest) Color(0xFFFFD54F) else Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
 
 @Composable
 private fun ModeSelector(selected: ScanMode, onSelect: (ScanMode) -> Unit) {
