@@ -5,13 +5,13 @@ Escáner de documentos para Android con mejora de imagen avanzada, OCR sin inter
 ## Funciones
 - **Cámara inteligente**: detección de bordes en vivo, autocaptura, multipágina, flash, enfoque al tocar.
 - **Modos**: Documento, Libro (2 páginas → separadas), DNI/Tarjeta (anverso + reverso en una hoja A4 a tamaño real), Recibo, Pizarra, Foto.
-- **Mejora "mágica"**: elimina sombras, normaliza la iluminación, blanquea el papel, realza la tinta; Mágico Pro para cámaras de baja calidad (des-ruido + ampliación); B/N adaptativo, Ahorro de tinta, Grises, Vívido, Pizarra.
+- **3 filtros**: *Blanco y negro* (texto negro nítido sobre blanco puro, sin sombras ni motas; quita la cuadrícula de color clara de los cuadernos conservando la escritura), *Texto resaltado* (por defecto: sin sombras, papel blanco neutro, tinta reforzada con su color; des-ruido, super-resolución y gamma para poca luz automáticos) y *Color original* (colores fieles, solo recorte y un toque de nitidez). Los filtros antiguos de documentos guardados se siguen renderizando y se muestran como su equivalente.
 - **Recorte preciso**: esquinas arrastrables con lupa, perspectiva corregida con relación de aspecto real, enderezado automático del texto.
 - **Limpieza**: quita ruido y rayas automáticamente; borrador manual (reparación inteligente o pintar blanco) con deshacer/rehacer.
 - **OCR** en el dispositivo (ML Kit) y **PDF con texto buscable**, contraseña opcional.
 - **Texto en el PDF** (Ajustes → "Texto en el PDF", también en Exportar): *Solo imagen*, *Buscable* (capa invisible palabra a palabra), *Buscable + texto reconocido* (páginas legibles con el texto, tras cada página o al final) y *Solo texto*. Fuente Liberation Sans incrustada (acentos, ñ, ¿¡, €). Las correcciones hechas en la pantalla OCR se usan en el PDF, la búsqueda y las exportaciones.
 - **Exportar texto** como **.txt** (UTF-8) o **Word (.docx)**, desde Exportar o desde la pantalla OCR.
-- Filtro por defecto **Auto inteligente**: clasifica cada página (texto, color, foto, recibo, pizarra, poca luz, foto de pantalla) y aplica la mejora adecuada.
+- **Detección robusta**: segmentación por color (Cb/Cr) insensible a sombras duras y madera clara, cuadriláteros envolventes que recuperan esquinas tapadas o redondeadas, cuadernos abiertos (ambas páginas) y documentos que se salen del encuadre (el lado queda sobre el borde de la foto).
 - **Exportación**: PDF (A4/Carta/Oficio/Auto), imágenes JPG/PNG/WEBP en alta definición.
 - **Compresor de PDF** integrado (niveles o tamaño objetivo), también desde "Compartir/Abrir con".
 - **Optimizado para gama baja**: el trabajo se escala según la RAM y núcleos del dispositivo.

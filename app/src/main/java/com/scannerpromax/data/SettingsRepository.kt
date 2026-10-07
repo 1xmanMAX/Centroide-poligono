@@ -65,7 +65,8 @@ class SettingsRepository(private val context: Context) {
                 null -> d.pdfTextMode
             }
         return AppSettings(
-            defaultFilter = enumOr(this[Keys.DEFAULT_FILTER], d.defaultFilter),
+            // Sólo hay 3 filtros en la interfaz: un ajuste antiguo (Auto, Mágico Pro, Grises...) se mapea al visible
+            defaultFilter = enumOr(this[Keys.DEFAULT_FILTER], d.defaultFilter).uiFilter,
             autoCapture = this[Keys.AUTO_CAPTURE] ?: d.autoCapture,
             autoRemoveLines = this[Keys.AUTO_REMOVE_LINES] ?: d.autoRemoveLines,
             pdfPageSize = enumOr(this[Keys.PDF_PAGE_SIZE], d.pdfPageSize),
@@ -107,7 +108,8 @@ class SettingsRepository(private val context: Context) {
 }
 
 data class AppSettings(
-    val defaultFilter: FilterType = FilterType.AUTO,
+    /** Filtro de las páginas nuevas: uno de [FilterType.visible] ("Texto resaltado" por defecto). */
+    val defaultFilter: FilterType = FilterType.DEFAULT,
     val autoCapture: Boolean = true,
     val autoRemoveLines: Boolean = false,
     val pdfPageSize: PageSize = PageSize.AUTO,

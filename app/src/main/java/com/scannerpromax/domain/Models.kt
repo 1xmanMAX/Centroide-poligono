@@ -13,20 +13,47 @@ enum class ScanMode(val label: String) {
     PHOTO("Foto"),
 }
 
-/** Filtros de mejora. Cada uno lo implementa [com.scannerpromax.imaging.ImageEnhancer]. */
+/**
+ * Filtros de mejora. Cada uno lo implementa [com.scannerpromax.imaging.ImageEnhancer].
+ *
+ * La interfaz SÓLO ofrece los tres de [FilterType.Companion.visible] (Blanco y negro, Texto resaltado, Color
+ * original). El resto se conserva porque los documentos guardados los usan (quitarlos rompería la
+ * deserialización) y siguen renderizándose con su filtro; en la interfaz se muestran como su equivalente
+ * visible ([uiFilter]).
+ */
 @Serializable
-enum class FilterType(val label: String) {
+enum class FilterType(val label: String, val description: String = "") {
     AUTO("Auto inteligente"),   // clasifica el contenido (texto, color, foto, recibo, pizarra, poca luz, pantalla) y elige el procesamiento
-    ORIGINAL("Original"),
-    MAGIC("Mágico"),            // color limpio: fondo blanco, sin sombras, tinta saturada y nítida
+    ORIGINAL("Color original", "Colores fieles a la foto: solo recorte, perspectiva y un toque de nitidez"),
+    MAGIC("Texto resaltado", "Sin sombras, fondo blanco y tinta nítida conservando sus colores"),
     MAGIC_PRO("Mágico Pro"),    // MAGIC + super-resolución ligera + des-ruido fuerte (fotos de cámaras malas)
     NO_SHADOW("Sin sombras"),
     GRAYSCALE("Grises"),
-    BLACK_WHITE("B/N"),         // binarización adaptativa (Sauvola-like) para texto
+    BLACK_WHITE("Blanco y negro", "Texto negro nítido sobre blanco puro, sin manchas ni cuadrícula de color"),
     ECO_INK("Ahorro tinta"),    // B/N fino, fondo puro blanco
     LIGHTEN("Aclarar"),
     VIVID("Vívido"),            // fotos / documentos a color
     WHITEBOARD("Pizarra"),
+    ;
+
+    /** Filtro visible que representa a este en la interfaz (los antiguos se muestran como su equivalente). */
+    val uiFilter: FilterType
+        get() = when (this) {
+            BLACK_WHITE, GRAYSCALE, ECO_INK -> BLACK_WHITE
+            ORIGINAL, VIVID -> ORIGINAL
+            AUTO, MAGIC, MAGIC_PRO, NO_SHADOW, LIGHTEN, WHITEBOARD -> MAGIC
+        }
+
+    /** true si la interfaz lo ofrece. */
+    val isVisible: Boolean get() = this in visible
+
+    companion object {
+        /** Los únicos filtros que ofrece la interfaz, en este orden. */
+        val visible: List<FilterType> = listOf(BLACK_WHITE, MAGIC, ORIGINAL)
+
+        /** Filtro por defecto de los documentos nuevos ("Texto resaltado"). */
+        val DEFAULT: FilterType = MAGIC
+    }
 }
 
 /** Punto en coordenadas de píxel de la imagen ORIGINAL. */

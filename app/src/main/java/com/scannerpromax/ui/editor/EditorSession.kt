@@ -357,7 +357,7 @@ internal class EditorSession(
     fun regenerateThumbs() {
         val e = edits
         val key = Triple(e.quad, e.rotation, source?.generationId)
-        if (key == thumbsKey && filterThumbs.size == FilterType.entries.size) return
+        if (key == thumbsKey && FilterType.visible.all { filterThumbs.containsKey(it) }) return
         thumbsKey = key
         thumbsJob?.cancel()
         thumbsJob = scope.launch {
@@ -381,8 +381,9 @@ internal class EditorSession(
                 null
             } ?: return@launch
             try {
-                // Primero el filtro actual (lo que el usuario mira), luego el resto.
-                val order = listOf(e.filter) + FilterType.entries.filter { it != e.filter }
+                // Sólo los 3 filtros visibles; primero el actual (lo que el usuario mira), luego el resto.
+                val current = e.filter.uiFilter
+                val order = listOf(current) + FilterType.visible.filter { it != current }
                 for (f in order) {
                     ensureActive()
                     // Cede el paso: mientras haya una vista previa pendiente no se compite por la CPU ni por [work].

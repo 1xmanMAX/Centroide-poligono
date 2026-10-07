@@ -122,7 +122,7 @@ fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
                 ValueRow(
                     icon = Icons.Rounded.AutoFixHigh,
                     title = "Filtro por defecto",
-                    value = settings.defaultFilter.label,
+                    value = settings.defaultFilter.uiFilter.label,
                     onClick = { picker = Picker.FILTER },
                 )
                 GroupDivider()
@@ -211,10 +211,10 @@ fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
     when (picker) {
         Picker.FILTER -> ChoiceSheet(
             title = "Filtro por defecto",
-            options = FilterType.entries,
-            selected = settings.defaultFilter,
+            options = FilterType.visible,
+            selected = settings.defaultFilter.uiFilter,
             label = { it.label },
-            description = { filterDescription(it) },
+            description = { it.description },
             onSelect = { v -> update { it.copy(defaultFilter = v) } },
             onDismiss = { picker = null },
         )
@@ -461,20 +461,6 @@ private fun <T> ChoiceSheet(
             }
         }
     }
-}
-
-private fun filterDescription(f: FilterType): String = when (f) {
-    FilterType.AUTO -> "Detecta el tipo de documento y aplica la mejor mejora (recomendado)"
-    FilterType.ORIGINAL -> "Sin cambios de color, solo recorte"
-    FilterType.MAGIC -> "Fondo blanco, sin sombras y tinta nítida"
-    FilterType.MAGIC_PRO -> "Máxima mejora: des-ruido fuerte y más detalle para cámaras modestas"
-    FilterType.NO_SHADOW -> "Elimina sombras conservando los colores"
-    FilterType.GRAYSCALE -> "Escala de grises limpia"
-    FilterType.BLACK_WHITE -> "Blanco y negro de alto contraste para texto"
-    FilterType.ECO_INK -> "B/N fino con fondo puro: ahorra tinta al imprimir"
-    FilterType.LIGHTEN -> "Aclara fotos oscuras o con poca luz"
-    FilterType.VIVID -> "Colores intensos para fotos y documentos a color"
-    FilterType.WHITEBOARD -> "Pizarras: fondo blanco y trazos saturados sin reflejos"
 }
 
 private fun pageSizeDescription(p: PageSize): String = when (p) {

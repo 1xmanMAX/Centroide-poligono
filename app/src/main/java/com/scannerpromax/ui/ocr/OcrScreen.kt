@@ -650,7 +650,7 @@ fun OcrScreen(
                         when {
                             wholeDoc && docProgress != null -> "Reconociendo el documento…"
                             running -> "Reconociendo…"
-                            else -> "No se encontró texto. Prueba el filtro B/N o Mágico Pro y vuelve a reconocer."
+                            else -> "No se encontró texto. Prueba el filtro «Blanco y negro» o «Texto resaltado» y vuelve a reconocer."
                         },
                     )
                 },

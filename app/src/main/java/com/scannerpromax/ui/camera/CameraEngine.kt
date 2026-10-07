@@ -219,7 +219,10 @@ internal class CameraEngine(
                 val plane = image.planes[0]
                 val rotation = image.imageInfo.rotationDegrees
                 val crop = rotatedCrop(image.cropRect, image.width, image.height, rotation)
-                val det = detector.detectLive(plane.buffer, image.width, image.height, plane.rowStride, rotation)
+                // Planos de croma U/V: la segmentación por color no se deja engañar por sombras ni madera clara.
+                val u = image.planes[1]; val v = image.planes[2]
+                val det = detector.detectLive(plane.buffer, image.width, image.height, plane.rowStride, rotation,
+                    u.buffer, v.buffer, u.rowStride, u.pixelStride)
                 _detection.value = det?.let {
                     LiveDetection(it.quad, it.confidence, it.frameWidth, it.frameHeight, now, crop[0], crop[1], crop[2], crop[3])
                 }

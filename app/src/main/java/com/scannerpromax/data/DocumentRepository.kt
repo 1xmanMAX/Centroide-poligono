@@ -693,7 +693,7 @@ class DocumentRepository(
             ScanMode.ID_CARD -> PageEdits(quad = quad, filter = docFilter ?: FilterType.MAGIC, autoDeskew = false)
             ScanMode.DOCUMENT, ScanMode.RECEIPT, ScanMode.BOOK -> PageEdits(
                 quad = quad,
-                filter = docFilter ?: FilterType.AUTO,
+                filter = docFilter ?: FilterType.DEFAULT,
                 autoRemoveLines = defaultAutoRemoveLines,
             )
         }

@@ -587,7 +587,7 @@ fun ReviewScreen(
 
     if (showApplyAll) {
         ApplyAllDialog(
-            initial = order.firstOrNull()?.edits?.filter ?: FilterType.MAGIC,
+            initial = order.firstOrNull()?.edits?.filter?.uiFilter ?: FilterType.DEFAULT,
             onDismiss = { showApplyAll = false },
             onApply = { f, lines -> showApplyAll = false; applyToAll(f, lines) },
         )
@@ -625,20 +625,27 @@ private fun ApplyAllDialog(initial: FilterType, onDismiss: () -> Unit, onApply: 
         title = { Text("Filtro para todas las páginas") },
         text = {
             Column {
-                LazyColumn(Modifier.heightIn(max = 320.dp)) {
-                    listItems(FilterType.entries, key = { it.name }) { f ->
+                Column {
+                    for (f in FilterType.visible) {
                         Row(
                             Modifier
                                 .fillMaxWidth()
-                                .heightIn(min = 48.dp)
+                                .heightIn(min = 56.dp)
                                 .clip(RoundedCornerShape(12.dp))
                                 .selectable(selected = f == selected, role = Role.RadioButton) { selected = f }
-                                .padding(horizontal = 4.dp),
+                                .padding(horizontal = 4.dp, vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             RadioButton(selected = f == selected, onClick = null)
                             Spacer(Modifier.width(10.dp))
-                            Text(f.label, style = MaterialTheme.typography.bodyLarge)
+                            Column {
+                                Text(f.label, style = MaterialTheme.typography.bodyLarge)
+                                Text(
+                                    f.description,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                         }
                     }
                 }
@@ -924,7 +931,7 @@ private fun PageCard(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                page.edits.filter.label,
+                page.edits.filter.uiFilter.label,
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.weight(1f),

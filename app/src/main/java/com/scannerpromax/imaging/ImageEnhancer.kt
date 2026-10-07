@@ -160,8 +160,8 @@ object ImageEnhancer {
     private fun applyFilter(src: Mat, filter: FilterType, opt: Options, analysis: ContentAnalysis?): Mat =
         when (filter) {
             FilterType.AUTO -> auto(src, opt, analysis ?: analyzeMat(src))
-            FilterType.ORIGINAL -> src.clone()
-            FilterType.MAGIC -> magic(src, opt, pro = false)
+            FilterType.ORIGINAL -> original(src)
+            FilterType.MAGIC -> highlight(src, opt)
             FilterType.MAGIC_PRO -> magic(src, opt, pro = true)
             FilterType.NO_SHADOW -> noShadow(src, opt)
             FilterType.GRAYSCALE -> grayscale(src, opt)
@@ -424,6 +424,90 @@ object ImageEnhancer {
     }
 
     /**
+     * "Texto resaltado" (MAGIC): el modo mágico con lo mejor de Mágico Pro y Auto decidido solo:
+     *  - anti-muaré si es una foto de pantalla (clasificación barata a 256 px);
+     *  - des-ruido con filtro guiado, fuerte si el papel es ruidoso o hay poca luz;
+     *  - super-resolución x2 cuando la fuente es pequeña (sólo render final, con presupuesto por gama);
+     *  - fondo sin sombras (incluidas sombras duras de mano/celular), gamma adaptativa con poca luz;
+     *  - papel NEUTRO: los píxeles claros poco saturados (tinte de la sombra, papel azulado) pasan a blanco,
+     *    la tinta de color (oscura o saturada) conserva su color reforzado.
+     */
+    private fun highlight(rgb: Mat, opt: Options): Mat = MatBag().use { bag ->
+        var base = rgb
+        // Anti-muaré sólo si hay papel suficiente para clasificar y el análisis lo detecta
+        val moire = runCatching { analyzeMat(rgb).moire }.getOrDefault(false)
+        if (moire) base = bag.add(rgb.clone().also { descreen(it) })
+        val (rel0, lvl) = Cv.estimatePaperNoiseLevel(base)
+        val darkScene = lvl < 110
+        val strong = rel0 > 5 || darkScene
+        var den = bag.add(denoiseFull(base, rel0, opt, strong = strong, absScale = lvl))
+        var superRes = false
+        if (!opt.fast && max(den.cols(), den.rows()) < SR_MAX_SIDE &&
+            den.total() <= (if (opt.lowEnd) 900_000L else 2_000_000L) && den.total() * 4 <= opt.maxPixels.toLong()
+        ) {
+            den = bag.add(SuperResolution.upscale2x(den, lowEnd = !opt.highEnd, maxPixels = opt.maxPixels))
+            superRes = true
+        }
+        val bg = bag.add(background(den, opt))
+        val bgLevel = Core.mean(bg).`val`.let { (it[0] + it[1] + it[2]) / 3.0 }
+        val n = Mat()
+        if (bgLevel < 80) Cv.divideByBackgroundSmooth(den, bg, n, if (opt.fast) 0.0 else 0.7)
+        else Cv.divideByBackground(den, bg, n)
+        val g = bag.add(Cv.gray(n))
+        val hist = Cv.histogram(g)
+        val (rel, pm) = Cv.paperStats(hist)
+        val black = min(Cv.percentile(hist, 0.005), 110) * 0.9
+        val white = (pm - 2.5 * rel).coerceIn(170.0, 250.0)
+        val gamma = when {
+            bgLevel < 90 -> 1.5
+            strong -> 1.4
+            else -> 1.32
+        }
+        Cv.applyLut(n, Cv.levelsLut(black, white, gamma), n)
+        neutralizePaper(n)
+        boostSaturation(n, 1.35, lowCut = true)
+        val long = max(n.cols(), n.rows())
+        val k = if (superRes) 0.6 else 1.0
+        Cv.unsharp(n, max(0.8, long / 2500.0), 0.5 * k)
+        edgeAwareSharpen(n, max(1.0, long / 1800.0), 0.55 * k, threshold = max(6.0, rel * 2.5))
+        n
+    }
+
+    /**
+     * Papel neutro (in-place, RGB ya normalizado): la crominancia (YCrCb, más barato que Lab a 8 MP) se reduce
+     * según la luminancia: intacta por debajo de Y ≈ 180 (tinta, sellos, marcadores) y nula a partir de 235.
+     * El tinte azulado que deja una sombra con luz del cielo o el color propio de un papel claro desaparecen
+     * sin apagar la tinta de color.
+     */
+    private fun neutralizePaper(rgb: Mat) = MatBag().use { bag ->
+        val ycc = bag.mat(); Imgproc.cvtColor(rgb, ycc, Imgproc.COLOR_RGB2YCrCb)
+        val ch = ArrayList<Mat>(3); Core.split(ycc, ch)
+        val wLut = Cv.lut { v -> ((235.0 - v) / 55.0).coerceIn(0.0, 1.0) * 255.0 }
+        val w8 = bag.mat(); Core.LUT(ch[0], wLut, w8); wLut.release()
+        val wf = bag.mat(); w8.convertTo(wf, CvType.CV_32F, 1.0 / 255.0)
+        val cf = bag.mat()
+        for (i in 1..2) {
+            ch[i].convertTo(cf, CvType.CV_32F, 1.0, -128.0)
+            Core.multiply(cf, wf, cf)
+            cf.convertTo(ch[i], CvType.CV_8U, 1.0, 128.0)
+        }
+        Core.merge(ch, ycc)
+        for (m in ch) m.release()
+        Imgproc.cvtColor(ycc, rgb, Imgproc.COLOR_YCrCb2RGB)
+    }
+
+    /**
+     * "Color original": colores fieles a la foto (sin blanquear ni saturar), sólo una máscara de enfoque
+     * suave con umbral (el grano del papel y el ruido no se refuerzan).
+     */
+    private fun original(rgb: Mat): Mat {
+        val out = rgb.clone()
+        val long = max(out.cols(), out.rows())
+        edgeAwareSharpen(out, max(0.8, long / 2500.0), 0.3, threshold = 4.0)
+        return out
+    }
+
+    /**
      * Recibo térmico desvaído: gris, fondo normalizado, estiramiento fuerte usando la tinta más oscura como
      * negro, contraste LOCAL (CLAHE) y nuevo punto blanco medido tras el CLAHE (el grano del papel no vuelve).
      */
@@ -597,13 +681,30 @@ object ImageEnhancer {
         val bin = Mat()
         Core.compare(n, tFull, bin, Core.CMP_GT) // 255 = papel
         if (!eco) {
+            // Histéresis: los trazos tenues (lápiz, bolígrafo gastado) quedan cortados por el umbral; los píxeles
+            // "casi tinta" (umbral + ~2.5σ del papel) conectados a tinta segura se recuperan por dilatación
+            // geodésica. El papel aislado (ruido) no está conectado y no entra.
+            val strong = bag.mat(); Core.bitwise_not(bin, strong)
+            val tw = bag.mat(); Core.add(tFull, Scalar(max(8.0, 2.5 * relN)), tw)
+            val weak = bag.mat(); Core.compare(n, tw, weak, Core.CMP_LE)
+            val k3 = Cv.kernel(Imgproc.MORPH_RECT, 3)
+            repeat(4) {
+                Imgproc.dilate(strong, strong, k3)
+                Core.bitwise_and(strong, weak, strong)
+            }
+            Core.bitwise_not(strong, bin)
+        }
+        if (!eco) {
             // Regiones oscuras grandes (fotos, bloques) donde Sauvola falla por baja varianza
             val dark = bag.mat()
             Core.compare(n, Scalar(pm * 0.55), dark, Core.CMP_LT)
             bin.setTo(Scalar(0.0), dark)
         }
-        // Motas mínimas
-        val minArea = max(2.0, (long / 1000.0).pow(2))
+        // Cuadrícula / renglones impresos en color claro (cuadernos): fuera, conservando la escritura
+        if (rgb.channels() >= 3) removeColoredRuling(rgb, bg, n, bin, pm, bag)
+        // Motas mínimas (algo mayores que un píxel suelto: restos de grano y de la cuadrícula; un punto de
+        // bolígrafo o de la "i" es bastante mayor)
+        val minArea = max(3.0, (long / 650.0).pow(2))
         removeSmallInk(bin, minArea)
         if (eco) {
             // Ahorro de tinta: vaciar el interior de zonas sólidas dejando el contorno
@@ -614,6 +715,61 @@ object ImageEnhancer {
             bin.setTo(Scalar(255.0), core)
         }
         bin
+    }
+
+    /**
+     * Quita de la binarización [bin] (255 = papel) las líneas impresas de COLOR CLARO (cuadrícula o renglones
+     * azules/verdes de cuaderno, marcos de color): píxeles de tinta cuyo canal máximo max(R,G,B), normalizado
+     * con el mismo fondo [bg], queda cerca del papel (la tinta de verdad es oscura en los tres canales), claros
+     * también en la luminancia normalizada [lumN] (no un bolígrafo azul), con color claro (no lápiz) Y que
+     * forman tramos largos horizontales o verticales (apertura direccional a media resolución, tras dilatar
+     * para tolerar ~10° de inclinación o páginas curvadas). La escritura clara que no es una recta larga se
+     * conserva. In-place.
+     */
+    private fun removeColoredRuling(rgb: Mat, bg: Mat, lumN: Mat, bin: Mat, paperLevel: Double, bag: MatBag) {
+        val ch = ArrayList<Mat>(3); Core.split(rgb, ch)
+        // Cada canal normalizado con el fondo y con balance de blancos sobre el papel: así el papel queda neutro
+        // aunque la foto tenga dominante (papel azulado, balance de la cámara) y el lápiz resulta gris.
+        val paperMask = bag.mat(); Core.compare(lumN, Scalar(paperLevel * 0.92), paperMask, Core.CMP_GT)
+        for (c in ch) {
+            Cv.divideByBackground(c, bg, c)
+            val m = Core.mean(c, paperMask).`val`[0]
+            if (m > 20) c.convertTo(c, -1, paperLevel / m, 0.0)
+        }
+        val mx = bag.mat(); val mn = bag.mat()
+        Core.max(ch[0], ch[1], mx); Core.max(mx, ch[2], mx)
+        Core.min(ch[0], ch[1], mn); Core.min(mn, ch[2], mn)
+        for (m in ch) m.release()
+        // De COLOR (cuadrícula azul/verde): max - min > 12 % del máximo. El lápiz y la tinta negra son neutros.
+        val colored = bag.mat(); Core.subtract(mx, mn, mn)
+        Core.multiply(mn, Scalar(1.0 / 0.12), mn)
+        Core.compare(mn, mx, colored, Core.CMP_GT)
+        val vn = mx
+        // Tinta "clara en color": en el canal máximo apenas se distingue del papel
+        val light = bag.mat(); Core.compare(vn, Scalar(paperLevel * 0.9), light, Core.CMP_GT)
+        // ...y también clara en luminancia (la cuadrícula ~0.8 del papel; un bolígrafo azul ~0.4)
+        val tl = bag.mat(); Core.compare(lumN, Scalar(paperLevel * 0.66), tl, Core.CMP_GT)
+        Core.bitwise_and(light, tl, light)
+        Core.bitwise_and(light, colored, light)
+        val ink = bag.mat(); Core.bitwise_not(bin, ink)
+        Core.bitwise_and(light, ink, light)
+        if (Core.countNonZero(light) < 0.002 * light.total()) return
+        val w = bin.cols(); val h = bin.rows()
+        val half = Size(max(1.0, w / 2.0), max(1.0, h / 2.0))
+        val ls = bag.mat()
+        Imgproc.resize(light, ls, half, 0.0, 0.0, Imgproc.INTER_AREA)
+        Imgproc.threshold(ls, ls, 60.0, 255.0, Imgproc.THRESH_BINARY)
+        Imgproc.dilate(ls, ls, Cv.kernel(Imgproc.MORPH_RECT, 3))
+        val len = max(15, (max(half.width, half.height) / 45).roundToInt())
+        val hm = bag.mat(); val vm = bag.mat()
+        Imgproc.morphologyEx(ls, hm, Imgproc.MORPH_OPEN, Cv.kernel(Imgproc.MORPH_RECT, len, 1))
+        Imgproc.morphologyEx(ls, vm, Imgproc.MORPH_OPEN, Cv.kernel(Imgproc.MORPH_RECT, 1, len))
+        Core.bitwise_or(hm, vm, hm)
+        // Pequeña vecindad de cada recta (cruces); más amplia borraba escritura a lápiz clara junto a las líneas
+        Imgproc.dilate(hm, hm, Cv.kernel(Imgproc.MORPH_RECT, 3))
+        val lines = bag.mat(); Imgproc.resize(hm, lines, bin.size(), 0.0, 0.0, Imgproc.INTER_NEAREST)
+        Core.bitwise_and(lines, light, lines)
+        bin.setTo(Scalar(255.0), lines)
     }
 
     private fun lighten(rgb: Mat, opt: Options): Mat = MatBag().use { bag ->

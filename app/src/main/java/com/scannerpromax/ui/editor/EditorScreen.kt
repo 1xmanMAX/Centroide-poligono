@@ -31,8 +31,6 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -96,6 +94,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -682,49 +682,55 @@ private fun CropPanel(detecting: Boolean, invalid: Boolean, onAuto: () -> Unit, 
 private fun FiltersPanel(session: EditorSession, onApplyAll: (() -> Unit)?) {
     val primary = MaterialTheme.brand.gradientStart
     val edits = session.edits
-    // Solo el filtro (estable entre movimientos de slider): las celdas de la fila no se recomponen al ajustar.
-    val selectedFilter = edits.filter
+    // Solo el filtro (estable entre movimientos de slider): las tarjetas no se recomponen al ajustar.
+    // Los filtros antiguos de páginas guardadas se muestran como su equivalente visible.
+    val selectedFilter = edits.filter.uiFilter
     Column(Modifier.fillMaxWidth()) {
-        LazyRow(
-            contentPadding = PaddingValues(horizontal = 12.dp),
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            items(FilterType.entries, key = { it.name }, contentType = { "filter" }) { f ->
+            for (f in FilterType.visible) {
                 val selected = selectedFilter == f
                 val thumb = session.filterThumbs[f]
                 Column(
-                    Modifier.width(72.dp).clip(RoundedCornerShape(14.dp)).clickable(role = Role.RadioButton) { session.setFilter(f) },
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(16.dp))
+                        .clickable(role = Role.RadioButton) { if (edits.filter != f) session.setFilter(f) }
+                        .semantics { this.selected = selected },
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Box(
                         Modifier
-                            .size(width = 68.dp, height = 88.dp)
-                            .clip(RoundedCornerShape(14.dp))
+                            .fillMaxWidth()
+                            .height(112.dp)
+                            .clip(RoundedCornerShape(16.dp))
                             .then(
-                                if (selected) Modifier.border(2.5.dp, MaterialTheme.brand.gradient, RoundedCornerShape(14.dp))
-                                else Modifier.border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(14.dp)),
+                                if (selected) Modifier.border(2.5.dp, MaterialTheme.brand.gradient, RoundedCornerShape(16.dp))
+                                else Modifier.border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(16.dp)),
                             )
                             .background(MaterialTheme.colorScheme.surfaceContainerHigh),
                         contentAlignment = Alignment.Center,
                     ) {
                         if (thumb != null) {
-                            Image(thumb, f.label, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize().padding(3.dp).clip(RoundedCornerShape(11.dp)))
+                            Image(thumb, f.label, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize().padding(3.dp).clip(RoundedCornerShape(13.dp)))
                         } else {
-                            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
                         }
                         if (selected) {
                             Box(
-                                Modifier.align(Alignment.TopEnd).padding(4.dp).size(18.dp).clip(CircleShape)
+                                Modifier.align(Alignment.TopEnd).padding(6.dp).size(22.dp).clip(CircleShape)
                                     .background(MaterialTheme.brand.gradient),
                                 contentAlignment = Alignment.Center,
-                            ) { Icon(Icons.Filled.Check, null, tint = Color.White, modifier = Modifier.size(12.dp)) }
+                            ) { Icon(Icons.Filled.Check, null, tint = Color.White, modifier = Modifier.size(14.dp)) }
                         }
                     }
-                    Spacer(Modifier.height(4.dp))
+                    Spacer(Modifier.height(6.dp))
                     Text(
                         f.label,
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
                         color = if (selected) primary else MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,

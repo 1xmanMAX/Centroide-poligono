@@ -245,9 +245,13 @@ internal object Cv {
         Core.multiply(vmax, Scalar(0.62), vmax)
         val paper = bag.mat(); val m2 = bag.mat()
         Core.compare(v, vmax, paper, Core.CMP_GE)
-        Core.compare(s, Scalar(70.0), m2, Core.CMP_LT)
+        // Saturación máxima del papel ADAPTATIVA: papel de color claro (cuadernos azulados, hojas recicladas)
+        // tiene saturación propia ~60-70 y con un umbral fijo de 70 la mitad del papel se tomaba por "contenido".
+        val paperSat = if (color) percentile(histogram(s, paper), 0.5).toDouble() else 0.0
+        val satLimit = max(70.0, paperSat + 40.0)
+        Core.compare(s, Scalar(satLimit), m2, Core.CMP_LT)
         Core.bitwise_and(paper, m2, paper)
-        addShadowRegions(v, s, vmax, paper, bag)
+        addShadowRegions(v, s, vmax, paper, bag, max(110.0, paperSat + 100.0))
         if (Core.countNonZero(paper) < 0.15 * w * h) paper.setTo(Scalar(255.0))
         Imgproc.erode(paper, paper, kernel(Imgproc.MORPH_RECT, 3))
         if (Core.countNonZero(paper) == 0) paper.setTo(Scalar(255.0))
@@ -335,9 +339,10 @@ internal object Cv {
      * Añade a [paper] las sombras duras: candidatas = más oscuras que el entorno ([vmax] ya escalado), poco
      * saturadas, LISAS (desviación local baja en la imagen sin tinta) y no negras; se aceptan las componentes
      * conexas grandes (>= 2 %) que tocan el borde (las sombras de la mano/celular entran desde fuera de la hoja;
-     * los bloques oscuros impresos suelen estar dentro de los márgenes).
+     * los bloques oscuros impresos suelen estar dentro de los márgenes). Umbrales de saturación relativos al
+     * papel (papel azulado/reciclado) y atenuación hasta 0.18 (sombras con sol directo).
      */
-    private fun addShadowRegions(v: Mat, s: Mat, vmax: Mat, paper: Mat, bag: MatBag) {
+    private fun addShadowRegions(v: Mat, s: Mat, vmax: Mat, paper: Mat, bag: MatBag, satLimit: Double = 70.0) {
         val w = v.cols(); val h = v.rows()
         val vf = bag.mat(); v.convertTo(vf, CvType.CV_32F)
         val k = Size(5.0, 5.0)
@@ -345,20 +350,24 @@ internal object Cv {
         val sq = bag.mat(); Core.multiply(vf, vf, sq); Imgproc.blur(sq, sq, k)
         val m2 = bag.mat(); Core.multiply(m, m, m2)
         Core.subtract(sq, m2, sq); Core.max(sq, Scalar(0.0), sq); Core.sqrt(sq, sq)
-        val thr = bag.mat(); Core.multiply(m, Scalar(0.06), thr); Core.max(thr, Scalar(4.0), thr)
+        // Lisa = desviación local < max(5, 10 %): en la penumbra y bajo restos de escritura la sombra no es
+        // perfectamente uniforme (con 6 %/4 se perdía media sombra y quedaba una mancha negra en B/N)
+        val thr = bag.mat(); Core.multiply(m, Scalar(0.10), thr); Core.max(thr, Scalar(5.0), thr)
         val cand = bag.mat(); Core.compare(sq, thr, cand, Core.CMP_LT)
         val t = bag.mat()
         Core.compare(v, vmax, t, Core.CMP_LT); Core.bitwise_and(cand, t, cand)
-        Core.compare(s, Scalar(70.0), t, Core.CMP_LT); Core.bitwise_and(cand, t, cand)
+        // En la sombra (luz del cielo, azulada) el papel gana saturación: límite relativo al papel iluminado
+        Core.compare(s, Scalar(satLimit), t, Core.CMP_LT); Core.bitwise_and(cand, t, cand)
         Core.compare(v, Scalar(12.0), t, Core.CMP_GT); Core.bitwise_and(cand, t, cand)
-        // Física de una sombra de mano/móvil: atenúa el papel a 0.35..0.75 de su nivel, no lo deja casi negro.
-        // [vmax] llega ya escalado por 0.62 -> v > 0.3·máximo local  <=>  v > vmax·(0.3/0.62).
-        val vmin = bag.mat(); Core.multiply(vmax, Scalar(0.30 / 0.62), vmin)
+        // Física de una sombra de mano/móvil: atenúa el papel a 0.2..0.75 de su nivel (con sol directo la
+        // sombra llega a ~0.25), no lo deja casi negro.
+        // [vmax] llega ya escalado por 0.62 -> v > 0.18·máximo local  <=>  v > vmax·(0.18/0.62).
+        val vmin = bag.mat(); Core.multiply(vmax, Scalar(0.18 / 0.62), vmin)
         Core.compare(v, vmin, t, Core.CMP_GT); Core.bitwise_and(cand, t, cand)
-        if (Core.countNonZero(cand) < 0.02 * w * h) return
+        if (Core.countNonZero(cand) < 0.01 * w * h) return
         val labels = bag.mat(); val stats = bag.mat(); val cents = bag.mat()
         val n = Imgproc.connectedComponentsWithStats(cand, labels, stats, cents, 4, CvType.CV_32S)
-        val minA = 0.02 * w * h
+        val minA = 0.01 * w * h
         val row = IntArray(5)
         val acc = bag.mat(); acc.create(v.size(), CvType.CV_8UC1); acc.setTo(Scalar(0.0))
         var any = false
@@ -371,8 +380,14 @@ internal object Cv {
             stats.get(i, 0, row)
             val x = row[0]; val y = row[1]; val ww = row[2]; val hh = row[3]; val a = row[4]
             if (a < minA) break
-            val touches = x == 0 || y == 0 || x + ww >= w || y + hh >= h
-            if (!touches) continue
+            // "Toca el borde" con margen: en un recorte de cuaderno/libro el marco o el canto de color (que no
+            // es papel) separa la sombra del borde de la imagen aunque entre desde fuera de la hoja.
+            val mg = (0.06 * max(w, h)).roundToInt()
+            val touchesEdge = x == 0 || y == 0 || x + ww >= w || y + hh >= h
+            val nearEdge = x <= mg || y <= mg || x + ww >= w - mg || y + hh >= h - mg
+            // Cerca del borde pero sin tocarlo: sólo si es irregular (un bloque impreso es rectangular y lleno)
+            val fillBox = a.toDouble() / max(1, ww * hh)
+            if (!touchesEdge && !(nearEdge && fillBox < 0.8)) continue
             // Franja recta que recorre un lado de punta a punta (mesa sin recortar, lomo de libro, banda a
             // sangre): rellena casi todo su rectángulo. Las sombras de mano/móvil son irregulares.
             val spansW = ww >= 0.96 * w && (y == 0 || y + hh >= h)
@@ -391,7 +406,7 @@ internal object Cv {
         // (Sombra dura sintética: error en el borde 24.5 -> 11.9 niveles, en el papel 9.1 -> 6.3.)
         val band = bag.mat()
         Imgproc.dilate(acc, band, kernel(Imgproc.MORPH_RECT, 7))
-        Core.compare(s, Scalar(70.0), t, Core.CMP_LT); Core.bitwise_and(band, t, band)
+        Core.compare(s, Scalar(satLimit), t, Core.CMP_LT); Core.bitwise_and(band, t, band)
         Core.compare(v, Scalar(12.0), t, Core.CMP_GT); Core.bitwise_and(band, t, band)
         Core.bitwise_or(acc, band, acc)
         Core.bitwise_or(paper, acc, paper)
