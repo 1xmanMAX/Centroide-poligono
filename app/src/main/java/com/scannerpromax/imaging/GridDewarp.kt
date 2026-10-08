@@ -67,7 +67,28 @@ object GridDewarp {
         val map: FloatArray,
         val confidence: Double,
         val info: String,
-    )
+        /**
+         * Extensión de la SALIDA respecto del plano rectificado (fracciones de su ancho/alto): [0,1] = mismo lienzo.
+         * Si el campo lleva contenido del borde de la hoja más allá del lienzo, éste se amplía (x0 < 0, x1 > 1...) para
+         * que nada se pierda; lo que queda fuera de la hoja se rellena con el color del papel.
+         */
+        val x0: Double = 0.0,
+        val y0: Double = 0.0,
+        val x1: Double = 1.0,
+        val y1: Double = 1.0,
+        /**
+         * Máscara de HOJA del plano rectificado ([paperW] x [paperH]; 255 hoja, 0 lo demás): en la franja ampliada
+         * sólo se conserva lo que es hoja; el fondo que quedó en el recorte junto a un borde curvado (mesa, hueco
+         * oscuro bajo la hoja) se pinta del color del papel.
+         */
+        val paper: ByteArray? = null,
+        val paperW: Int = 0,
+        val paperH: Int = 0,
+    ) {
+        /** Tamaño de la salida para un plano rectificado de [w] x [h]. */
+        fun outWidth(w: Int): Int = max(1, (w * (x1 - x0)).roundToInt())
+        fun outHeight(h: Int): Int = max(1, (h * (y1 - y0)).roundToInt())
+    }
 
     /** Datos de depuración (banco de pruebas). */
     internal class Debug {
@@ -121,9 +142,85 @@ object GridDewarp {
         }
         debug?.apply { msLines = (System.nanoTime() - t0) / 1e6; this.textRows = textRows }
         val t1 = System.nanoTime()
-        val res = fitModel(w.toDouble(), h.toDouble(), hl, vl, textRows, debug)
+        val content = contentPoints(sm, bin, bag)
+        val res = fitModel(w.toDouble(), h.toDouble(), hl, vl, textRows, debug, content, paperMask(sm, bag))
         debug?.msSolve = (System.nanoTime() - t1) / 1e6
         res
+    }
+
+    /**
+     * Puntos de CONTENIDO junto a los bordes (px de estimación): píxeles de tinta de componentes
+     * FINAS (escritura, tramos de la cuadrícula; sin núcleo grueso como el hueco oscuro entre la hoja curvada y la
+     * mesa) que NO tocan el borde del recorte (lo que ya estaba cortado por el recorte, o los bordes de objetos del
+     * fondo, no cuenta), en una franja del 8 % del lado junto a cada borde y rodeadas de papel (gris suavizado a
+     * ~21 px >= 70 % del nivel del papel). Tríos (x, y, componente). El lienzo de salida se amplía sólo para que
+     * las componentes que el campo saca del lienzo quepan ENTERAS.
+     */
+    internal fun contentPoints(sm: Mat, bin: Mat, bag: MatBag): FloatArray {
+        val gray = bag.add(Cv.gray(sm))
+        val w = gray.cols(); val h = gray.rows()
+        // Núcleo grueso (>= ~9 px de estimación, más que cualquier trazo de escritura): manchas, no contenido
+        val thick = bag.mat()
+        Imgproc.morphologyEx(bin, thick, Imgproc.MORPH_OPEN, Cv.kernel(Imgproc.MORPH_ELLIPSE, 9))
+        // Sin las rectas largas (cuadrícula, renglones, líneas de tabla): unen la escritura con el borde
+        val ink = bag.mat(); bin.copyTo(ink)
+        val lines = bag.mat(); val len = Cv.odd(max(15, max(w, h) / 50))
+        val kt = bag.mat()
+        for (deg in doubleArrayOf(-10.0, -5.0, 0.0, 5.0, 10.0)) for (vertical in booleanArrayOf(false, true)) {
+            val k = lineKernel(len, deg)
+            if (vertical) Core.transpose(k, kt) else k.copyTo(kt)
+            k.release()
+            Imgproc.morphologyEx(bin, lines, Imgproc.MORPH_OPEN, kt)
+            Imgproc.dilate(lines, lines, Cv.kernel(Imgproc.MORPH_RECT, 3))
+            Core.subtract(ink, lines, ink)
+        }
+        val labels = bag.mat(); val stats = bag.mat(); val cents = bag.mat()
+        val nc = Imgproc.connectedComponentsWithStats(ink, labels, stats, cents, 8, CvType.CV_32S)
+        if (nc <= 1) return FloatArray(0)
+        val st = IntArray(nc * 5); stats.get(0, 0, st)
+        val lab = IntArray(w * h); labels.get(0, 0, lab)
+        val ok = BooleanArray(nc)
+        for (c in 1 until nc) {
+            val x = st[c * 5]; val y = st[c * 5 + 1]; val cw = st[c * 5 + 2]; val ch = st[c * 5 + 3]
+            ok[c] = x > 2 && y > 2 && x + cw < w - 2 && y + ch < h - 2
+        }
+        val tb = ByteArray(w * h); thick.get(0, 0, tb)
+        for (i in lab.indices) if (tb[i].toInt() != 0) ok[lab[i]] = false
+        // motas (ruido, grano, restos sueltos del fondo): fuera
+        for (c in 1 until nc) if (st[c * 5 + 4] < 12) ok[c] = false
+        val g = gray
+        val pl = Cv.percentile(Cv.histogram(g), 0.85).toDouble()
+        Imgproc.blur(g, g, Size(21.0, 21.0))
+        val gb = ByteArray(w * h); g.get(0, 0, gb)
+        val band = max(4, (0.08 * min(w, h)).roundToInt())
+        val lim = 0.7 * pl
+        val out = ArrayList<Float>()
+        for (y in 0 until h) {
+            val nearY = y < band || y >= h - band
+            var x = 0
+            while (x < w) {
+                if (!nearY && x == band) { x = w - band; continue }
+                val i = y * w + x
+                val l = lab[i]
+                if (l > 0 && ok[l] && (gb[i].toInt() and 0xFF) >= lim) { out.add(x.toFloat()); out.add(y.toFloat()); out.add(l.toFloat()) }
+                x++
+            }
+        }
+        return out.toFloatArray()
+    }
+
+    /**
+     * Máscara de hoja a <= 400 px: 255 = hoja (gris suavizado a ~21 px de estimación >= 70 % del nivel del papel: la
+     * escritura no cuenta), 0 = lo demás. (bytes, ancho, alto)
+     */
+    private fun paperMask(sm: Mat, bag: MatBag): Triple<ByteArray, Int, Int> {
+        val g = bag.add(Cv.gray(sm))
+        val pl = Cv.percentile(Cv.histogram(g), 0.85).toDouble()
+        Imgproc.blur(g, g, Size(21.0, 21.0))
+        val s = bag.mat(); Cv.downscale(g, s, 400)
+        Imgproc.threshold(s, s, 0.7 * pl, 255.0, Imgproc.THRESH_BINARY)
+        val b = ByteArray(s.cols() * s.rows()); s.get(0, 0, b)
+        return Triple(b, s.cols(), s.rows())
     }
 
     /** Fracción del eje transversal cubierta por líneas largas (cada línea "cubre" su vecindad). */
@@ -342,7 +439,7 @@ object GridDewarp {
     internal fun fitModel(
         w: Double, h: Double,
         hLines: List<DewarpMath.LineObs>, vLines: List<DewarpMath.LineObs>,
-        textRows: Boolean, debug: Debug?,
+        textRows: Boolean, debug: Debug?, content: FloatArray? = null, paper: Triple<ByteArray, Int, Int>? = null,
     ): Model? {
         val longSide = max(w, h)
         val cells = 28.0
@@ -412,10 +509,19 @@ object GridDewarp {
         if (p80a > 0.55 * p80b || p80a > 3.0) return null.also { debug?.reason = "no mejora; $info" }
         val jac = DewarpMath.jacobianRange(field)
         if (jac.first < 0.45 || jac.second > 2.2) return null.also { debug?.reason = "jacobiano ${"%.2f..%.2f".format(jac.first, jac.second)}; $info" }
+        // Lienzo de salida: el plano rectificado ampliado hasta contener (con 2 px de margen) la imagen por el campo
+        // del contenido junto a los bordes: lo que el campo empuja hacia fuera no se recorta
+        val rescued = if (content != null) DewarpMath.rescuedPoints(field, content, 6000) else FloatArray(0)
+        val ext = DewarpMath.bounds(rescued, w, h)
+        val tol = 0.5; val margin = 2.0
+        val u0 = if (ext[0] < -tol) ext[0] - margin else 0.0
+        val v0 = if (ext[1] < -tol) ext[1] - margin else 0.0
+        val u1 = if (ext[2] > w + tol) ext[2] + margin else w
+        val v1 = if (ext[3] > h + tol) ext[3] + margin else h
         // Inversión en rejilla de salida
-        val gw = max(2, ceil(w / INV_STEP).toInt() + 1)
-        val gh = max(2, ceil(h / INV_STEP).toInt() + 1)
-        val inv = DewarpMath.invert(field, gw, gh) ?: return null.also { debug?.reason = "inversión; $info" }
+        val gw = max(2, ceil((u1 - u0) / INV_STEP).toInt() + 1)
+        val gh = max(2, ceil((v1 - v0) / INV_STEP).toInt() + 1)
+        val inv = DewarpMath.invert(field, gw, gh, u0, v0, u1, v1) ?: return null.also { debug?.reason = "inversión; $info" }
         val map = FloatArray(gw * gh * 2)
         for (i in 0 until gw * gh) {
             map[2 * i] = (inv[2 * i] / (w - 1)).toFloat()
@@ -423,26 +529,29 @@ object GridDewarp {
         }
         val cov = min(1.0, (nH + nV) / 12.0)
         val conf = (cov * (1.0 - p80a / max(1e-6, p80b))).coerceIn(0.0, 1.0)
-        debug?.reason = "aplicado; $info"
-        return Model(gw, gh, map, conf, info)
+        val extInfo = if (u0 < 0 || v0 < 0 || u1 > w || v1 > h) " lienzo %.1f,%.1f..%.1f,%.1f".format(u0, v0, u1 - w, v1 - h) else ""
+        debug?.reason = "aplicado; $info$extInfo"
+        return Model(gw, gh, map, conf, info + extInfo, u0 / w, v0 / h, u1 / w, v1 / h, paper?.first, paper?.second ?: 0, paper?.third ?: 0)
     }
 
     // =====================================================================================
     // Aplicación
     // =====================================================================================
 
-    /** Aplica [model] a [src] (cualquier tipo/canales) al mismo tamaño. */
+    /** Aplica [model] a [src] (cualquier tipo/canales); salida de [Model.outWidth] x [Model.outHeight]. */
     fun apply(src: Mat, model: Model, interp: Int = Imgproc.INTER_CUBIC): Mat =
         remapComposed(src, model, src.cols(), src.rows(), null, interp)
 
     /**
-     * Remuestreo por franjas: para cada píxel de salida (outW x outH) se interpola la posición en el plano
-     * rectificado (mismo tamaño) y, si hay [hinv] (3x3, rectificado -> [src]), se lleva a la foto original:
-     * perspectiva + rotación + enderezado curvo en un único `remap`.
+     * Remuestreo por franjas: para cada píxel de salida se interpola la posición en el plano rectificado
+     * ([outW] x [outH]) y, si hay [hinv] (3x3, rectificado -> [src]), se lleva a la foto original: perspectiva +
+     * rotación + enderezado curvo en un único `remap`. La salida mide [Model.outWidth] x [Model.outHeight] (lienzo
+     * ampliado si el campo saca contenido del plano); lo que cae fuera de la hoja se pinta del color del papel.
      */
-    internal fun remapComposed(src: Mat, model: Model, outW: Int, outH: Int, hinv: DoubleArray?, interp: Int): Mat {
+    internal fun remapComposed(src: Mat, model: Model, outW0: Int, outH0: Int, hinv: DoubleArray?, interp: Int): Mat {
+        val outW = model.outWidth(outW0); val outH = model.outHeight(outH0)
         val coarse = Mat(model.gh, model.gw, CvType.CV_32FC2)
-        val sx = (outW - 1).toFloat(); val sy = (outH - 1).toFloat()
+        val sx = (outW0 - 1).toFloat(); val sy = (outH0 - 1).toFloat()
         val buf = FloatArray(model.map.size)
         for (i in 0 until model.gw * model.gh) {
             buf[2 * i] = model.map[2 * i] * sx
@@ -452,6 +561,15 @@ object GridDewarp {
         val out = Mat(outH, outW, src.type())
         val hm = hinv?.let { Mat(3, 3, CvType.CV_64F).apply { put(0, 0, *it) } }
         val strip = Mat(); val strip2 = Mat(); val aff = Mat(2, 3, CvType.CV_64F)
+        val expanded = model.x0 < 0 || model.y0 < 0 || model.x1 > 1 || model.y1 > 1
+        // Lo que cae fuera del plano rectificado (fuera de la hoja recortada: con la perspectiva sería la mesa de la
+        // foto) se pinta del color del papel, se amplíe o no el lienzo
+        val outside = Mat(outH, outW, CvType.CV_8UC1, Scalar(0.0))
+        // fondo (no hoja) de la franja ampliada según la máscara del modelo; sin máscara, toda la franja es hoja
+        val zone = if (expanded) Mat(outH, outW, CvType.CV_8UC1, Scalar(0.0)) else null
+        val pm = if (expanded && model.paper != null) Mat(model.paperH, model.paperW, CvType.CV_8UC1).apply { put(0, 0, model.paper) } else null
+        val pmap = Mat(); val pz = Mat()
+        val inside = Mat()
         try {
             val rowsPer = max(16, 1_000_000 / max(1, outW))
             val kx = (model.gw - 1).toDouble() / max(1, outW - 1)
@@ -464,16 +582,42 @@ object GridDewarp {
                     coarse, strip, aff, Size(outW.toDouble(), rows.toDouble()),
                     Imgproc.INTER_LINEAR or Imgproc.WARP_INVERSE_MAP, Core.BORDER_REPLICATE,
                 )
+                run {
+                    // Fuera del plano rectificado (= fuera de la hoja recortada)
+                    Core.inRange(strip, Scalar(-0.5, -0.5), Scalar(outW0 - 0.5, outH0 - 0.5), inside)
+                    val o = outside.submat(y0, y0 + rows, 0, outW)
+                    Core.bitwise_not(inside, o); o.release()
+                    if (pm != null) {
+                        Core.multiply(strip, Scalar((pm.cols() - 1.0) / max(1, outW0 - 1), (pm.rows() - 1.0) / max(1, outH0 - 1)), pmap)
+                        Imgproc.remap(pm, pz, pmap, Mat(), Imgproc.INTER_LINEAR, Core.BORDER_REPLICATE)
+                        val z = zone!!.submat(y0, y0 + rows, 0, outW)
+                        Imgproc.threshold(pz, z, 127.0, 255.0, Imgproc.THRESH_BINARY_INV); z.release()
+                    }
+                }
                 val m = if (hm != null) { Core.perspectiveTransform(strip, strip2, hm); strip2 } else strip
                 val dst = out.submat(y0, y0 + rows, 0, outW)
                 Imgproc.remap(src, dst, m, Mat(), interp, Core.BORDER_REPLICATE)
                 dst.release()
                 y0 += rows
             }
+            if (Core.countNonZero(outside) > 0) {
+                // Margen de 1 px (la interpolación del borde trae algo de lo que hay fuera de la hoja)
+                Imgproc.dilate(outside, outside, Cv.kernel(Imgproc.MORPH_RECT, 3))
+            }
+            if (zone != null) {
+                // Franja ampliada (fuera del lienzo original): sólo lo que es hoja (ver [Model.paper]); la máscara de
+                // fondo [zone] se fue acumulando por franjas
+                val kx = (outW - 1) / max(1e-9, model.x1 - model.x0); val ky = (outH - 1) / max(1e-9, model.y1 - model.y0)
+                val cx0 = (-model.x0 * kx).roundToInt(); val cy0 = (-model.y0 * ky).roundToInt()
+                val cx1 = ((1 - model.x0) * kx).roundToInt(); val cy1 = ((1 - model.y0) * ky).roundToInt()
+                Imgproc.rectangle(zone, Point(cx0.toDouble(), cy0.toDouble()), Point(cx1.toDouble(), cy1.toDouble()), Scalar(0.0), -1)
+                Core.bitwise_or(outside, zone, outside)
+            }
+            if (Core.countNonZero(outside) > 0) out.setTo(Cv.paperColor(out), outside)
         } catch (t: Throwable) {
             out.release(); throw t
         } finally {
-            coarse.release(); strip.release(); strip2.release(); aff.release(); hm?.release()
+            coarse.release(); strip.release(); strip2.release(); aff.release(); hm?.release(); outside.release(); inside.release(); zone?.release(); pm?.release(); pmap.release(); pz.release()
         }
         return out
     }
@@ -1102,6 +1246,40 @@ internal object DewarpMath {
         return if (changed) out else null
     }
 
+    /**
+     * Contenido que el campo saca del lienzo: de los tríos (x, y, componente) [pts], la imagen por el campo de TODOS
+     * los puntos de cada componente con algún punto fuera de [0,w]x[0,h] (la letra entera, no sólo su punta).
+     * x/y intercalados, a lo sumo ~[maxN] puntos.
+     */
+    fun rescuedPoints(f: Field, pts: FloatArray, maxN: Int): FloatArray {
+        val o = DoubleArray(6)
+        val n = pts.size / 3
+        val mapped = FloatArray(2 * n)
+        val out = HashSet<Int>()
+        for (k in 0 until n) {
+            f.eval(pts[3 * k].toDouble(), pts[3 * k + 1].toDouble(), o)
+            mapped[2 * k] = o[0].toFloat(); mapped[2 * k + 1] = o[1].toFloat()
+            if (o[0] < 0 || o[1] < 0 || o[0] > f.w || o[1] > f.h) out.add(pts[3 * k + 2].toInt())
+        }
+        if (out.isEmpty()) return FloatArray(0)
+        val sel = ArrayList<Float>()
+        for (k in 0 until n) if (pts[3 * k + 2].toInt() in out) { sel.add(mapped[2 * k]); sel.add(mapped[2 * k + 1]) }
+        val m = sel.size / 2
+        if (m <= maxN) return sel.toFloatArray()
+        val step = m.toDouble() / maxN
+        return FloatArray(2 * maxN) { k -> sel[2 * (k / 2 * step).toInt() + k % 2] }
+    }
+
+    /** Caja [uMin, vMin, uMax, vMax] de los puntos [pts] (x/y intercalados) unida a [0,w]x[0,h]. */
+    fun bounds(pts: FloatArray, w: Double, h: Double): DoubleArray {
+        val r = doubleArrayOf(0.0, 0.0, w, h)
+        for (i in pts.indices step 2) {
+            r[0] = min(r[0], pts[i].toDouble()); r[1] = min(r[1], pts[i + 1].toDouble())
+            r[2] = max(r[2], pts[i].toDouble()); r[3] = max(r[3], pts[i + 1].toDouble())
+        }
+        return r
+    }
+
     /** Rango [mín, máx] de u_x, v_y y del determinante del jacobiano en los centros de celda. */
     fun jacobianRange(f: Field): Pair<Double, Double> {
         var lo = Double.MAX_VALUE; var hi = -Double.MAX_VALUE
@@ -1119,14 +1297,14 @@ internal object DewarpMath {
      * F(x, y) = (U, V) por Newton partiendo de la solución del vecino. Devuelve (x, y) intercalados o null si
      * no converge (campo plegado).
      */
-    fun invert(f: Field, gw: Int, gh: Int): DoubleArray? {
+    fun invert(f: Field, gw: Int, gh: Int, u0: Double = 0.0, v0: Double = 0.0, u1: Double = f.w, v1: Double = f.h): DoubleArray? {
         val out = DoubleArray(gw * gh * 2)
-        val sx = f.w / (gw - 1); val sy = f.h / (gh - 1)
+        val sx = (u1 - u0) / (gw - 1); val sy = (v1 - v0) / (gh - 1)
         val o = DoubleArray(6)
         var bad = 0
         for (b in 0 until gh) {
             for (a in 0 until gw) {
-                val U = a * sx; val V = b * sy
+                val U = u0 + a * sx; val V = v0 + b * sy
                 var x: Double; var y: Double
                 when {
                     a > 0 -> { x = out[2 * (b * gw + a - 1)] + sx; y = out[2 * (b * gw + a - 1) + 1] }

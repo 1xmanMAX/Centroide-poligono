@@ -502,7 +502,32 @@ object Cleanup {
     internal fun deskewMat(img: Mat): Mat {
         val angle = estimateSkew(img)
         if (angle == 0.0) return img.clone()
-        return rotateKeepSize(img, angle)
+        return rotateExpand(img, angle)
+    }
+
+    /**
+     * Tamaño del lienzo que contiene un rectángulo [w] x [h] girado [angleDeg] grados (sin recortar sus esquinas).
+     */
+    internal fun rotatedCanvas(w: Int, h: Int, angleDeg: Double): Pair<Int, Int> {
+        val a = Math.toRadians(angleDeg); val c = abs(kotlin.math.cos(a)); val s = abs(kotlin.math.sin(a))
+        // (redondeo con tolerancia: 0.2 px de exceso no justifican una columna más)
+        return kotlin.math.ceil(w * c + h * s - 0.2).toInt().coerceAtLeast(1) to kotlin.math.ceil(w * s + h * c - 0.2).toInt().coerceAtLeast(1)
+    }
+
+    /**
+     * Giro alrededor del centro AMPLIANDO el lienzo para que quepa la imagen entera (el texto junto a los bordes
+     * no se pierde); las esquinas nuevas se rellenan con el color del papel.
+     */
+    internal fun rotateExpand(img: Mat, angle: Double): Mat {
+        val (nw, nh) = rotatedCanvas(img.cols(), img.rows(), angle)
+        val m = Imgproc.getRotationMatrix2D(Point(img.cols() / 2.0, img.rows() / 2.0), angle, 1.0)
+        m.put(0, 2, m.get(0, 2)[0] + (nw - img.cols()) / 2.0)
+        m.put(1, 2, m.get(1, 2)[0] + (nh - img.rows()) / 2.0)
+        val fillColor = Cv.paperColor(img)
+        val out = Mat()
+        Imgproc.warpAffine(img, out, m, Size(nw.toDouble(), nh.toDouble()), Imgproc.INTER_CUBIC, Core.BORDER_CONSTANT, fillColor)
+        m.release()
+        return out
     }
 
     /**

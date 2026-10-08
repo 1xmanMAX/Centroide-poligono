@@ -85,8 +85,12 @@ class PageProcessor(val tier: DeviceTier) {
      * copia a resolución completa en el pico de memoria. El ángulo de enderezado se estima sobre una versión
      * reducida ya rectificada (estimateSkew trabaja a 800 px de todos modos).
      */
-    private fun geometryFull(original: Bitmap, edits: PageEdits, maxSide: Int): Mat {
-        var rgba: Mat? = Cv.toRgba(original)
+    private fun geometryFull(original: Bitmap, edits: PageEdits, maxSide: Int): Mat =
+        geometryFullMat(Cv.toRgba(original), edits, maxSide)
+
+    /** [geometryFull] sobre un Mat RGBA (que se libera). */
+    internal fun geometryFullMat(input: Mat, edits: PageEdits, maxSide: Int): Mat {
+        var rgba: Mat? = input
         try {
             val src = rgba!!
             val w = src.cols(); val h = src.rows()
@@ -150,11 +154,16 @@ class PageProcessor(val tier: DeviceTier) {
                 }
                 return rgb
             }
-            // 3) Enderezado alrededor del centro (como Cleanup.rotateKeepSize)
+            // 3) Enderezado alrededor del centro con el lienzo AMPLIADO (como Cleanup.rotateExpand): las esquinas del
+            //    documento no se recortan (el texto pegado al borde se conservaba sólo a medias)
             var rd: DoubleArray? = null
+            val preW = ow; val preH = oh
             if (angle != 0.0) {
                 val rm = Imgproc.getRotationMatrix2D(org.opencv.core.Point(ow / 2.0, oh / 2.0), angle, 1.0)
                 val a = DoubleArray(6); rm.get(0, 0, a); rm.release()
+                val (nw, nh) = Cleanup.rotatedCanvas(ow, oh, angle)
+                a[2] += (nw - ow) / 2.0; a[5] += (nh - oh) / 2.0
+                ow = nw; oh = nh
                 rd = doubleArrayOf(a[0], a[1], a[2], a[3], a[4], a[5], 0.0, 0.0, 1.0)
                 mTot = mul3(rd, mTot)
             }
@@ -167,7 +176,7 @@ class PageProcessor(val tier: DeviceTier) {
             Imgproc.cvtColor(out, rgb, Imgproc.COLOR_RGBA2RGB)
             out.release()
             // Esquinas que el enderezado deja fuera del documento -> color del papel (no la mesa del fondo)
-            if (rd != null) fillOutsideRotated(rgb, rd)
+            if (rd != null) fillOutsideRotated(rgb, rd, preW, preH)
             return rgb
         } finally {
             rgba?.release()
@@ -239,10 +248,11 @@ class PageProcessor(val tier: DeviceTier) {
         return model
     }
 
-    /** Rellena con el color del papel lo que queda fuera del rectángulo rotado por [rd] (3x3). */
-    private fun fillOutsideRotated(img: Mat, rd: DoubleArray) {
+    /** Rellena con el color del papel lo que queda fuera del rectángulo [srcW] x [srcH] girado por [rd] (3x3). */
+    private fun fillOutsideRotated(img: Mat, rd: DoubleArray, srcW: Int, srcH: Int) {
         val w = img.cols(); val h = img.rows()
-        val corners = arrayOf(0.0 to 0.0, w - 1.0 to 0.0, w - 1.0 to h - 1.0, 0.0 to h - 1.0)
+        val sw = srcW.toDouble(); val sh = srcH.toDouble()
+        val corners = arrayOf(0.0 to 0.0, sw - 1.0 to 0.0, sw - 1.0 to sh - 1.0, 0.0 to sh - 1.0)
         val pts = corners.map { (x, y) -> org.opencv.core.Point(rd[0] * x + rd[1] * y + rd[2], rd[3] * x + rd[4] * y + rd[5]) }
         val mask = Mat(h, w, CvType.CV_8UC1, org.opencv.core.Scalar(255.0))
         val poly = org.opencv.core.MatOfPoint(*pts.toTypedArray())

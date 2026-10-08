@@ -96,7 +96,12 @@ Todo en `imaging/` (OpenCV 4.10, sin red). Tiempos medidos con el harness Python
   espiral/anillas y bordes oscuros -> zona en blanco; fotos y bloques de color -> recuadro IMAGEN (mejora suave);
   agrupación en palabras/líneas/bloques (`BoxGrouping`, con detección de texto girado 90°) con margen según la
   altura de letra. Render: fuera de los recuadros blanco puro; dentro sólo la tinta con alfa suave (sin halos) y
-  contraste por zona (el lápiz claro se refuerza). Estimaciones a <= 2000 px, render a resolución completa por
+  contraste por zona (el lápiz claro se refuerza). **Trazos uniformes**: en los trazos firmes y finos la tinta se
+  normaliza respecto del máximo local a escala de trazo (cierre de 3 px para los fallos de tinta), así los tramos de
+  poca presión de una misma letra salen tan oscuros y continuos como los demás; en Texto resaltado se pintan con el
+  color medio de la tinta del entorno e intensidad única. Las manchas tenues (transparencias, sombras) conservan el
+  tono relativo. Sintético (bolígrafo/lápiz con presión 30-100 %): roturas por trazo 4.1 -> 1.3, variación del tono
+  0.22 -> 0.04. Estimaciones a <= 2000 px, render a resolución completa por
   franjas de 1 MP: 12 MP ~1.0-1.3 s y 20 MP ~1.5-1.7 s en PC monohilo. `TextRegions.detect(bitmap)` devuelve los
   recuadros (TEXT/IMAGE) para dibujarlos en la interfaz.
 - **Hoja curvada** (`GridDewarp`, `PageEdits.autoDewarp`, tras la perspectiva y antes del filtro): supone que cada
@@ -113,7 +118,9 @@ Todo en `imaging/` (OpenCV 4.10, sin red). Tiempos medidos con el harness Python
   páginas de un cuaderno abierto se tratan como grupos de líneas distintos. Seguridad: no se aplica si la hoja ya es plana
   (percentil 90 de la desviación de las líneas < 1.4 px a 1600 px: el giro lo resuelve el enderezado normal, que se
   omite cuando el curvo se aplica), si las líneas no quedan al menos un 45 % más rectas o si el jacobiano sale de
-  0.45..2.2. El campo se invierte (Newton) en una rejilla de salida de 8 px y se guarda normalizado: vista previa, base de
+  0.45..2.2. Si el campo empuja contenido de la hoja (escritura junto al borde) fuera del lienzo, el lienzo se **amplía** lo
+  justo (el fondo que no es hoja se pinta del color del papel); lo que cae fuera del recorte también va del color del
+  papel. El enderezado normal gira con el lienzo ampliado (no recorta las esquinas). El campo se invierte (Newton) en una rejilla de salida de 8 px y se guarda normalizado: vista previa, base de
   los trazos de borrado y render final usan el mismo modelo (caché por recorte, rotación y firma de la página). El render
   compone perspectiva + rotación + hoja curvada en un **único `remap` cúbico** desde el original, por franjas de 1 MP.
   Sintético (2000x2700, desviación máx. de las líneas antes -> después): libro 20.2 -> 2.8 px (tabla) y 23.8 -> 1.8 px

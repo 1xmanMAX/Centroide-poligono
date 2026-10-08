@@ -344,8 +344,10 @@ object TextRegions {
         val tLow: Double,
         val inkLevel: Mat,          // 8UC1 a 1/4 de la resolución de trabajo: oscuridad típica de la tinta del entorno
         val keep: Mat,              // 8UC1 a resolución de trabajo: tinta aceptada (con margen)
+        val strokeHalf: Double,     // semiancho típico del trazo, px de la imagen completa
+        val coherent: Mat,          // 8UC1 a resolución de trabajo: 255 = trazo de tinta firme (se uniformiza), 0 = tenue
     ) {
-        fun release() { blank.release(); inkLevel.release(); keep.release() }
+        fun release() { blank.release(); inkLevel.release(); keep.release(); coherent.release() }
     }
 
     internal fun analyze(rgb: Mat): Layout {
@@ -522,7 +524,11 @@ object TextRegions {
             val x1 = c.x + c.w; val y1 = c.y + c.h
             // Bordes de la hoja / sombra del canto: pegados al borde y alargados a lo largo de él, o gruesos
             val touchLR = c.x <= 1 || x1 >= W - 1; val touchTB = c.y <= 1 || y1 >= H - 1
-            if ((touchLR && c.h >= 3 * c.w) || (touchTB && c.w >= 3 * c.h)) continue
+            // (largos a lo largo del borde: una letra cortada por el borde -"I" de "Informe", el resto de una palabra
+            // al pie de la hoja- es corta o poco maciza y se conserva)
+            val fillC = c.area.toDouble() / max(1, c.w * c.h)
+            if ((touchLR && c.h >= 3 * c.w && (c.h >= 2.5 * lh || fillC >= 0.5 && c.h >= 1.6 * lh)) ||
+                (touchTB && c.w >= 3 * c.h && (c.w >= 2.5 * lh || fillC >= 0.5 && c.w >= 1.6 * lh))) continue
             if (((touchLR && c.w <= 2 * lh) || (touchTB && c.h <= 2 * lh)) && c.halfWidth > 1.6 * hw80) continue
             // Dentro de una imagen: ya se conserva entera
             if (images.any { c.x >= it.x0 && c.y >= it.y0 && x1 <= it.x1 && y1 <= it.y1 }) continue
@@ -538,10 +544,12 @@ object TextRegions {
         val boxes = ArrayList<BoxGrouping.Box>()
         val finalLabels = HashSet<Int>()
         for ((box, idx) in groups) {
-            var area = 0; var maxDark = 0.0
-            for (i in idx) { area += keepComps[i].area; maxDark = max(maxDark, keepComps[i].meanDark) }
+            var area = 0; var maxDark = 0.0; var maxLg = 0
+            for (i in idx) { val c = keepComps[i]; area += c.area; maxDark = max(maxDark, c.meanDark); maxLg = max(maxLg, max(c.w, c.h)) }
             val small = max(box.w, box.h) < 0.35 * lh
             if (small && (area < 2.5 * minArea || maxDark < 2.2 * tHigh)) continue
+            // Cadena de motas claras sin ninguna letra (cruces de la cuadrícula alineados a paso regular): ruido
+            if (maxLg < 0.5 * lh && maxDark < 2.5 * tHigh) continue
             boxes.add(box.pad(pad, W, H))
             for (i in idx) finalLabels.add(keepComps[i].label)
         }
@@ -589,7 +597,66 @@ object TextRegions {
             Imgproc.dilate(ink, ink, Cv.kernel(Imgproc.MORPH_ELLIPSE, Cv.odd(max(3, (lh / f).roundToInt()))))
             Imgproc.GaussianBlur(ink, ink, Size(0.0, 0.0), max(1.0, lh * 0.6 / f))
         }
-        Layout(regions.sortedWith(compareBy({ it.top }, { it.left })), lh / s, blank, s, tLow, ink, keep)
+        val smallLabels = HashSet<Int>()
+        for (c in keepComps) if (max(c.w, c.h) < 0.4 * lh) smallLabels.add(c.label)
+        val coherent = coherenceMap(lab, finalLabels, smallLabels, dw, ink, W, H, bag)
+        val half = strokeHalfWidth(dw, ink, keep, tHigh, bag) ?: max(1.0, hw50)
+        log?.invoke("strokeHalf work=%.2f (hw50=%.2f)".format(half, hw50))
+        Layout(regions.sortedWith(compareBy({ it.top }, { it.left })), lh / s, blank, s, tLow, ink, keep, half / s, coherent)
+    }
+
+    /**
+     * Trazos FIRMES (se les da intensidad uniforme en el render) frente a manchas tenues (transparencias del reverso,
+     * borrones; mantienen su tono relativo a la tinta del entorno). Cada componente aceptada recibe su oscuridad
+     * MÁXIMA y se propaga 3 px (los tramos débiles de un trazo separados por un fallo de tinta heredan la fuerza del
+     * trazo); se compara con la tinta típica de la zona ([ink], escala de letra): >= ~40 % -> firme. Las motas
+     * ([small]) necesitan más fuerza.
+     * 8UC1 a resolución de trabajo (0..255 = peso de la uniformización).
+     */
+    private fun coherenceMap(lab: IntArray, labels: Set<Int>, small: Set<Int>, dw: Mat, ink: Mat, W: Int, H: Int, bag: MatBag): Mat {
+        val out = Mat(H, W, CvType.CV_8UC1, Scalar(0.0))
+        if (labels.isEmpty()) return out
+        val db = ByteArray(W * H); dw.get(0, 0, db)
+        val maxL = labels.max()
+        val mx = IntArray(maxL + 1) { -1 }
+        for (l in labels) mx[l] = 0
+        for (i in lab.indices) { val l = lab[i]; if (l in 1..maxL && mx[l] >= 0) { val d = db[i].toInt() and 0xFF; if (d > mx[l]) mx[l] = d } }
+        // Motas (más pequeñas que media letra): su fuerza cuenta x0.6 (sólo se uniformizan si son claramente tinta:
+        // el punto de una i sí, el grano del papel o los restos de la cuadrícula no)
+        for (l in small) if (l in 1..maxL && mx[l] > 0) mx[l] = (mx[l] * 0.6).toInt()
+        val sb = ByteArray(W * H)
+        for (i in lab.indices) { val l = lab[i]; if (l in 1..maxL && mx[l] > 0) sb[i] = mx[l].toByte() }
+        val st = bag.mat(); st.create(H, W, CvType.CV_8UC1); st.put(0, 0, sb)
+        Imgproc.dilate(st, st, Cv.kernel(Imgproc.MORPH_ELLIPSE, 7))
+        val lv = bag.mat(); Imgproc.resize(ink, lv, Size(W.toDouble(), H.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR)
+        val sf = bag.mat(); st.convertTo(sf, CvType.CV_32F)
+        val lf = bag.mat(); lv.convertTo(lf, CvType.CV_32F); Core.max(lf, Scalar(20.0), lf)
+        Core.divide(sf, lf, sf)
+        // rampa 0.22..0.42 del nivel de la zona
+        sf.convertTo(sf, -1, 1.0 / 0.20, -0.22 / 0.20)
+        Core.min(sf, Scalar(1.0), sf); Core.max(sf, Scalar(0.0), sf)
+        sf.convertTo(out, CvType.CV_8U, 255.0)
+        return out
+    }
+
+    /**
+     * Semiancho típico del trazo (px de trabajo): mediana de la transformada de distancia en las crestas (máximos
+     * locales) del núcleo de la tinta aceptada (oscuridad >= 45 % de la tinta de la zona). null si hay poca tinta.
+     */
+    private fun strokeHalfWidth(dw: Mat, ink: Mat, keep: Mat, tHigh: Double, bag: MatBag): Double? {
+        val lv = bag.mat(); Imgproc.resize(ink, lv, dw.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
+        val thr = bag.mat(); lv.convertTo(thr, CvType.CV_8U, 0.45); Core.max(thr, Scalar(tHigh), thr)
+        val core = bag.mat(); Core.compare(dw, thr, core, Core.CMP_GE)
+        Core.bitwise_and(core, keep, core)
+        val dt = bag.mat(); Imgproc.distanceTransform(core, dt, Imgproc.DIST_L2, 3)
+        val mx = bag.mat(); Imgproc.dilate(dt, mx, Cv.kernel(Imgproc.MORPH_RECT, 3))
+        val ridge = bag.mat(); Core.compare(dt, mx, ridge, Core.CMP_GE)
+        val pos = bag.mat(); Core.compare(dt, Scalar(0.5), pos, Core.CMP_GT); Core.bitwise_and(ridge, pos, ridge)
+        val n = Core.countNonZero(ridge)
+        if (n < 200) return null
+        // Mediana por histograma (medios píxeles)
+        val dt8 = bag.mat(); dt.convertTo(dt8, CvType.CV_8U, 2.0, -0.5)   // (suelo de 2·dt)
+        return max(1.0, (Cv.percentile(Cv.histogram(dt8, ridge), 0.5) + 0.5) / 2.0)
     }
 
     /** Componentes de [weak] con algún píxel > [tHigh] (histéresis). Rellena [lab] con las etiquetas. */
@@ -743,7 +810,10 @@ object TextRegions {
         val p = prepare(rgb, bgSide = if (fast) 256 else 384, refineSide = if (fast) 320 else 512)
         try {
             val lay = layout(p)
-            try { compose(p, lay, style, bag) } finally { lay.release() }
+            try {
+                val t0 = System.nanoTime()
+                compose(p, lay, style, bag).also { log?.invoke("compose $style %.0f ms".format((System.nanoTime() - t0) / 1e6)) }
+            } finally { lay.release() }
         } finally { p.release() }
     }
 
@@ -751,82 +821,43 @@ object TextRegions {
         val fw = p.dark.cols(); val fh = p.dark.rows()
         val color = style == Style.COLOR
         val out = Mat(fh, fw, if (color) CvType.CV_8UC3 else CvType.CV_8UC1, Scalar.all(255.0))
-        // Zonas en blanco a resolución completa (para recortar la tinta de los recuadros que las tocan)
-        val keepFull = bag.mat()
-        Imgproc.resize(lay.keep, keepFull, Size(fw.toDouble(), fh.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR)
+        val full = Size(fw.toDouble(), fh.toDouble())
+        // Tinta aceptada, nivel de tinta de la zona y peso de la uniformización, a resolución completa
+        val keepFull = bag.mat(); Imgproc.resize(lay.keep, keepFull, full, 0.0, 0.0, Imgproc.INTER_LINEAR)
+        val inkFull = bag.mat(); Imgproc.resize(lay.inkLevel, inkFull, full, 0.0, 0.0, Imgproc.INTER_LINEAR)
+        val cohFull = bag.mat(); Imgproc.resize(lay.coherent, cohFull, full, 0.0, 0.0, Imgproc.INTER_LINEAR)
         val pm = p.paper
         val sigma = max(1.5, p.noise)
         val gw = p.gain.cols(); val gh = p.gain.rows()
         val gRow = FloatArray(1)
-        val d = bag.mat(); val alpha = bag.mat()
-        val lvl = bag.mat(); val den = bag.mat(); val af = bag.mat(); val t0m = bag.mat()
-        val inkFull = bag.mat(); Imgproc.resize(lay.inkLevel, inkFull, Size(fw.toDouble(), fh.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR)
-        val tmp = bag.mat(); val tmp3 = bag.mat()
-        val chs = ArrayList<Mat>(3)
+        // Radio del máximo local "a escala de trazo" (algo más que el semiancho: el centro del trazo entra en la
+        // ventana de los píxeles del borde) y de la ventana del color de la tinta
+        val rad = max(2, (lay.strokeHalf + 1.0).roundToInt()).coerceAtMost(10)
+        log?.invoke("render strokeHalf=%.2f rad=$rad".format(lay.strokeHalf))
+        // Radio de "fondo local" (mínimo): mayor que el semiancho de cualquier trazo normal
+        val radBg = max(rad + 2, (2.5 * lay.strokeHalf + 2.0).roundToInt()).coerceAtMost(16)
+        val pad = max(3 * rad, radBg) + 2
+        val sm = StrokeMats(bag)
         for (r in lay.regions) {
             if (r.kind != Kind.TEXT || r.width <= 0 || r.height <= 0) continue
             // Umbral de tinta según el ruido local (sombras), del centro del recuadro
             p.gain.get(((r.top + r.bottom) / 2.0 / fh * gh).toInt().coerceIn(0, gh - 1), ((r.left + r.right) / 2.0 / fw * gw).toInt().coerceIn(0, gw - 1), gRow)
             val t0 = max(5.0, 2.2 * sigma) * Math.pow(gRow[0].toDouble(), NOISE_GAIN_EXP)
-            // Por franjas de <= ~1 MP: los intermedios en coma flotante quedan acotados aunque el recuadro sea
-            // la página entera a 12-20 MP
+            // Por franjas de <= ~1 MP (con margen para las ventanas locales): los intermedios en coma flotante quedan
+            // acotados aunque el recuadro sea la página entera a 12-20 MP
             val stripH = max(16, STRIP_PIXELS / max(1, r.width))
             var y0 = r.top
             while (y0 < r.bottom) {
                 val y1 = min(r.bottom, y0 + stripH)
-                val rect = Rect(r.left, y0, r.width, y1 - y0)
+                val inner = Rect(r.left, y0, r.width, y1 - y0)
                 y0 = y1
-                val dRoi = p.dark.submat(rect)
-                dRoi.copyTo(d)
-                dRoi.release()
-                // Alfa suave por píxel: rampa t0'..t1 con suavizado (anti-aliasing)
-                val inkRoi = inkFull.submat(rect)
-                inkRoi.convertTo(lvl, CvType.CV_32F)
-                inkRoi.release()
-                Core.max(lvl, Scalar(20.0), lvl)
-                // t0' = max(t0, 12 % de la tinta) y t1 = 90 % de la tinta: el alfa es ~ la cobertura del píxel (bordes
-                // suaves sin engordar el trazo); en zonas de tinta tenue (lápiz) la rampa se estrecha y la refuerza
-                Core.multiply(lvl, Scalar(0.12), t0m); Core.max(t0m, Scalar(t0), t0m)
-                Core.multiply(lvl, Scalar(0.9), den); Core.add(t0m, Scalar(10.0), af); Core.max(den, af, den); Core.subtract(den, t0m, den)
-                d.convertTo(af, CvType.CV_32F); Core.subtract(af, t0m, af)
-                Core.divide(af, den, af)
-                Core.min(af, Scalar(1.0), af); Core.max(af, Scalar(0.0), af)
-                // smoothstep x²(3-2x)
-                Core.multiply(af, af, den); af.convertTo(af, -1, -2.0, 3.0); Core.multiply(af, den, af)
-                af.convertTo(alpha, CvType.CV_8U, 255.0)
-                val kRoi = keepFull.submat(rect)
-                Core.multiply(alpha, kRoi, alpha, 1.0 / 255.0)
-                kRoi.release()
-                val oRoi = out.submat(rect)
-                if (!color) {
-                    Core.bitwise_not(alpha, tmp)
-                    Core.min(oRoi, tmp, oRoi)
-                } else {
-                    // Oscuridad por canal (papel -> 0) reforzada según el recuadro: el lápiz claro se oscurece,
-                    // la tinta ya oscura se mantiene; saturación de la tinta reforzada (diferencias entre canales).
-                    // Refuerzo por zona: 150 / tinta del entorno, entre x1 y x4
-                    Core.divide(150.0, lvl, lvl); Core.min(lvl, Scalar(4.0), lvl); Core.max(lvl, Scalar(1.0), lvl)
-                    val nRoi = p.n.submat(rect)
-                    Core.bitwise_not(nRoi, tmp3)                      // 255 - n
-                    nRoi.release()
-                    Core.subtract(tmp3, Scalar.all(255.0 - pm), tmp3)  // oscuridad respecto del papel
-                    val f = bag.mat(); tmp3.convertTo(f, CvType.CV_32F, 255.0 / pm)
-                    // Saturación: d_c = media + 1.35·(d_c - media)
-                    Core.split(f, chs)
-                    val mean = bag.mat(); Core.add(chs[0], chs[1], mean); Core.add(mean, chs[2], mean); Core.multiply(mean, Scalar(1.0 / 3.0), mean)
-                    for (c in chs) { Core.subtract(c, mean, c); Core.addWeighted(mean, 1.0, c, 1.35, 0.0, c) }
-                    // Alfa en [0,1] y composición sobre blanco: 255 - a·refuerzo·oscuridad
-                    alpha.convertTo(af, CvType.CV_32F, 1.0 / 255.0)
-                    Core.multiply(af, lvl, af)
-                    for (c in chs) { Core.multiply(c, af, c); c.convertTo(c, -1, -1.0, 255.0) }
-                    Core.merge(chs, f)
-                    for (c in chs) c.release()
-                    chs.clear()
-                    f.convertTo(tmp3, CvType.CV_8UC3)
-                    Core.min(oRoi, tmp3, oRoi)
-                    f.release(); mean.release()
-                }
-                oRoi.release()
+                // Margen sólo en los cortes entre franjas: el recuadro ya deja ~0.3 letras de papel alrededor de la tinta
+                val px0 = inner.x; val px1 = inner.x + inner.width
+                val py0 = if (inner.y > r.top) max(0, inner.y - pad) else inner.y
+                val py1 = if (inner.y + inner.height < r.bottom) min(fh, inner.y + inner.height + pad) else inner.y + inner.height
+                val outer = Rect(px0, py0, px1 - px0, py1 - py0)
+                val crop = Rect(inner.x - px0, inner.y - py0, inner.width, inner.height)
+                strokeStrip(p, sm, outer, crop, inkFull, keepFull, cohFull, t0, rad, radBg, color, pm, out.submat(inner))
             }
         }
         // Imágenes: mejora suave del original normalizado
@@ -845,4 +876,162 @@ object TextRegions {
         }
         return out
     }
+
+    /** Intermedios reutilizados entre franjas del render. */
+    private class StrokeMats(bag: MatBag) {
+        val d = bag.mat(); val dc = bag.mat(); val lm = bag.mat(); val f = bag.mat(); val g = bag.mat()
+        val lvl = bag.mat(); val t0m = bag.mat(); val den = bag.mat(); val tmp = bag.mat(); val tmp3 = bag.mat()
+        val aOld = bag.mat(); val aNew = bag.mat(); val gate = bag.mat(); val q = bag.mat(); val k8 = bag.mat()
+        val d3 = bag.mat(); val w = bag.mat(); val dmax = bag.mat(); val num = bag.mat(); val wsum = bag.mat()
+        val qf = bag.mat(); val af = bag.mat(); val nf = bag.mat()
+        /** smoothstep x²(3-2x) de 0..255 a 0..255 */
+        val smooth: Mat = bag.add(Cv.lut { i -> val x = i / 255.0; x * x * (3 - 2 * x) * 255.0 })
+        /** refuerzo de la tinta tenue por zona: clamp(150 / max(tinta, 20), 1, 4) · 63.75 */
+        val boost: Mat = bag.add(Cv.lut { i -> (150.0 / max(i, 20)).coerceIn(1.0, 4.0) * 63.75 })
+    }
+
+    /** dst(8U) = smoothstep(clamp(a·src + b)) · 255 (src en coma flotante u 8 bits). */
+    private fun smooth8(src: Mat, a: Double, b: Double, dst: Mat, s: StrokeMats) {
+        src.convertTo(dst, CvType.CV_8U, 255.0 * a, 255.0 * b)
+        Core.LUT(dst, s.smooth, dst)
+    }
+
+    /**
+     * Una franja de un recuadro de escritura: calcula sobre [outer] (franja + margen en los cortes) y escribe [crop]
+     * (la franja, en coordenadas de [outer]) en [dst].
+     *
+     * Alfa de la tinta, mezcla de dos modelos según [cohFull] (peso de trazo firme):
+     *  - ANTIGUO (manchas tenues: transparencias, borrones): rampa relativa a la tinta típica de la zona (12 %..90 %);
+     *  - UNIFORME (trazos firmes): cierre de 3 px (une fallos de tinta de 1-2 px y el grano del papel dentro del
+     *    trazo) y oscuridad relativa al MÁXIMO LOCAL a escala de trazo ([rad]): el centro de un tramo débil del
+     *    trazo (poca presión, lápiz suave) vale lo mismo que el de un tramo fuerte, y el borde conserva su
+     *    cobertura parcial (anti-aliasing). Una compuerta absoluta (t0..2·t0) deja fuera el ruido del papel. Sólo en
+     *    estructuras finas (en el interior de una mancha ancha manda el modelo antiguo).
+     * COLOR: los trazos firmes se pintan con el color de la tinta del entorno (media ponderada a escala de trazo,
+     * saturación reforzada) y una intensidad única (>= [MIN_TONE]): sin tramos claros ni desaturados.
+     * Las rampas y productos van en 8 bits con tablas (rápido en gama baja); sólo los cocientes en coma flotante.
+     */
+    private fun strokeStrip(
+        p: Prepared, s: StrokeMats, outer: Rect, crop: Rect, inkFull: Mat, keepFull: Mat, cohFull: Mat,
+        t0: Double, rad: Int, radBg: Int, color: Boolean, pm: Double, dst: Mat,
+    ) {
+        val dRoi = p.dark.submat(outer); dRoi.copyTo(s.d); dRoi.release()
+        val inkRoi = inkFull.submat(outer); inkRoi.convertTo(s.lvl, CvType.CV_32F); inkRoi.release()
+        Core.max(s.lvl, Scalar(20.0), s.lvl)
+        // --- Alfa antiguo: rampa t0' = max(t0, 12 % de la tinta) .. 90 % de la tinta
+        Core.multiply(s.lvl, Scalar(0.12), s.t0m); Core.max(s.t0m, Scalar(t0), s.t0m)
+        Core.multiply(s.lvl, Scalar(0.9), s.den); Core.add(s.t0m, Scalar(10.0), s.tmp); Core.max(s.den, s.tmp, s.den); Core.subtract(s.den, s.t0m, s.den)
+        s.d.convertTo(s.f, CvType.CV_32F); Core.subtract(s.f, s.t0m, s.f); Core.divide(s.f, s.den, s.f)
+        smooth8(s.f, 1.0, 0.0, s.aOld, s)
+        // --- Alfa uniforme: cierre 3 px, oscuridad relativa al máximo local a escala de trazo
+        Imgproc.morphologyEx(s.d, s.dc, Imgproc.MORPH_CLOSE, Cv.kernel(Imgproc.MORPH_ELLIPSE, 3))
+        Imgproc.dilate(s.dc, s.lm, Cv.kernel(Imgproc.MORPH_RECT, 2 * rad + 1))
+        val n0 = 0.5 * t0
+        // denominador = max(máx. local - n0, 2.5·t0, 12 % de la tinta de la zona): el ruido aislado no llega a tinta plena
+        s.lm.convertTo(s.den, CvType.CV_32F, 1.0, -n0)
+        Core.multiply(s.lvl, Scalar(0.12), s.t0m); Core.max(s.t0m, Scalar(2.5 * t0), s.t0m)
+        Core.max(s.den, s.t0m, s.den)
+        s.dc.convertTo(s.f, CvType.CV_32F, 1.0, -n0); Core.divide(s.f, s.den, s.f)
+        // r 0.2..0.65 -> 0..1 (cobertura del borde, sin engordar el trazo) · compuerta absoluta t0..2·t0
+        smooth8(s.f, 1.0 / 0.45, -0.2 / 0.45, s.aNew, s)
+        smooth8(s.dc, 1.0 / t0, -1.0, s.gate, s)
+        Core.multiply(s.aNew, s.gate, s.aNew, 1.0 / 255.0)
+        // --- Peso de la uniformización: trazo firme ([cohFull]) y fino (oscuridad sobre el mínimo local a ~2.5
+        // semianchos, relativa a la propia; en el interior de una mancha ancha el mínimo local es la propia mancha)
+        Imgproc.erode(s.dc, s.lm, Cv.kernel(Imgproc.MORPH_RECT, 2 * radBg + 1))
+        Core.subtract(s.dc, s.lm, s.tmp3)                         // 8U, satura en 0
+        s.tmp3.convertTo(s.g, CvType.CV_32F)
+        s.dc.convertTo(s.den, CvType.CV_32F); Core.max(s.den, Scalar(2.0 * t0), s.den)
+        Core.divide(s.g, s.den, s.g)
+        smooth8(s.g, 1.0 / 0.4, -0.3 / 0.4, s.q, s)
+        val cRoi = cohFull.submat(outer); Core.multiply(s.q, cRoi, s.q, 1.0 / 255.0); cRoi.release()
+        // --- Tinta aceptada
+        val kRoi = keepFull.submat(outer)
+        Core.multiply(s.aOld, kRoi, s.aOld, 1.0 / 255.0); Core.multiply(s.aNew, kRoi, s.aNew, 1.0 / 255.0)
+        kRoi.release()
+        // Pesos de cada modelo (8 bits): (1-q)·aOld y q·aNew
+        Core.bitwise_not(s.q, s.gate)
+        Core.multiply(s.aOld, s.gate, s.aOld, 1.0 / 255.0)
+        Core.multiply(s.aNew, s.q, s.gate, 1.0 / 255.0)          // gate = q·aNew (aNew se conserva para el color)
+        if (!color) {
+            // a = (1-q)·aOld + q·aNew  ->  255 - a
+            Core.add(s.aOld, s.gate, s.k8)
+            Core.bitwise_not(s.k8, s.k8)
+            val a8c = s.k8.submat(crop)
+            Core.min(dst, a8c, dst)
+            a8c.release(); dst.release()
+            return
+        }
+        // --- COLOR. Oscuridad por canal respecto del papel (8UC3, 0..pm)
+        val nRoi = p.n.submat(outer)
+        Core.bitwise_not(nRoi, s.tmp3); nRoi.release()
+        Core.subtract(s.tmp3, Scalar.all(255.0 - pm), s.tmp3)
+        val sc = 255.0 / pm
+        val full = s.d.size()
+        val half = Size(max(1.0, ((full.width + 1) / 2).toDouble()), max(1.0, ((full.height + 1) / 2).toDouble()))
+        // Uniforme: color medio de la tinta del entorno ponderado por (alfa·oscuridad)² (mandan los píxeles firmes), a
+        // media resolución (campo suave de ventana ~6 semianchos)
+        val ch = ArrayList<Mat>(3); Core.split(s.tmp3, ch)
+        Core.max(ch[0], ch[1], s.dc); Core.max(s.dc, ch[2], s.dc)
+        for (c in ch) c.release()
+        ch.clear()
+        Core.multiply(s.aNew, s.dc, s.k8, 1.0 / 255.0)
+        Imgproc.resize(s.k8, s.lm, half, 0.0, 0.0, Imgproc.INTER_AREA)
+        s.lm.convertTo(s.w, CvType.CV_32F); Core.multiply(s.w, s.w, s.w)
+        Imgproc.resize(s.tmp3, s.d3, half, 0.0, 0.0, Imgproc.INTER_AREA)
+        s.d3.convertTo(s.d3, CvType.CV_32FC3, sc)
+        val w3 = ArrayList<Mat>(3); repeat(3) { w3.add(s.w) }
+        Core.merge(w3, s.nf)
+        Core.multiply(s.d3, s.nf, s.d3)
+        val kh = Cv.odd(max(3, 3 * rad)).toDouble()
+        Imgproc.boxFilter(s.d3, s.d3, -1, Size(kh, kh))
+        Imgproc.boxFilter(s.w, s.wsum, -1, Size(kh, kh))
+        Core.max(s.wsum, Scalar(1e-3), s.wsum)
+        Core.split(s.d3, ch)
+        for (c in ch) Core.divide(c, s.wsum, c)
+        // Intensidad: la del entorno, al menos MIN_TONE -> factor k; la media del tono se escala por k
+        Core.max(ch[0], ch[1], s.num); Core.max(s.num, ch[2], s.num)
+        Core.max(s.num, Scalar(1.0), s.tmp)
+        Core.max(s.num, Scalar(MIN_TONE), s.num); Core.min(s.num, Scalar(MAX_TONE), s.num)
+        Core.divide(s.num, s.tmp, s.num)                         // k
+        val mean = s.wsum
+        Core.add(ch[0], ch[1], mean); Core.add(mean, ch[2], mean); Core.multiply(mean, Scalar(1.0 / 3.0), mean)
+        // croma: x k si la tinta es claramente de color (croma relativo (máx-mín)/máx >= 0.35: bolígrafo azul, rojo),
+        // x min(k, 1.3) si es casi gris (<= 0.15: lápiz, tinta negra con el tinte de una sombra); x1.35 de saturación
+        Core.min(ch[0], ch[1], s.f); Core.min(s.f, ch[2], s.f)
+        Core.max(ch[0], ch[1], s.g); Core.max(s.g, ch[2], s.g)
+        Core.subtract(s.g, s.f, s.f); Core.max(s.g, Scalar(1.0), s.g); Core.divide(s.f, s.g, s.f)
+        s.f.convertTo(s.f, -1, 1.0 / 0.2, -0.15 / 0.2); Core.min(s.f, Scalar(1.0), s.f); Core.max(s.f, Scalar(0.0), s.f)
+        Core.min(s.num, Scalar(1.3), s.tmp)
+        Core.subtract(s.num, s.tmp, s.g); Core.multiply(s.g, s.f, s.g); Core.add(s.tmp, s.g, s.tmp)
+        Core.multiply(s.tmp, Scalar(1.35), s.tmp)
+        Core.multiply(mean, s.num, s.num)                         // media escalada
+        for (c in ch) { Core.subtract(c, mean, c); Core.multiply(c, s.tmp, c); Core.add(c, s.num, c) }
+        Core.merge(ch, s.d3)
+        for (c in ch) c.release()
+        Imgproc.resize(s.d3, s.nf, full, 0.0, 0.0, Imgproc.INTER_LINEAR)
+        s.nf.convertTo(s.af, CvType.CV_8UC3)                       // tono uniforme (8UC3)
+        // Antiguo: oscuridad del propio píxel con saturación 1.35 (d_c = 1.35·d_c - 0.35·media) y refuerzo por zona
+        // 150 / tinta (x1..x4, codificado x63.75)
+        val sat = Mat(3, 3, CvType.CV_32F)
+        val dg = 1.35 - 0.35 / 3; val og = -0.35 / 3
+        sat.put(0, 0, dg * sc, og * sc, og * sc, og * sc, dg * sc, og * sc, og * sc, og * sc, dg * sc)
+        Core.transform(s.tmp3, s.g, sat); sat.release()   // 8UC3 saturado
+        val inkRoi2 = inkFull.submat(outer); Core.LUT(inkRoi2, s.boost, s.k8); inkRoi2.release()
+        Core.multiply(s.aOld, s.k8, s.aOld, 1.0 / 255.0)       // (1-q)·aOld·refuerzo·63.75
+        val a3 = ArrayList<Mat>(3)
+        repeat(3) { a3.add(s.aOld) }; Core.merge(a3, s.d3); a3.clear()
+        Core.multiply(s.g, s.d3, s.g, 1.0 / 63.75)
+        repeat(3) { a3.add(s.gate) }; Core.merge(a3, s.d3)
+        Core.multiply(s.af, s.d3, s.af, 1.0 / 255.0)
+        Core.add(s.g, s.af, s.g)
+        Core.bitwise_not(s.g, s.g)
+        val oc = s.g.submat(crop)
+        Core.min(dst, oc, dst)
+        oc.release(); dst.release()
+    }
+
+    /** Intensidad mínima/máxima (oscuridad del canal más absorbido, 0..255) de un trazo firme en "Texto resaltado". */
+    private const val MIN_TONE = 210.0
+    private const val MAX_TONE = 240.0
 }
