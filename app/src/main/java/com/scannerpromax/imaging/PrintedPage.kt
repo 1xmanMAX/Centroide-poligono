@@ -48,14 +48,23 @@ internal object PrintedPage {
 
     internal var log: ((String) -> Unit)? = null
 
+    /**
+     * [printed] = usar este render (todo lo que no es una hoja de cuaderno con rayado, ver [PrintClassifier]);
+     * [notebook] = hoja de cuaderno -> recuadros de escritura. [letterHeight] en px de la imagen analizada (completa).
+     */
     class Stats(
         val printed: Boolean,
         val linesH: Int,
         val linesV: Int,
         val textComps: Int,
-        val letterHeight: Double,   // px de la imagen analizada (completa)
+        val letterHeight: Double,
         val colorGrid: Boolean,
-    )
+        val notebook: Boolean = !printed,
+        val align: Double = 0.0,
+    ) {
+        /** Las mismas estadísticas para la imagen ampliada [k] veces (super-resolución previa al render). */
+        fun scaled(k: Double) = Stats(printed, linesH, linesV, textComps, letterHeight * k, colorGrid, notebook, align)
+    }
 
     /**
      * Clasificación impreso / manuscrito. Trabaja a <= [ANALYSIS_SIDE] px (INTER_AREA): la vista previa (~1200 px)
@@ -65,7 +74,8 @@ internal object PrintedPage {
         val sm = bag.mat()
         val s = Cv.downscale(rgb, sm, ANALYSIS_SIDE)
         val w = sm.cols(); val h = sm.rows()
-        if (min(w, h) < 120) return@use Stats(false, 0, 0, 0, 0.0, false)
+        // Imagen diminuta: nada que clasificar -> la ruta que conserva todo
+        if (min(w, h) < 120) return@use Stats(true, 0, 0, 0, 0.0, false)
         val side = max(w, h).toDouble()
         val ch = ArrayList<Mat>(3); Core.split(sm, ch); for (c in ch) bag.add(c)
         // Oscuridad del canal MÁXIMO (la cuadrícula azul clara de un cuaderno apenas lo oscurece; la tinta negra o
@@ -90,6 +100,14 @@ internal object PrintedPage {
         val lineChroma = if (Core.countNonZero(lines) > 0) Core.mean(chroma, lines).`val`[0] - paperChroma else 0.0
         val lineDark = if (Core.countNonZero(lines) > 0) Core.mean(d, lines).`val`[0] else 0.0
         val colorGrid = lh + lv >= 6 && lineChroma > 10.0
+        // Rectas CLARAS (renglones o cuadrícula de cuaderno, a lápiz o de color): umbral bajo
+        val linesLow = bag.mat()
+        val lowExt = DoubleArray(1)
+        val (llh, llv) = countLines(d, max(10.0, 3.5 * noise), side, bag, linesLow, lowExt)
+        val lowCnt = Core.countNonZero(linesLow)
+        val lowThick = lowCnt / max(1.0, lowExt[0])
+        val lowChroma = if (lowCnt > 0) Core.mean(chroma, linesLow).`val`[0] - paperChroma else 0.0
+        val lowDark = if (lowCnt > 0) Core.mean(d, linesLow).`val`[0] else 0.0
 
         // Componentes de tinta oscura (texto): tamaño y regularidad
         val ink = bag.mat(); Core.compare(d, Scalar(max(60.0, 8.0 * noise)), ink, Core.CMP_GT)
@@ -98,24 +116,39 @@ internal object PrintedPage {
         val st = IntArray(max(0, nc) * 5); if (nc > 0) stats.get(0, 0, st)
         val hs = ArrayList<Int>()
         val minH = max(3, (side * 0.0025).roundToInt()); val maxH = max(minH + 2, (side * 0.025).roundToInt())
+        // Para la alineación de líneas base: también palabras enlazadas (más anchas) y letra algo mayor
+        val maxH4 = max(minH + 2, (side * 0.04).roundToInt())
+        val boxes = IntArray(max(0, nc) * 4); var nb = 0
+        val bh = ArrayList<Int>()
         for (c in 1 until nc) {
             val cw = st[c * 5 + 2]; val chh = st[c * 5 + 3]; val a = st[c * 5 + 4]
             val tall = max(cw, chh)
             if (tall in minH..maxH && a >= 4 && min(cw, chh) * 8 >= tall) hs.add(tall)
+            if (chh in minH..maxH4 && cw <= maxH4 * 6 && a >= 4) {
+                boxes[nb * 4] = st[c * 5]; boxes[nb * 4 + 1] = st[c * 5 + 1]; boxes[nb * 4 + 2] = cw; boxes[nb * 4 + 3] = chh
+                nb++; bh.add(chh)
+            }
         }
+        bh.sort()
+        val align = if (nb < 8) 0.0 else PrintClassifier.baselineAlignment(boxes.copyOf(nb * 4), bh[bh.size / 2].toDouble())
         hs.sort()
         val med = if (hs.isEmpty()) 0.0 else hs[hs.size / 2].toDouble()
         val iqr = if (hs.size < 8) 99.0 else (hs[hs.size * 3 / 4] - hs[hs.size / 4]).toDouble() / max(1.0, med)
+        // Tabla impresa: muchas rectas largas OSCURAS en ambas direcciones (si son de color es la cuadrícula de un cuaderno)
         val table = min(lh, lv) >= 6 && lh + lv >= 16
         // Texto impreso sin tabla: mucho texto pequeño (letra < 1.1 % del lado) y regular, sin cuadrícula de color
         val text = !colorGrid && hs.size >= 600 && med in 1.0..(side * 0.011) && iqr <= 0.6
-        val printed = !colorGrid && (table || text)
-        log?.invoke("printed=$printed lines H=$lh V=$lv lineChroma=%.1f (papel %.1f) dark=%.0f comps=${hs.size} med=%.1f iqr=%.2f noise=%.1f".format(lineChroma, paperChroma, lineDark, med, iqr, noise))
-        Stats(printed, lh, lv, hs.size, med / s, colorGrid)
+        val notebook = PrintClassifier.isNotebook(PrintClassifier.Features(
+            fullSide = max(rgb.cols(), rgb.rows()), rulingLines = llh + llv, rulingDark = lowDark, rulingChroma = lowChroma,
+            rulingThick = lowThick, align = align, table = table && !colorGrid, denseText = text,
+        ))
+        val printed = !notebook
+        log?.invoke("printed=$printed notebook=$notebook llh=$llh llv=$llv lowChroma=%.1f lowDark=%.1f lowThick=%.2f align=%.2f ".format(lowChroma, lowDark, lowThick, align) + "lines H=$lh V=$lv lineChroma=%.1f (papel %.1f) dark=%.0f comps=${hs.size} med=%.1f iqr=%.2f noise=%.1f table=$table text=$text".format(lineChroma, paperChroma, lineDark, med, iqr, noise))
+        Stats(printed, lh, lv, hs.size, med / s, colorGrid, notebook, align)
     }
 
     /** Rectas largas (>= 1/12 del lado) y finas en [d] > [thr], horizontales y verticales (±4°). */
-    private fun countLines(d: Mat, thr: Double, side: Double, bag: MatBag, accepted: Mat): Pair<Int, Int> {
+    private fun countLines(d: Mat, thr: Double, side: Double, bag: MatBag, accepted: Mat, extent: DoubleArray? = null): Pair<Int, Int> {
         val m = bag.mat(); Core.compare(d, Scalar(thr), m, Core.CMP_GT)
         // Las rectas finas de 1 px se cortan por el ruido o se curvan con la hoja: cierre leve
         val raw = bag.add(m.clone())
@@ -141,6 +174,7 @@ internal object PrintedPage {
                 val thick = st[c * 5 + 4].toDouble() / max(1, ext)
                 if (ext >= len && thick <= max(6.0, side * 0.006)) {
                     cnt++
+                    if (extent != null) extent[0] += ext.toDouble()
                     Core.compare(labels, Scalar(c.toDouble()), sel, Core.CMP_EQ)
                     Core.bitwise_or(accepted, sel, accepted)
                 }
@@ -175,9 +209,14 @@ internal object PrintedPage {
         }
         val g0 = bag.add(Cv.gray(smN))
         val hist = Cv.histogram(g0)
-        val (noise, pm) = Cv.paperStats(hist)
-        val black = min(Cv.percentile(hist, 0.003), 100) * 0.85
+        val (noise, pm0) = Cv.paperStats(hist)
+        val pm = max(pm0, 1.0)
         val white = (pm - 2.5 * noise).coerceIn(170.0, 250.0)
+        // Punto negro: lo más oscuro de la página (0.3 %)... salvo que TODA la tinta sea tenue (recibo térmico
+        // desvaído, lápiz, fotocopia clara): en COLOR el trazo típico se lleva casi a negro (ver [faintBlack]).
+        // En B/N no hace falta (la binarización local ya separa la tinta tenue) y empeoraba la lectura OCR.
+        val darkest = min(Cv.percentile(hist, 0.003), 100) * 0.85
+        val black = if (color) faintBlack(maxChannel(smN, bag), st.letterHeight * g0.cols() / w, white, darkest, noise, bag) else darkest
         // Ampliación para letra pequeña (sólo render final; dentro del límite de píxeles)
         var f = 1.0
         if (!fast && st.letterHeight > 0 && st.letterHeight < SMALL_LETTER) {
@@ -286,6 +325,36 @@ internal object PrintedPage {
         levels.release(); satLut.release(); tmp.release()
         log?.invoke("render ${style} ${w}x$h -> ${ow}x$oh f=%.2f lh=%.1f win=$win black=%.0f white=%.0f noise=%.1f images=${images.size}".format(f, lh, black, white, noise))
         out
+    }
+
+    /**
+     * Punto negro para páginas de tinta TENUE. Contraste de cada trazo = black-hat (cierre - imagen) del canal
+     * máximo [v] (la tinta gris o negra lo oscurece; los sombreados de color no) con un núcleo de ~2.5 alturas de
+     * letra: sólo estructuras finas (letras, líneas), no bloques. Si el percentil 90 de ese contraste entre los
+     * píxeles de trazo es bajo (toda la página es tenue; un logo o un sello oscuros son pocos píxeles y no lo
+     * cambian), el negro sube hasta que ese trazo típico quede al 15 % del blanco. En una página con tinta oscura
+     * (aunque tenga transparencia del reverso o manchas tenues) el percentil 90 es alto y no cambia nada.
+     */
+    private fun faintBlack(v: Mat, letter: Double, white: Double, black: Double, noise: Double, bag: MatBag): Double {
+        val side = max(v.cols(), v.rows())
+        val lhS = if (letter > 0) letter else side / 250.0
+        val k = Cv.odd((2.5 * lhS).roundToInt().coerceIn(5, 61))
+        val bh = bag.mat(); Imgproc.morphologyEx(v, bh, Imgproc.MORPH_BLACKHAT, Cv.kernel(Imgproc.MORPH_RECT, k))
+        val minC = max(25.0, 6.0 * noise).roundToInt()
+        val hist = Cv.histogram(bh)
+        val strokes = DoubleArray(256) { if (it >= minC) hist[it] else 0.0 }
+        if (strokes.sum() < 0.002 * v.total()) return black
+        val c90 = Cv.percentile(strokes, 0.9).toDouble()
+        val faint = white - c90 / 0.85
+        return if (faint > black) min(faint, white - 60.0) else black
+    }
+
+    /** Canal máximo (V) de un RGB: los fondos de color claros (sombreados azules, naranjas) apenas lo oscurecen. */
+    private fun maxChannel(rgb: Mat, bag: MatBag): Mat {
+        val ch = ArrayList<Mat>(3); Core.split(rgb, ch)
+        val v = bag.mat(); Core.max(ch[0], ch[1], v); Core.max(v, ch[2], v)
+        for (c in ch) c.release()
+        return v
     }
 
     /** COLOR: niveles (papel -> blanco), saturación del color real y realce de la luminancia. Devuelve Mat nuevo. */

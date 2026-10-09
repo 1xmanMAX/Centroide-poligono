@@ -77,6 +77,8 @@ object ImageEnhancer {
         val colorFraction: Float,
         val inkFraction: Float,
         val paperLevel: Float,
+        /** Escritura clara sobre fondo oscuro (pizarra de tiza, modo oscuro): se invierte antes de segmentar. */
+        val darkBoard: Boolean = false,
     )
 
     /** Guarda el contexto de la aplicación (necesario para cargar el modelo de super-resolución de assets). */
@@ -124,7 +126,8 @@ object ImageEnhancer {
     internal fun isSegmented(filter: FilterType, analysis: ContentAnalysis?): Boolean = when (filter) {
         FilterType.MAGIC, FilterType.MAGIC_PRO, FilterType.NO_SHADOW, FilterType.LIGHTEN,
         FilterType.BLACK_WHITE, FilterType.GRAYSCALE, FilterType.ECO_INK -> true
-        FilterType.AUTO -> analysis?.kind.let { it == null || it == ContentKind.TEXT || it == ContentKind.TEXT_COLOR || it == ContentKind.LOW_LIGHT }
+        FilterType.AUTO -> analysis?.darkBoard == true ||
+            analysis?.kind.let { it == null || it == ContentKind.TEXT || it == ContentKind.TEXT_COLOR || it == ContentKind.LOW_LIGHT }
         else -> false
     }
 
@@ -144,7 +147,18 @@ object ImageEnhancer {
         val src = if (rgb.channels() == 3) rgb else Cv.ensureRgb(rgb)
         try {
             val docFilter = filter != FilterType.ORIGINAL && filter != FilterType.VIVID
+            // Pizarra de tiza / modo oscuro: los filtros de segmentación suponen tinta oscura sobre papel claro
+            // -> se invierte la luminancia (la tiza pasa a ser tinta oscura sobre blanco) y se procesa igual.
+            val darkBoard = when {
+                filter == FilterType.AUTO -> analysis?.darkBoard ?: false
+                segmentedFamily(filter) -> runCatching { PrintPolarity.analyze(src).inverted }.getOrDefault(false)
+                else -> false
+            }
             val out = when {
+                darkBoard -> {
+                    val inv = PrintPolarity.invertLuma(src)
+                    try { applyFilter(inv, filter, opt, analysis) } finally { inv.release() }
+                }
                 // Imagen casi negra (tapa puesta, escena a oscuras): no hay papel que normalizar; la división por
                 // el fondo sólo produciría gris moteado. Sólo niveles con ganancia acotada.
                 docFilter && Cv.isNearlyBlack(src) -> nearlyBlack(src, filter)
@@ -155,6 +169,13 @@ object ImageEnhancer {
         } finally {
             if (src !== rgb) src.release()
         }
+    }
+
+    /** Filtros que se renderizan con la segmentación ([TextRegions] / [PrintedPage]). */
+    private fun segmentedFamily(filter: FilterType) = when (filter) {
+        FilterType.MAGIC, FilterType.MAGIC_PRO, FilterType.NO_SHADOW, FilterType.LIGHTEN,
+        FilterType.BLACK_WHITE, FilterType.GRAYSCALE, FilterType.ECO_INK -> true
+        else -> false
     }
 
     /** Niveles suaves (ganancia <= x4) para imágenes casi negras. Devuelve Mat nuevo. */
@@ -197,6 +218,7 @@ object ImageEnhancer {
      * sub-píxeles RGB de una pantalla sí). La tinta más oscura se mide a ~768 px.
      */
     internal fun analyzeMat(rgb: Mat): ContentAnalysis = MatBag().use { bag ->
+        val polarity = runCatching { PrintPolarity.analyze(rgb) }.getOrNull()
         val sm = bag.mat()
         Cv.downscale(rgb, sm, 256)
         val g = bag.add(Cv.gray(sm))
@@ -247,7 +269,9 @@ object ImageEnhancer {
 
         // Poca luz = escena oscura en general (no media página en sombra: eso lo resuelve el modelo de fondo)
         val lowLight = bgLevel < 90 && bgHigh < 130
+        val darkBoard = polarity?.inverted == true
         val kind = when {
+            darkBoard -> ContentKind.WHITEBOARD
             moire -> ContentKind.SCREEN
             paper < 0.30 -> ContentKind.PHOTO
             !lowLight && color < 0.02 && receiptShape &&
@@ -261,11 +285,11 @@ object ImageEnhancer {
             ContentKind.SCREEN -> if (paper < 0.30) FilterType.VIVID else FilterType.MAGIC
             ContentKind.PHOTO -> FilterType.VIVID
             ContentKind.RECEIPT -> FilterType.GRAYSCALE
-            ContentKind.WHITEBOARD -> FilterType.WHITEBOARD
+            ContentKind.WHITEBOARD -> if (darkBoard) FilterType.MAGIC else FilterType.WHITEBOARD
             ContentKind.LOW_LIGHT -> FilterType.MAGIC_PRO
             ContentKind.TEXT, ContentKind.TEXT_COLOR -> FilterType.MAGIC
         }
-        ContentAnalysis(kind, rec, lowLight, moire, paper.toFloat(), color.toFloat(), ink.toFloat(), bgLevel.toFloat())
+        ContentAnalysis(kind, rec, lowLight, moire, paper.toFloat(), color.toFloat(), ink.toFloat(), bgLevel.toFloat(), darkBoard)
     }
 
     private const val MOIRE_THRESHOLD = 15.0
@@ -365,8 +389,10 @@ object ImageEnhancer {
     /** AUTO: procesa según la clase detectada (con anti-muaré previo si es una foto de pantalla). */
     private fun auto(rgb: Mat, opt: Options, a: ContentAnalysis): Mat {
         var base = rgb
-        if (a.moire) base = rgb.clone().also { descreen(it) }
+        if (a.moire && !a.darkBoard) base = rgb.clone().also { descreen(it) }
         try {
+            // Pizarra de tiza: [applyMat] ya invirtió la luminancia -> segmentación como un documento
+            if (a.darkBoard) return segmented(base, opt, TextRegions.Style.COLOR)
             return when (a.kind) {
                 ContentKind.PHOTO -> vivid(base, opt)
                 ContentKind.RECEIPT -> receipt(base, opt)
@@ -434,12 +460,18 @@ object ImageEnhancer {
     }
 
     /**
-     * "Texto resaltado" (COLOR) y "Blanco y negro": la escritura se segmenta en recuadros ([TextRegions]); fuera,
-     * blanco puro; dentro, sólo la tinta (bordes suaves, color reforzado o negro); fotos y bloques de color se
-     * conservan con una mejora suave. Antes: super-resolución x2 si la fuente es pequeña (sólo render final,
-     * con presupuesto por gama). La salida tiene el tamaño de la entrada (x2 con super-resolución): las estimaciones se hacen a resolución reducida y se aplican a la completa.
+     * "Texto resaltado" (COLOR) y "Blanco y negro". Enrutado por tipo de página ([PrintedPage.analyze] +
+     * [PrintClassifier], sobre la imagen ANTES de la super-resolución: misma decisión en la vista previa y en el
+     * render final):
+     *  - hoja de CUADERNO con rayado claro -> recuadros de escritura ([TextRegions]): borra la cuadrícula o los
+     *    renglones y deja la escritura sobre blanco puro;
+     *  - todo lo demás (impresos, tablas, formularios, recibos, tarjetas, pantallas, pizarras, documentos antiguos,
+     *    letra a mano sobre papel liso) -> render tipo fotocopiadora ([PrintedPage]) que conserva todo el contenido.
+     * Antes: super-resolución x2 si la fuente es pequeña (sólo render final, con presupuesto por gama). La salida
+     * tiene el tamaño de la entrada (x2 con super-resolución).
      */
     private fun segmented(rgb: Mat, opt: Options, style: TextRegions.Style): Mat = MatBag().use { bag ->
+        val stats = runCatching { PrintedPage.analyze(rgb) }.getOrNull()
         var base = rgb
         // Sin anti-muaré: la cuadrícula azul de un cuaderno es periódica y cromática y el detector de muaré la
         // confundía con una pantalla (el des-tramado emborronaba la escritura). La segmentación ya deja el fondo
@@ -449,12 +481,18 @@ object ImageEnhancer {
         ) {
             base = bag.add(SuperResolution.upscale2x(base, lowEnd = !opt.highEnd, maxPixels = opt.maxPixels))
         }
-        // Documento IMPRESO (tabla, formulario, informe): copia tipo fotocopiadora que conserva todo el contenido
-        // (letra pequeña, líneas finas de la tabla, sombreados, logos). Los recuadros de escritura son para los
-        // apuntes a mano en cuadernos.
-        val printed = runCatching { PrintedPage.analyze(base) }.getOrNull()
-        if (printed != null && printed.printed) return@use PrintedPage.render(base, style, opt.fast, opt.maxPixels, printed)
-        TextRegions.render(base, style, opt.fast)
+        if (stats != null && stats.printed) {
+            val k = base.cols().toDouble() / max(1, rgb.cols())
+            return@use PrintedPage.render(base, style, opt.fast, opt.maxPixels, if (k != 1.0) stats.scaled(k) else stats)
+        }
+        // Si la segmentación de cuaderno falla con una imagen atípica (no por memoria), la ruta que conserva todo
+        try {
+            TextRegions.render(base, style, opt.fast)
+        } catch (e: Exception) {
+            if (Cv.isOutOfMemory(e)) throw e
+            val k = base.cols().toDouble() / max(1, rgb.cols())
+            PrintedPage.render(base, style, opt.fast, opt.maxPixels, stats?.let { if (k != 1.0) it.scaled(k) else it })
+        }
     }
 
     /**
