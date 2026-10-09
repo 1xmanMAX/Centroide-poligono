@@ -38,9 +38,15 @@ import kotlin.math.roundToInt
  * ENVOLVENTE mínimo con lados sobre aristas del casco (recupera esquinas redondeadas o "mordidas" por una
  * sombra) / minAreaRect. Cada hipótesis se ajusta además a los bordes reales (máximo contraste a lo largo de
  * la normal, rectas por mitades de lado para páginas curvadas).
+ *  7. (Foto completa) Rectas de Hough sobre bordes sin texto (mediana 5x5) agrupadas en lados y combinadas en
+ *     cuadriláteros ([DetLines]): tarjetas sujetas con los dedos o bordes interrumpidos que no cierran contorno.
  * Puntuación: área, ángulos, y apoyo de CADA lado sobre bordes con contraste de color a ambos lados (la veta
  * de la madera, la cuadrícula o el texto no cuentan). Los tramos pegados al borde de la imagen son neutros:
  * un documento que se sale del encuadre queda con ese lado sobre el borde (nunca dos lados opuestos).
+ * La puntuación ordena (premia el área); la CONFIANZA devuelta sale de la calidad del borde y no castiga a los
+ * documentos pequeños en el encuadre. Después de ordenar se descartan los marcos o tablas impresos de una
+ * página escaneada (papel igual a ambos lados y contenido fuera) y, si el mejor contorno tiene un borde pobre
+ * (hoja + trozo de mesa o de póster), se prefiere un candidato interior con borde nítido.
  */
 class DocumentDetector(private val tier: DeviceTier) {
 
@@ -50,16 +56,26 @@ class DocumentDetector(private val tier: DeviceTier) {
     /** Buffers reutilizables de una pasada de detección. */
     private class Buffers {
         val blur = Mat(); val tmp = Mat(); val edges = Mat(); val edges2 = Mat()
-        val otsu = Mat(); val emask = Mat(); val emaskClosed = Mat(); val hough = Mat(); val lines = Mat(); val hierarchy = Mat()
+        val otsu = Mat(); val emask = Mat(); val emaskClosed = Mat(); val hough = Mat(); val lines = Mat(); val lines2 = Mat(); val hierarchy = Mat()
         val gx = Mat(); val gy = Mat(); val mag = Mat(); val mag2 = Mat(); val colorTmp = Mat()
         val hullIdx = MatOfInt(); val approx = MatOfPoint2f(); val hull2f = MatOfPoint2f()
         val chromaMasks = arrayOf(Mat(), Mat()); val chromaMasksInv = arrayOf(Mat(), Mat())
         val sideSupport = DoubleArray(5)
+        /** Rasgos del último [scoreQuad] válido: área, maxCos, apoyo global, apoyo mínimo, fracción en el borde. */
+        val feat = DoubleArray(5)
         val chromaBlur = arrayOf(Mat(), Mat())
         var emaskBytes = ByteArray(0)
         var lBytes = ByteArray(0)
         var cBytes = arrayOf(ByteArray(0), ByteArray(0))
         var nChroma = 0
+        /** Mediana de la luminancia suavizada de toda la imagen de trabajo. */
+        var lMedian = 128
+        /** Máscara de tinta (oscuro respecto del papel de alrededor) y nivel del papel; se calculan a demanda. */
+        val ink = Mat(); val quadMask = Mat(); var inkReady = false; var paperLevel = 0
+        /** Canales de entrada de la pasada actual (no son de los búferes: no se liberan aquí) y bordes para rectas. */
+        var lRaw: Mat = Mat(); var chromaRaw: List<Mat> = emptyList(); val lineEdges = Mat()
+        /** Mejor candidato descartado por ser un marco impreso (para buscar la hoja a partir de él). */
+        var frame: Candidate? = null
         // Cuadriláteros ya evaluados en esta pasada (para no repetir puntuación y ajuste)
         private val seen = ArrayList<FloatArray>(48)
         fun resetSeen() = seen.clear()
@@ -78,17 +94,19 @@ class DocumentDetector(private val tier: DeviceTier) {
         var w = 0; var h = 0
         fun release() {
             blur.release(); tmp.release(); edges.release(); edges2.release(); otsu.release(); emask.release()
-            emaskClosed.release(); hough.release(); lines.release(); hierarchy.release()
+            emaskClosed.release(); hough.release(); lines.release(); lines2.release(); hierarchy.release()
             gx.release(); gy.release(); mag.release(); mag2.release(); colorTmp.release()
             hullIdx.release(); approx.release(); hull2f.release()
             for (m in chromaMasks) m.release()
             for (m in chromaBlur) m.release()
             for (m in chromaMasksInv) m.release()
+            ink.release(); quadMask.release(); lineEdges.release()
         }
     }
 
     /** Depuración (banco de pruebas): recibe cada cuadrilátero evaluado con su puntuación. */
     internal var debugCand: ((FloatArray, Double, String) -> Unit)? = null
+    internal var debugFeat: ((FloatArray, DoubleArray, Double, String) -> Unit)? = null
 
     private val kernel3: Mat by lazy { Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(3.0, 3.0)) }
 
@@ -101,7 +119,14 @@ class DocumentDetector(private val tier: DeviceTier) {
     private var liveRot: Mat? = null
     private var liveClahe: org.opencv.imgproc.CLAHE? = null
 
-    private class Candidate(val pts: FloatArray, val score: Double)
+    /**
+     * Hipótesis de documento: [score] ordena los candidatos (incluye el área: entre dos bordes igual de buenos gana
+     * la hoja exterior); [conf] es la confianza 0..1 que se devuelve (calidad del borde, sin castigar el tamaño);
+     * [quality] la calidad del borde sola ([qualityConf]).
+     */
+    private class Candidate(
+        val pts: FloatArray, val score: Double, val conf: Double = scoreToConf(score), val quality: Double = 0.0,
+    )
 
     // =====================================================================================
     // API pública
@@ -146,19 +171,35 @@ class DocumentDetector(private val tier: DeviceTier) {
         val bag = MatBag()
         try {
             val det0 = detectColor(rgbSmall, buf, bag)
+            // El mejor contorno era un marco o tabla impresos: la hoja, si la hay, se busca a partir de él (foto de una
+            // página sobre una mesa blanca); si no aparece, es un escaneo y vale la imagen completa
+            val frame = buf.frame
+            if (frame != null && sheetRefine && (det0 == null || det0.score < frame.score)) {
+                // (la hoja encontrada tampoco puede tener papel con contenido alrededor: sería otro marco)
+                val r = runCatching { refineSheet(rgbSmall, frame) }.getOrNull()?.takeIf { !printedFrame(it.pts, buf) }
+                if (r != null || det0 == null) {
+                    val c = r ?: return null
+                    val pts = scaleToFrame(c.pts, rgbSmall.cols(), rgbSmall.rows(), fullW, fullH)
+                    if (grayCrop != null) refineCorners(fullW, fullH, grayCrop, pts)
+                    clampPts(pts, fullW, fullH)
+                    return DetectionResult(toQuad(pts), c.conf.toFloat(), fullW, fullH)
+                }
+            }
+            debugLog?.invoke("core: " + (det0?.let { c -> c.pts.joinToString(",") { "%.1f".format(java.util.Locale.ROOT, it) } + " s=%.3f".format(java.util.Locale.ROOT, c.score) } ?: "null"))
             // Sin candidato (blanco sobre blanco con poca luz: ningún borde con contraste suficiente): se intenta igualmente
             // la hoja a partir del contenido, exigiendo más rectas
             val cand0 = det0 ?: (if (sheetRefine) runCatching {
                 val w0 = rgbSmall.cols() - 1f; val h0 = rgbSmall.rows() - 1f
                 refineSheet(rgbSmall, Candidate(floatArrayOf(0f, 0f, w0, 0f, w0, h0, 0f, h0), 0.0), force = true)
             }.getOrNull() else null) ?: return null
-            // Blanco sobre blanco (hoja sobre una pila de hojas o una mesa blanca) o cuadrilátero que corta el
-            // contenido (borde de una tabla impresa): se busca la hoja SUPERIOR a partir del contenido
-            val cand = (if (sheetRefine && det0 != null) runCatching { refineSheet(rgbSmall, cand0) }.getOrNull() else null) ?: cand0
+            // (Un contorno con borde de contraste ya no se "corrige" buscando otra hoja a partir del contenido: en el banco
+            // de pruebas eso desplazaba hacia dentro hojas correctas sobre mesas claras o tarjetas con texto alrededor.
+            // Los marcos impresos y la falta de contorno sí pasan por [refineSheet], arriba.)
+            val cand = cand0
             val pts = scaleToFrame(cand.pts, rgbSmall.cols(), rgbSmall.rows(), fullW, fullH)
             if (grayCrop != null) refineCorners(fullW, fullH, grayCrop, pts)
             clampPts(pts, fullW, fullH)
-            return DetectionResult(toQuad(pts), confidenceOf(cand.score), fullW, fullH)
+            return DetectionResult(toQuad(pts), cand.conf.toFloat(), fullW, fullH)
         } finally {
             bag.close(); buf.release()
         }
@@ -258,7 +299,7 @@ class DocumentDetector(private val tier: DeviceTier) {
             val rotW = if (rot == 90 || rot == 270) height else width
             val rotH = if (rot == 90 || rot == 270) width else height
             val pts = scaleToFrame(cand.pts, work.cols(), work.rows(), rotW, rotH)
-            val res = DetectionResult(toQuad(pts), confidenceOf(cand.score), rotW, rotH)
+            val res = DetectionResult(toQuad(pts), cand.conf.toFloat(), rotW, rotH)
             rememberLiveQuad(pts, rot, width, height)
             return res
         } catch (t: Throwable) {
@@ -384,6 +425,7 @@ class DocumentDetector(private val tier: DeviceTier) {
         val w = l.cols(); val h = l.rows()
         val area = w.toDouble() * h
         b.w = w; b.h = h
+        b.lRaw = l; b.chromaRaw = chroma
 
         Imgproc.GaussianBlur(l, b.blur, Size(5.0, 5.0), 0.0)
 
@@ -405,6 +447,7 @@ class DocumentDetector(private val tier: DeviceTier) {
         // Imágenes suavizadas para medir el CONTRASTE entre ambos lados de cada lado candidato
         if (b.lBytes.size != n) b.lBytes = ByteArray(n)
         b.blur.get(0, 0, b.lBytes)
+        b.lMedian = Cv.percentile(Cv.histogram(b.blur), 0.5)
         b.nChroma = 0
         for ((k, ch) in chroma.withIndex()) {
             if (k >= 2) break
@@ -480,8 +523,10 @@ class DocumentDetector(private val tier: DeviceTier) {
             sources.add(b.hough to 0.9)
         }
 
-        var best: Candidate? = null
+        val cands = ArrayList<Candidate>()
         b.resetSeen()
+        b.inkReady = false
+        b.frame = null
         val minArea = 0.05 * area
         for ((src, weight) in sources) {
             val contours = ArrayList<MatOfPoint>()
@@ -490,15 +535,156 @@ class DocumentDetector(private val tier: DeviceTier) {
                 .filter { it.second >= minArea }
                 .sortedByDescending { it.second }
                 .take(if (live) 5 else 8)
-            for ((c, _) in withArea) {
-                val c2 = evaluateContour(c, b, weight, live)
-                if (c2 != null && (best == null || c2.score > best.score)) best = c2
-            }
+            for ((c, _) in withArea) evaluateContour(c, b, weight, live)?.let { cands.add(it) }
             for (c in contours) c.release()
         }
-        val res = best ?: return null
-        if (res.score < 0.55) return null
+        // Hipótesis por rectas (bordes interrumpidos): sólo desplazan a un contorno si su borde es claramente mejor
+        if (!live && lineQuads) {
+            val lc = ArrayList<Candidate>()
+            lineCandidates(b, live, lc)
+            if (lc.isNotEmpty()) {
+                val bestContourQ = cands.maxOfOrNull { it.quality } ?: 0.0
+                for (c in lc) if (c.quality >= bestContourQ + LINE_BETTER) cands.add(c)
+            }
+        }
+        cands.sortByDescending { it.score }
+        var res: Candidate? = null
+        var frameChecks = 0
+        for (c in cands) {
+            // Puntuación baja (documento PEQUEÑO en el encuadre) sólo vale con un borde nítido y completo
+            if (c.score < 0.55 && c.conf < ACCEPT_CONF) continue
+            // Marco o tabla IMPRESOS en una página escaneada (papel igual a ambos lados y contenido fuera): no es el
+            // borde de la hoja. En vivo no se comprueba (coste; la cámara ve la mesa alrededor).
+            if (!live) {
+                // Agotadas las comprobaciones tras descartar marcos: no se acepta nada sin comprobar (escaneo)
+                if (frameChecks >= MAX_FRAME_CHECKS) { if (b.frame != null) break }
+                else frameChecks++
+                if (printedFrame(c.pts, b)) { if (b.frame == null) b.frame = c; debugLog?.invoke("core: marco impreso descartado s=%.3f".format(java.util.Locale.ROOT, c.score)); continue }
+            }
+            res = c; break
+        }
+        if (res == null) return null
+        res = nestedBetter(res, cands, b, live) ?: res
         return res
+    }
+
+    /**
+     * El mejor candidato [a] (por puntuación, que premia el área) tiene un borde POBRE (lados que cruzan la mesa, el
+     * césped o la mano) y dentro hay otro candidato con un borde mucho mejor: [a] es la hoja más un trozo del
+     * entorno (objetos, sombras, un póster detrás de la tarjeta) y se prefiere el interior. Salvo que compartan un
+     * lado (una página dentro del libro o cuaderno abierto completo): entonces [a] puede ser el documento entero.
+     * Null = sin cambios.
+     */
+    private fun nestedBetter(a: Candidate, cands: List<Candidate>, b: Buffers, live: Boolean): Candidate? {
+        if (a.quality >= NEST_WEAK) return null
+        val area = b.w.toDouble() * b.h
+        val aArea = polyArea(a.pts)
+        val poly = MatOfPoint2f(*Array(4) { Point(a.pts[it * 2].toDouble(), a.pts[it * 2 + 1].toDouble()) })
+        try {
+            var best: Candidate? = null
+            for (c in cands) {
+                if (c === a || c.quality < max(NEST_STRONG, a.quality + 0.25) || c.conf < NEST_STRONG) continue
+                if (best != null && c.score <= best.score) continue
+                val ca = polyArea(c.pts)
+                if (ca < 0.04 * area || ca > 0.8 * aArea) continue
+                var inside = true
+                for (i in 0 until 4) if (Imgproc.pointPolygonTest(poly, Point(c.pts[i * 2].toDouble(), c.pts[i * 2 + 1].toDouble()), true) < -2.0) { inside = false; break }
+                if (!inside || sharesSide(a.pts, c.pts)) continue
+                if (!live && printedFrame(c.pts, b)) continue
+                best = c
+            }
+            if (best != null) debugLog?.invoke("core: interior con mejor borde q=%.2f (exterior q=%.2f)".format(java.util.Locale.ROOT, best.quality, a.quality))
+            return best
+        } finally { poly.release() }
+    }
+
+    /**
+     * ¿[inner] tiene un lado sobre un lado de [outer]? Es el caso de una página de un libro o cuaderno abierto dentro
+     * del pliego completo (comparten el canto exterior), o de la hoja dentro de hoja + franja de mesa: el exterior
+     * prolonga el interior en una dirección y puede ser el documento completo.
+     */
+    private fun sharesSide(outer: FloatArray, inner: FloatArray): Boolean {
+        val diag = hypot((outer[4] - outer[0]).toDouble(), (outer[5] - outer[1]).toDouble())
+        val tol = NEST_SHARED_SIDE * diag
+        for (i in 0 until 4) {
+            val ax = inner[i * 2].toDouble(); val ay = inner[i * 2 + 1].toDouble()
+            val bx = inner[((i + 1) % 4) * 2].toDouble(); val by = inner[((i + 1) % 4) * 2 + 1].toDouble()
+            for (j in 0 until 4) {
+                val px = outer[j * 2].toDouble(); val py = outer[j * 2 + 1].toDouble()
+                val qx = outer[((j + 1) % 4) * 2].toDouble(); val qy = outer[((j + 1) % 4) * 2 + 1].toDouble()
+                val len = hypot(qx - px, qy - py); if (len < 1) continue
+                fun dist(x: Double, y: Double) = abs((qx - px) * (py - y) - (px - x) * (qy - py)) / len
+                if (dist(ax, ay) <= tol && dist(bx, by) <= tol) return true
+            }
+        }
+        return false
+    }
+
+    /**
+     * ¿El cuadrilátero [q] es un MARCO O TABLA IMPRESOS dentro de una página (típico de escaneos y PDFs: la hoja
+     * llena la imagen) y no el borde de la hoja? Sí cuando la mayoría de sus lados reales separan papel de papel
+     * (mismo brillo y tono a ambos lados, ambos claros) y FUERA del cuadrilátero sigue habiendo contenido (tinta)
+     * sobre ese papel. Una hoja sobre una mesa blanca lisa separa papel de "papel" pero sin tinta fuera.
+     */
+    private fun printedFrame(q: FloatArray, b: Buffers): Boolean {
+        val w = b.w; val h = b.h
+        if (!b.inkReady) {
+            val side = max(w, h)
+            val closed = Mat()
+            try {
+                Imgproc.morphologyEx(b.blur, closed, Imgproc.MORPH_CLOSE, Cv.kernel(Imgproc.MORPH_ELLIPSE, Cv.odd(max(5, (side * 0.02).roundToInt()))))
+                b.paperLevel = Cv.percentile(Cv.histogram(closed), 0.9)
+                Core.subtract(closed, b.blur, b.ink)
+                Imgproc.threshold(b.ink, b.ink, max(12.0, 0.12 * b.paperLevel), 255.0, Imgproc.THRESH_BINARY)
+            } finally { closed.release() }
+            b.inkReady = true
+        }
+        val paper = b.paperLevel
+        if (paper < 90) return false
+        val m = BORDER_PX
+        val cx = (q[0] + q[2] + q[4] + q[6]) / 4f; val cy = (q[1] + q[3] + q[5] + q[7]) / 4f
+        var real = 0; var paperPaper = 0
+        val vin = IntArray(24); val vout = IntArray(24); val cin = IntArray(24); val cout = IntArray(24)
+        for (i in 0 until 4) {
+            val x0 = q[i * 2]; val y0 = q[i * 2 + 1]; val x1 = q[((i + 1) % 4) * 2]; val y1 = q[((i + 1) % 4) * 2 + 1]
+            val len = hypot((x1 - x0).toDouble(), (y1 - y0).toDouble()).toFloat(); if (len < 10f) continue
+            var nx = -(y1 - y0) / len; var ny = (x1 - x0) / len
+            if (nx * ((x0 + x1) / 2 - cx) + ny * ((y0 + y1) / 2 - cy) < 0) { nx = -nx; ny = -ny }
+            var n = 0
+            for (k in 1..12) {
+                val t = k / 13f
+                val px = x0 + (x1 - x0) * t; val py = y0 + (y1 - y0) * t
+                for (o in intArrayOf(5, 8)) {
+                    val xo = (px + nx * o).roundToInt(); val yo = (py + ny * o).roundToInt()
+                    val xi = (px - nx * o).roundToInt(); val yi = (py - ny * o).roundToInt()
+                    if (xo < m || yo < m || xo >= w - m || yo >= h - m || xi < 0 || yi < 0 || xi >= w || yi >= h) continue
+                    val io = yo * w + xo; val ii = yi * w + xi
+                    vout[n] = b.lBytes[io].toInt() and 0xFF; vin[n] = b.lBytes[ii].toInt() and 0xFF
+                    var co = 0; var ci = 0
+                    for (k2 in 0 until b.nChroma) { co += b.cBytes[k2][io].toInt() and 0xFF; ci += b.cBytes[k2][ii].toInt() and 0xFF }
+                    cout[n] = co; cin[n] = ci; n++
+                }
+            }
+            if (n < 8) continue
+            real++
+            val lo = vout.copyOf(n).sorted()[n / 2]; val li = vin.copyOf(n).sorted()[n / 2]
+            val dc = abs(cout.copyOf(n).sorted()[n / 2] - cin.copyOf(n).sorted()[n / 2])
+            // Fuera: el papel claro de la página, del mismo tono que dentro (dentro puede haber sombreado de tabla)
+            if (lo >= FRAME_OUT_PAPER * paper && li >= 0.6 * paper && lo - li <= 0.4 * paper && dc <= FRAME_PAPER_CHROMA) paperPaper++
+        }
+        if (real < 2 || paperPaper < max(2, real - 1)) return false
+        // Tinta dentro y fuera del cuadrilátero (densidad por píxel)
+        b.quadMask.create(h, w, CvType.CV_8UC1); b.quadMask.setTo(Scalar(0.0))
+        Imgproc.fillPoly(b.quadMask, listOf(MatOfPoint(*Array(4) { Point(q[it * 2].toDouble(), q[it * 2 + 1].toDouble()) })), Scalar(255.0))
+        val qa = Core.countNonZero(b.quadMask).toDouble()
+        val inkAll = Core.countNonZero(b.ink).toDouble()
+        val tmp = Mat()
+        val inkIn = try { Core.bitwise_and(b.ink, b.quadMask, tmp); Core.countNonZero(tmp).toDouble() } finally { tmp.release() }
+        val outA = w.toDouble() * h - qa
+        if (outA < 0.02 * w * h || qa < 1) return false
+        val dOut = (inkAll - inkIn) / outA; val dIn = inkIn / qa
+        debugLog?.invoke("frame: paperPaper=$paperPaper/$real dIn=%.4f dOut=%.4f".format(java.util.Locale.ROOT, dIn, dOut))
+        return dOut >= FRAME_INK_OUT_MIN && dOut >= 0.04 * dIn
     }
 
     /**
@@ -540,19 +726,8 @@ class DocumentDetector(private val tier: DeviceTier) {
         }
         var best: Candidate? = null
         fun consider(q: FloatArray, wq: Double) {
-            clampPts(q, b.w - 1, b.h - 1)
-            // Las distintas fuentes suelen dar el mismo cuadrilátero: no repetir el trabajo
-            if (b.seenDuplicate(q)) return
-            val s = scoreQuad(q, b, live)
-            debugCand?.invoke(q, s * wq, "raw")
-            if (s > 0 && (best == null || s * wq > best!!.score)) best = Candidate(q, s * wq)
-            // Misma hipótesis ajustada a los bordes reales (vértices del casco desplazados, esquinas redondeadas)
-            val sq = snapQuad(q, b) ?: return
-            val s2 = scoreQuad(sq, b, live)
-            debugCand?.invoke(sq, s2, "snap")
-            // Ya apoyado en bordes reales: la procedencia (aproximación, rectángulo mínimo) importa menos
-            val ws = max(wq, 0.95 * (1.0 + wq) / 2) * 1.02
-            if (s2 > 0 && (best == null || s2 * ws > best!!.score)) best = Candidate(sq, s2 * ws)
+            val c = considerQuad(q, b, wq, live) ?: return
+            if (best == null || c.score > best!!.score) best = c
         }
         if (approx.size in 4..8) {
             val q = if (approx.size == 4) orderPoints(approx) else best4(approx)
@@ -576,6 +751,127 @@ class DocumentDetector(private val tier: DeviceTier) {
         val box = arrayOfNulls<Point>(4).also { rr.points(it) }.map { it!! }.toTypedArray()
         consider(orderPoints(box), weight * 0.7)
         return best
+    }
+
+    /**
+     * Puntúa la hipótesis [q] tal cual y ajustada a los bordes reales ([snapQuad]); devuelve la mejor de ambas o null
+     * si ninguna es válida o ya se evaluó (las distintas fuentes suelen dar el mismo cuadrilátero).
+     */
+    private fun considerQuad(q: FloatArray, b: Buffers, wq: Double, live: Boolean): Candidate? {
+        clampPts(q, b.w - 1, b.h - 1)
+        if (b.seenDuplicate(q)) return null
+        var best: Candidate? = null
+        val s = scoreQuad(q, b, live)
+        debugCand?.invoke(q, s * wq, "raw")
+        if (s > 0) { debugFeat?.invoke(q, b.feat, wq, "raw"); best = Candidate(q, s * wq, candidateConf(q, b, s * wq, wq), qualityConf(b.feat, wq)) }
+        // Misma hipótesis ajustada a los bordes reales (vértices del casco desplazados, esquinas redondeadas)
+        val sq = snapQuad(q, b) ?: return best
+        val s2 = scoreQuad(sq, b, live)
+        // Ya apoyado en bordes reales: la procedencia (aproximación, rectángulo mínimo) importa menos
+        val ws = max(wq, 0.95 * (1.0 + wq) / 2) * 1.02
+        debugCand?.invoke(sq, s2 * ws, "snap")
+        if (s2 > 0) {
+            debugFeat?.invoke(sq, b.feat, ws, "snap")
+            if (best == null || s2 * ws > best.score) best = Candidate(sq, s2 * ws, candidateConf(sq, b, s2 * ws, ws), qualityConf(b.feat, ws))
+        }
+        return best
+    }
+
+    /**
+     * Hipótesis a partir de las RECTAS de Hough ([DetLines]): bordes interrumpidos (dedos sobre una tarjeta, una
+     * esquina en sombra) que no cierran ningún contorno. Se puntúan todas sin ajustar y sólo las mejores se ajustan.
+     */
+    private fun lineCandidates(b: Buffers, live: Boolean, out: MutableList<Candidate>) {
+        // Rectas sobre la máscara sensible (brillo + croma: el canto de una tarjeta pastel sobre madera apenas cambia
+        // de brillo), con huecos cortos para no unir letras en diagonales
+        val side0 = max(b.w, b.h)
+        val e = b.lineEdges
+        // Mediana 5x5: borra los trazos finos (texto, guilloches) y conserva los cantos entre regiones
+        Imgproc.medianBlur(b.lRaw, b.tmp, 5)
+        Imgproc.Canny(b.tmp, e, 25.0, 60.0)
+        for (k in 0 until min(b.nChroma, b.chromaRaw.size)) {
+            b.chromaRaw[k].convertTo(b.tmp, -1, 3.0, -256.0)
+            Imgproc.medianBlur(b.tmp, b.tmp, 5)
+            Imgproc.Canny(b.tmp, b.colorTmp, 30.0, 75.0)
+            Core.bitwise_or(e, b.colorTmp, e)
+        }
+        Imgproc.HoughLinesP(e, b.lines2, 1.0, Math.PI / 180.0, max(20, (side0 * 0.05).roundToInt()), side0 * 0.08, side0 * 0.015)
+        val n = min(b.lines2.rows(), MAX_LINE_SEGMENTS)
+        if (n < 4) return
+        // Sólo segmentos con CONTRASTE de color a ambos lados en la mayor parte de su longitud: la veta de la madera,
+        // las líneas de texto o la cuadrícula dan rectas largas pero el mismo color a ambos lados
+        val segs = IntArray(n * 4); val seg = IntArray(4); var m = 0
+        for (i in 0 until n) {
+            b.lines2.get(i, 0, seg)
+            val dx = (seg[2] - seg[0]).toFloat(); val dy = (seg[3] - seg[1]).toFloat()
+            val len = hypot(dx.toDouble(), dy.toDouble()).toFloat(); if (len < 4f) continue
+            val nx = -dy / len; val ny = dx / len
+            var ok = 0
+            for (k in 0 until 12) {
+                val t = (k + 0.5f) / 12f
+                // (a ±6 px: los trazos finos del texto quedan con papel a ambos lados; el canto de la hoja, no)
+                if (contrastAt(b, seg[0] + dx * t, seg[1] + dy * t, nx, ny, LINE_CONTRAST_OFFSET) >= CONTRAST_MIN) ok++
+            }
+            if (ok < 9) continue
+            System.arraycopy(seg, 0, segs, m * 4, 4); m++
+        }
+        val side = max(b.w, b.h).toDouble()
+        val lines = DetLines.cluster(segs, m, Math.toRadians(2.5), 0.008 * side, MAX_LINES)
+        if (lines.size < 4) return
+        val quads = DetLines.quads(lines, b.w, b.h, minArea = if (live) 0.1 else 0.03)
+        val scored = ArrayList<Pair<Double, FloatArray>>()
+        for (q0 in quads) {
+            val q = orderPoints(Array(4) { Point(q0[it * 2].toDouble(), q0[it * 2 + 1].toDouble()) })
+            val s = scoreQuad(q, b, live)
+            if (s > 0) scored.add(s to q)
+        }
+        scored.sortByDescending { it.first }
+        debugLog?.invoke("lines: segs=$n/$m lines=${lines.size} quads=${quads.size} valid=${scored.size}")
+        for ((_, q) in scored.take(MAX_LINE_QUADS)) {
+            val c = considerQuad(q, b, LINE_WEIGHT, live) ?: continue
+            // Las rectas de renglones, celdas o columnas de texto también cierran cuadriláteros: sólo valen los que
+            // tienen un borde nítido y separan materiales distintos en (casi) todos sus lados
+            if (c.quality < LINE_MIN_QUALITY || !separatesMaterials(c.pts, b)) continue
+            out.add(c)
+        }
+    }
+
+    /**
+     * ¿Cada lado real (no pegado al marco) de [q] separa dos materiales distintos? Mediana de luminancia y tono en
+     * una banda a 5-9 px a cada lado: un renglón o una línea de tabla tienen el mismo papel a ambos lados, el canto
+     * de una hoja o tarjeta no. Se tolera un lado dudoso (dedos encima, sombra) si hay cuatro reales.
+     */
+    private fun separatesMaterials(q: FloatArray, b: Buffers): Boolean {
+        val w = b.w; val h = b.h; val m = BORDER_PX
+        val cx = (q[0] + q[2] + q[4] + q[6]) / 4f; val cy = (q[1] + q[3] + q[5] + q[7]) / 4f
+        val lin = IntArray(40); val lout = IntArray(40); val cin = IntArray(40); val cout = IntArray(40)
+        var real = 0; var sep = 0
+        for (i in 0 until 4) {
+            val x0 = q[i * 2]; val y0 = q[i * 2 + 1]; val x1 = q[((i + 1) % 4) * 2]; val y1 = q[((i + 1) % 4) * 2 + 1]
+            val len = hypot((x1 - x0).toDouble(), (y1 - y0).toDouble()).toFloat(); if (len < 10f) continue
+            var nx = -(y1 - y0) / len; var ny = (x1 - x0) / len
+            if (nx * ((x0 + x1) / 2 - cx) + ny * ((y0 + y1) / 2 - cy) < 0) { nx = -nx; ny = -ny }
+            var n = 0
+            for (k in 1..10) {
+                val t = k / 11f
+                val px = x0 + (x1 - x0) * t; val py = y0 + (y1 - y0) * t
+                for (o in intArrayOf(5, 9)) {
+                    val xo = (px + nx * o).roundToInt(); val yo = (py + ny * o).roundToInt()
+                    val xi = (px - nx * o).roundToInt(); val yi = (py - ny * o).roundToInt()
+                    if (xo < m || yo < m || xo >= w - m || yo >= h - m || xi < 0 || yi < 0 || xi >= w || yi >= h) continue
+                    val io = yo * w + xo; val ii = yi * w + xi
+                    lout[n] = b.lBytes[io].toInt() and 0xFF; lin[n] = b.lBytes[ii].toInt() and 0xFF
+                    var co = 0; var ci = 0
+                    for (k2 in 0 until b.nChroma) { co += b.cBytes[k2][io].toInt() and 0xFF; ci += b.cBytes[k2][ii].toInt() and 0xFF }
+                    cout[n] = co; cin[n] = ci; n++
+                }
+            }
+            if (n < 8) continue
+            real++
+            fun med(a: IntArray) = a.copyOf(n).sorted()[n / 2]
+            if (abs(med(lout) - med(lin)) >= SEP_MIN_L || abs(med(cout) - med(cin)) >= SEP_MIN_C) sep++
+        }
+        return real >= 2 && sep >= (if (real == 4) 3 else real)
     }
 
     /**
@@ -661,6 +957,7 @@ class DocumentDetector(private val tier: DeviceTier) {
         if ((sup[0].isNaN() && sup[2].isNaN()) || (sup[1].isNaN() && sup[3].isNaN())) return -1.0
         val edge = sup[4]
         if (edge < 0.35 || minSide < 0.2) return -1.0
+        b.feat[0] = af; b.feat[1] = maxCos; b.feat[2] = edge; b.feat[3] = minSide; b.feat[4] = border
         return (0.4 * min(1.0, af / 0.6) + 0.2 * (1.0 - maxCos / cosLimit) + 0.3 * edge + 0.1 * minSide) *
             (1.0 - 0.2 * border)
     }
@@ -1270,20 +1567,127 @@ class DocumentDetector(private val tier: DeviceTier) {
         for (p in hull) if (Imgproc.pointPolygonTest(rp, p, true) < -max(3.0, 0.03 * side)) outside++
         if (outside > 0) { debugLog?.invoke("sheet: outside $outside"); return@use null }
         debugLog?.invoke("sheet: found=${found.toList()} -> " + (0 until 4).joinToString(" ") { "%.0f,%.0f".format(res[it * 2], res[it * 2 + 1]) })
-        Candidate(res, max(cand.score, 0.6))
+        // Confianza: sin contorno de partida (forzado) sólo es fiable con los cuatro lados encontrados; con tres queda
+        // por debajo del umbral de la app (se usa la imagen completa, que el usuario puede ajustar)
+        val nf = found.count { it }
+        val conf = if (force) (if (nf == 4) SHEET_CONF_FORCED4 else SHEET_CONF_FORCED3) else scoreToConf(max(cand.score, 0.6))
+        Candidate(res, max(cand.score, 0.6), conf)
     }
 
     /** Depuración (banco de pruebas). */
     internal var debugLog: ((String) -> Unit)? = null
+
+    /** Hipótesis por rectas (desactivable en el banco de pruebas). */
+    internal var lineQuads = true
 
     /** Búsqueda de la hoja superior (desactivable en el banco de pruebas). */
     internal var sheetRefine = true
     internal var debugBoxes: ((List<IntArray>) -> Unit)? = null
     internal var debugMat: ((String, Mat) -> Unit)? = null
 
-    private fun confidenceOf(score: Double): Float = ((score - 0.45) / 0.4).coerceIn(0.0, 1.0).toFloat()
+    /**
+     * Confianza de un candidato: la mayor entre la de su puntuación (que premia el área) y la de la CALIDAD de su
+     * borde (apoyo global, peor lado, ángulos, tramos sobre el marco), que no depende del tamaño: una hoja que ocupa
+     * el 8 % del encuadre con los cuatro lados nítidos es tan fiable como una grande. La segunda exige además que
+     * el interior parezca papel frente a su entorno (no una franja oscura del teclado o de un mueble).
+     */
+    private fun candidateConf(q: FloatArray, b: Buffers, score: Double, provenance: Double): Double {
+        val c0 = scoreToConf(score)
+        val qc = qualityConf(b.feat, provenance)
+        if (qc <= c0) return c0
+        return max(c0, qc * paperFactor(q, b))
+    }
+
+    /**
+     * Factor 0.3..1 según el interior del cuadrilátero sea papel (claro respecto de lo que lo rodea). Mediana de la
+     * luminancia en una malla interior frente a la de una banda exterior a cada lado.
+     */
+    private fun paperFactor(q: FloatArray, b: Buffers): Double {
+        val w = b.w; val h = b.h; val lb = b.lBytes
+        val inside = IntArray(49); var ni = 0
+        for (iy in 0 until 7) for (ix in 0 until 7) {
+            val u = 0.15f + 0.7f * ix / 6f; val v = 0.15f + 0.7f * iy / 6f
+            val x = (q[0] * (1 - u) * (1 - v) + q[2] * u * (1 - v) + q[4] * u * v + q[6] * (1 - u) * v).roundToInt()
+            val y = (q[1] * (1 - u) * (1 - v) + q[3] * u * (1 - v) + q[5] * u * v + q[7] * (1 - u) * v).roundToInt()
+            if (x in 0 until w && y in 0 until h) inside[ni++] = lb[y * w + x].toInt() and 0xFF
+        }
+        val cx = (q[0] + q[2] + q[4] + q[6]) / 4f; val cy = (q[1] + q[3] + q[5] + q[7]) / 4f
+        val off = max(6f, 0.03f * max(w, h))
+        val outside = IntArray(28); var no = 0
+        for (i in 0 until 4) {
+            val x0 = q[i * 2]; val y0 = q[i * 2 + 1]; val x1 = q[((i + 1) % 4) * 2]; val y1 = q[((i + 1) % 4) * 2 + 1]
+            val len = hypot((x1 - x0).toDouble(), (y1 - y0).toDouble()).toFloat(); if (len < 1f) continue
+            var nx = -(y1 - y0) / len; var ny = (x1 - x0) / len
+            if (nx * ((x0 + x1) / 2 - cx) + ny * ((y0 + y1) / 2 - cy) < 0) { nx = -nx; ny = -ny }
+            for (k in 1..7) {
+                val t = k / 8f
+                val x = (x0 + (x1 - x0) * t + nx * off).roundToInt(); val y = (y0 + (y1 - y0) * t + ny * off).roundToInt()
+                if (x in 0 until w && y in 0 until h) outside[no++] = lb[y * w + x].toInt() and 0xFF
+            }
+        }
+        if (ni < 10 || no < 6) return 1.0
+        val li = inside.copyOf(ni).sorted()[ni / 2]; val lo = outside.copyOf(no).sorted()[no / 2]
+        if (li >= PAPER_BRIGHT) return 1.0
+        // Más oscuro que su entorno inmediato o que la escena en conjunto: probablemente no es papel
+        val ref = max(lo, b.lMedian)
+        return (1.0 - (ref - PAPER_DARKER_TOL - li) / 40.0).coerceIn(0.3, 1.0)
+    }
 
     companion object {
+        /** Anidamiento: calidad de borde por debajo de la cual se busca un candidato interior mejor, y la mínima de éste. */
+        private const val NEST_WEAK = 0.35
+        private const val NEST_STRONG = 0.5
+        /** Anidamiento: distancia máxima (fracción de la diagonal del exterior) para que dos lados coincidan. */
+        private const val NEST_SHARED_SIDE = 0.04
+
+        /** Hipótesis por rectas: segmentos de Hough usados, rectas agrupadas, cuadriláteros ajustados y su peso. */
+        private const val MAX_LINE_SEGMENTS = 200
+        private const val MAX_LINES = 18
+        private const val MAX_LINE_QUADS = 8
+        private const val LINE_WEIGHT = 0.93
+        private const val LINE_CONTRAST_OFFSET = 6f
+        private const val LINE_MIN_QUALITY = 0.5
+        /** Ventaja de calidad de borde que necesita una hipótesis por rectas para competir con los contornos. */
+        private const val LINE_BETTER = 0.15
+        /** Diferencia mínima de luminancia o tono entre ambos lados para considerar materiales distintos. */
+        private const val SEP_MIN_L = 18
+        private const val SEP_MIN_C = 6
+
+        /** Candidatos (por puntuación) en los que se comprueba si son un marco impreso. */
+        private const val MAX_FRAME_CHECKS = 6
+        /** Marco impreso: fuera del lado, papel casi tan claro como el de la página (no una mesa gris clara). */
+        private const val FRAME_OUT_PAPER = 0.88
+        /** Marco impreso: diferencia máxima de tono (Cb + Cr) entre ambos lados de un lado "papel/papel". */
+        private const val FRAME_PAPER_CHROMA = 6
+        /** Marco impreso: densidad mínima de tinta fuera del cuadrilátero (fracción de píxeles). */
+        private const val FRAME_INK_OUT_MIN = 0.012
+
+        /** Confianza mínima (de calidad de borde) para aceptar un candidato de puntuación baja. */
+        private const val ACCEPT_CONF = 0.25
+
+        /** Interior con esta luminancia (mediana) o más ya se considera papel aunque el entorno sea más claro. */
+        private const val PAPER_BRIGHT = 150
+        /** Tolerancia (niveles de L) de un interior más oscuro que su entorno antes de dudar de que sea papel. */
+        private const val PAPER_DARKER_TOL = 8
+
+        /** Confianza 0..1 a partir de la puntuación de ordenación (premia el área). */
+        private fun scoreToConf(score: Double): Double = ((score - 0.45) / 0.4).coerceIn(0.0, 1.0)
+
+        /**
+         * Confianza 0..1 por la calidad del borde, independiente del área: [f] = rasgos de [scoreQuad] (área, maxCos,
+         * apoyo global, apoyo del peor lado, fracción sobre el marco); [provenance] = peso de la hipótesis (1 si ya
+         * está ajustada a los bordes reales, 0.7 un rectángulo mínimo sin ajustar).
+         */
+        internal fun qualityConf(f: DoubleArray, provenance: Double): Double {
+            val af = f[0]; val maxCos = f[1]; val edge = f[2]; val minSide = f[3]; val border = f[4]
+            var q = 0.5 * edge + 0.3 * minSide + 0.2 * (1.0 - maxCos / 0.55)
+            q *= 1.0 - 0.5 * border
+            q *= min(1.0, 0.75 + 0.25 * provenance)
+            // Muy pequeño (< 10 % del encuadre): algo menos fiable (etiquetas, pantallas de móvil, tapas)
+            q *= min(1.0, 0.7 + 3.0 * af)
+            return ((q - 0.62) / 0.3).coerceIn(0.0, 1.0)
+        }
+
         /** Luminancia media por debajo de la cual se aplica CLAHE antes de buscar bordes. */
         private const val LOW_LIGHT_MEAN = 80.0
 
@@ -1304,6 +1708,10 @@ class DocumentDetector(private val tier: DeviceTier) {
 
         /** Tolerancia (px de trabajo, a lo largo de la normal) al buscar el borde bajo cada muestra de un lado. */
         private val SUPPORT_OFFSETS = floatArrayOf(0f, -2f, 2f)
+
+        /** Hoja superior buscada sin contorno de partida: confianza con 4 y con 3 lados encontrados. */
+        private const val SHEET_CONF_FORCED4 = 0.4
+        private const val SHEET_CONF_FORCED3 = 0.3
 
         /** Hoja superior: oscuridad mínima de la tinta respecto del papel de alrededor (niveles de L). */
         private const val SHEET_INK_DELTA = 28.0
