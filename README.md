@@ -88,6 +88,22 @@ Todo en `imaging/` (OpenCV 4.10, sin red). Tiempos medidos con el harness Python
   pizarra, poca luz y foto de pantalla; cada una con su procesamiento (recibo: contraste local fuerte con CLAHE;
   pantalla: anti-muaré antes del filtro). `recommendFilter` devuelve el filtro concreto equivalente (data/ puede usarlo
   para el filtro inicial; asignar `AUTO` directamente es preferible).
+- **Detección de bordes** (`DocumentDetector`, `DetLines`): la confianza sale de la calidad del borde (apoyo global,
+  peor lado, ángulos, tramos sobre el marco) y no del tamaño del documento, con una comprobación de papel (el interior
+  no puede ser más oscuro que su entorno). Un cuadrilátero con papel a ambos lados y tinta fuera es un **marco o tabla
+  impresa** de una página escaneada: se busca la hoja real o se usa la imagen completa. Si el mejor contorno tiene un
+  borde pobre (hoja + mesa/póster) se prefiere un candidato interior nítido. En foto completa compiten además
+  hipótesis por **rectas** (Hough agrupado en rectas casi paralelas). Banco SmartDoc/MIDV (84 fotos con esquinas
+  verdaderas): fallo 44 % -> 23 %, error de esquina 10.3 -> 6.0 % de la diagonal, mismo tiempo (~70 ms).
+- **Enrutado por tipo de página** (`PrintedPage.analyze` + `PrintClassifier`, filtros *Texto resaltado* y *Blanco y
+  negro*, decidido antes de la super-resolución): sólo una **hoja de cuaderno con rayado claro** (≥ 10 rectas largas,
+  claras y finas, lado ≥ 1000 px, sin tabla ni texto impreso denso y alineación de líneas base < 0.35: la letra impresa
+  da 0.5-0.85, la manuscrita 0.02-0.35) va a los recuadros de escritura (`TextRegions`), que borran el rayado. Todo lo
+  demás (impresos, tablas, formularios, recibos, tarjetas, pantallas, documentos antiguos, letra a mano sobre papel
+  liso) usa el render tipo fotocopiadora (`PrintedPage`), que conserva todo el contenido; en MAGIC con punto negro
+  adaptativo para tinta tenue. **Pizarras de tiza / modo oscuro** (`PrintPolarity`: trazos más claros que la mediana
+  local frente a más oscuros, ≥ 2.6 en tiza, ≤ 1.2 en papel): se invierte la luminancia antes de procesar y la tiza
+  sale como tinta oscura sobre blanco (`TextRegions` tiene además su propia comprobación de polaridad).
 - **Segmentación de la escritura** (`TextRegions`, filtros *Texto resaltado* y *Blanco y negro* y los antiguos
   que se muestran como ellos): mapa de tinta a resolución completa sobre la imagen sin sombras (oscuridad del canal
   máximo + croma de tinta, que separa el bolígrafo azul de la cuadrícula azul clara); borrado de la rejilla clara
@@ -101,7 +117,11 @@ Todo en `imaging/` (OpenCV 4.10, sin red). Tiempos medidos con el harness Python
   poca presión de una misma letra salen tan oscuros y continuos como los demás; en Texto resaltado se pintan con el
   color medio de la tinta del entorno e intensidad única. Las manchas tenues (transparencias, sombras) conservan el
   tono relativo. Sintético (bolígrafo/lápiz con presión 30-100 %): roturas por trazo 4.1 -> 1.3, variación del tono
-  0.22 -> 0.04. Estimaciones a <= 2000 px, render a resolución completa por
+  0.22 -> 0.04. **Papel texturado** (pergamino, papel viejo): la oscuridad se divide por la textura local del papel
+  medida fuera de la tinta, así el papel no se une con la escritura. **Espiral** sólo si hay ≥ 8 anillas parecidas en
+  banda estrecha y paso regular sin letras dentro (los renglones de letra gruesa ya no se borran). **Dos tintas**: una
+  población de tinta débil bien separada (transparencia del reverso, manchas) se pinta en gris claro proporcional.
+  DIBCO 2009-2019: F-measure B/N 43 -> 70. Estimaciones a <= 2000 px, render a resolución completa por
   franjas de 1 MP: 12 MP ~1.0-1.3 s y 20 MP ~1.5-1.7 s en PC monohilo. `TextRegions.detect(bitmap)` devuelve los
   recuadros (TEXT/IMAGE) para dibujarlos en la interfaz.
 - **Hoja curvada** (`GridDewarp`, `PageEdits.autoDewarp`, tras la perspectiva y antes del filtro): supone que cada
@@ -120,7 +140,10 @@ Todo en `imaging/` (OpenCV 4.10, sin red). Tiempos medidos con el harness Python
   omite cuando el curvo se aplica), si las líneas no quedan al menos un 45 % más rectas o si el jacobiano sale de
   0.45..2.2. Si el campo empuja contenido de la hoja (escritura junto al borde) fuera del lienzo, el lienzo se **amplía** lo
   justo (el fondo que no es hoja se pinta del color del papel); lo que cae fuera del recorte también va del color del
-  papel. El enderezado normal gira con el lienzo ampliado (no recorta las esquinas). El campo se invierte (Newton) en una rejilla de salida de 8 px y se guarda normalizado: vista previa, base de
+  papel. **Cuñas del fondo**: el recorte es un cuadrilátero recto y la hoja curvada tiene bordes curvos;
+  las cuñas de fondo texturado o de otro tono (hierba, mesa, dedos) que quedan dentro del recorte junto al borde
+  (franja que se estrecha, 4-35 % del lado) se pintan del color del papel (`Cleanup.fillEdgeWedges`); las fotos o
+  bandas de ancho constante pegadas al borde se conservan. El enderezado normal gira con el lienzo ampliado (no recorta las esquinas). El campo se invierte (Newton) en una rejilla de salida de 8 px y se guarda normalizado: vista previa, base de
   los trazos de borrado y render final usan el mismo modelo (caché por recorte, rotación y firma de la página). El render
   compone perspectiva + rotación + hoja curvada en un **único `remap` cúbico** desde el original, por franjas de 1 MP.
   Sintético (2000x2700, desviación máx. de las líneas antes -> después): libro 20.2 -> 2.8 px (tabla) y 23.8 -> 1.8 px
