@@ -76,6 +76,12 @@ class DocumentDetector(private val tier: DeviceTier) {
         var lRaw: Mat = Mat(); var chromaRaw: List<Mat> = emptyList(); val lineEdges = Mat()
         /** Mejor candidato descartado por ser un marco impreso (para buscar la hoja a partir de él). */
         var frame: Candidate? = null
+        /** Todas las hipótesis válidas evaluadas (foto completa) para la reordenación por material ([DetFeatures]). */
+        val pool = ArrayList<Candidate>(64)
+        /** Fracción de píxeles sin color (canales iguales) de la foto; -1 = desconocida (vivo). */
+        var grayFrac = -1.0
+        /** Escaneo o página digital: imagen sin color con mucho papel blanco saturado (ver [scanLike]). */
+        var scanLike = false
         // Cuadriláteros ya evaluados en esta pasada (para no repetir puntuación y ajuste)
         private val seen = ArrayList<FloatArray>(48)
         fun resetSeen() = seen.clear()
@@ -126,7 +132,11 @@ class DocumentDetector(private val tier: DeviceTier) {
      */
     private class Candidate(
         val pts: FloatArray, val score: Double, val conf: Double = scoreToConf(score), val quality: Double = 0.0,
-    )
+        /** Rasgos de [scoreQuad] (copia), peso de procedencia y si está ajustado a los bordes (para [DetFeatures.rankScore]). */
+        val feat: DoubleArray? = null, val prov: Double = 1.0, val snapped: Boolean = false,
+    ) {
+        var rank = Double.NaN
+    }
 
     // =====================================================================================
     // API pública
@@ -176,7 +186,7 @@ class DocumentDetector(private val tier: DeviceTier) {
             val frame = buf.frame
             if (frame != null && sheetRefine && (det0 == null || det0.score < frame.score)) {
                 // (la hoja encontrada tampoco puede tener papel con contenido alrededor: sería otro marco)
-                val r = runCatching { refineSheet(rgbSmall, frame) }.getOrNull()?.takeIf { !printedFrame(it.pts, buf) }
+                val r = runCatching { refineSheet(rgbSmall, frame) }.getOrNull()?.takeIf { !printedFrame(it.pts, buf) && !(buf.scanLike && scanInside(it.pts, buf)) }
                 if (r != null || det0 == null) {
                     val c = r ?: return null
                     val pts = scaleToFrame(c.pts, rgbSmall.cols(), rgbSmall.rows(), fullW, fullH)
@@ -191,7 +201,7 @@ class DocumentDetector(private val tier: DeviceTier) {
             val cand0 = det0 ?: (if (sheetRefine) runCatching {
                 val w0 = rgbSmall.cols() - 1f; val h0 = rgbSmall.rows() - 1f
                 refineSheet(rgbSmall, Candidate(floatArrayOf(0f, 0f, w0, 0f, w0, h0, 0f, h0), 0.0), force = true)
-            }.getOrNull() else null) ?: return null
+            }.getOrNull()?.takeIf { !(buf.scanLike && scanInside(it.pts, buf)) } else null) ?: return null
             // (Un contorno con borde de contraste ya no se "corrige" buscando otra hoja a partir del contenido: en el banco
             // de pruebas eso desplazaba hacia dentro hojas correctas sobre mesas claras o tarjetas con texto alrededor.
             // Los marcos impresos y la falta de contorno sí pasan por [refineSheet], arriba.)
@@ -222,6 +232,7 @@ class DocumentDetector(private val tier: DeviceTier) {
         val ycc = bag.mat(); Imgproc.cvtColor(rgb, ycc, Imgproc.COLOR_RGB2YCrCb)
         val cr = bag.mat(); Core.extractChannel(ycc, cr, 1)
         val cbb = bag.mat(); Core.extractChannel(ycc, cbb, 2)
+        buf.grayFrac = grayFraction(rgb, bag)
         return detectCore(l, listOf(sw8, ca, cb), listOf(cbb, cr), buf, live = false)
     }
 
@@ -448,6 +459,11 @@ class DocumentDetector(private val tier: DeviceTier) {
         if (b.lBytes.size != n) b.lBytes = ByteArray(n)
         b.blur.get(0, 0, b.lBytes)
         b.lMedian = Cv.percentile(Cv.histogram(b.blur), 0.5)
+        b.scanLike = false
+        if (!live && b.grayFrac >= SCAN_GRAY) {
+            Imgproc.threshold(b.blur, b.tmp, SCAN_WHITE_L - 1.0, 255.0, Imgproc.THRESH_BINARY)
+            b.scanLike = Core.countNonZero(b.tmp) >= SCAN_WHITE_FRAC * area
+        }
         b.nChroma = 0
         for ((k, ch) in chroma.withIndex()) {
             if (k >= 2) break
@@ -527,14 +543,15 @@ class DocumentDetector(private val tier: DeviceTier) {
         b.resetSeen()
         b.inkReady = false
         b.frame = null
-        val minArea = 0.05 * area
+        b.pool.clear()
+        val minArea = (if (live) 0.05 else 0.03) * area
         for ((src, weight) in sources) {
             val contours = ArrayList<MatOfPoint>()
             Imgproc.findContours(src, contours, b.hierarchy, Imgproc.RETR_LIST, Imgproc.CHAIN_APPROX_SIMPLE)
             val withArea = contours.map { it to Imgproc.contourArea(it) }
                 .filter { it.second >= minArea }
                 .sortedByDescending { it.second }
-                .take(if (live) 5 else 8)
+                .take(if (live) 5 else 12)
             for ((c, _) in withArea) evaluateContour(c, b, weight, live)?.let { cands.add(it) }
             for (c in contours) c.release()
         }
@@ -553,6 +570,8 @@ class DocumentDetector(private val tier: DeviceTier) {
         for (c in cands) {
             // Puntuación baja (documento PEQUEÑO en el encuadre) sólo vale con un borde nítido y completo
             if (c.score < 0.55 && c.conf < ACCEPT_CONF) continue
+            // Escaneo: un lado con papel blanco fuera es un marco, una tabla o un bloque de texto de la página
+            if (b.scanLike && scanInside(c.pts, b)) continue
             // Marco o tabla IMPRESOS en una página escaneada (papel igual a ambos lados y contenido fuera): no es el
             // borde de la hoja. En vivo no se comprueba (coste; la cámara ve la mesa alrededor).
             if (!live) {
@@ -565,6 +584,7 @@ class DocumentDetector(private val tier: DeviceTier) {
         }
         if (res == null) return null
         res = nestedBetter(res, cands, b, live) ?: res
+        if (!live && rerank) res = rerankByMaterial(res, b) ?: res
         return res
     }
 
@@ -596,6 +616,79 @@ class DocumentDetector(private val tier: DeviceTier) {
             if (best != null) debugLog?.invoke("core: interior con mejor borde q=%.2f (exterior q=%.2f)".format(java.util.Locale.ROOT, best.quality, a.quality))
             return best
         } finally { poly.release() }
+    }
+
+    /**
+     * Reordenación por MATERIAL (foto completa): entre todas las hipótesis válidas evaluadas, la de mayor
+     * [DetFeatures.rankScore] sustituye a [a] (la elegida por puntuación de contorno, que premia el área) si la supera
+     * claramente ([DetFeatures.SWAP_MARGIN]). Corrige cuadriláteros que mezclan la hoja con un trozo de la mesa, del
+     * teclado o de la mano (lados cuya banda interior no es del mismo papel) y los que encierran el documento con parte
+     * del fondo. La sustituta debe ser utilizable por sí misma (confianza de la app) y no un marco impreso.
+     */
+    private fun rerankByMaterial(a: Candidate, b: Buffers): Candidate? {
+        val pool = b.pool
+        if (pool.size < 2 || b.lBytes.isEmpty()) return null
+        val cb = if (b.nChroma > 0) b.cBytes[0] else null
+        val cr = if (b.nChroma > 1) b.cBytes[1] else null
+        val area = b.w.toDouble() * b.h
+        val areas = DoubleArray(pool.size) { polyArea(pool[it].pts) }
+        fun rankOf(i: Int): Double {
+            val c = pool[i]
+            if (!c.rank.isNaN()) return c.rank
+            val f = c.feat ?: return Double.NEGATIVE_INFINITY
+            val bands = DetFeatures.bands(c.pts, b.lBytes, cb, cr, b.w, b.h, BORDER_PX)
+            val g = DetFeatures.interior(c.pts, b.lBytes, b.w, b.h)
+            // Mejor candidato nítido contenido (el propio documento dentro de un contorno con fondo, o su contenido)
+            var inner = 0.0
+            for (j in pool.indices) {
+                if (j == i) continue
+                val o = pool[j]; val fo = o.feat ?: continue
+                if (areas[j] >= 0.8 * areas[i] || areas[j] <= 0.04 * area) continue
+                var dmax = 0f
+                for (k in 0 until 8) dmax = max(dmax, abs(o.pts[k] - c.pts[k]))
+                if (dmax < 5f) continue
+                if (DetFeatures.quadInside(o.pts, c.pts)) inner = max(inner, 0.6 * fo[2] + 0.4 * fo[3])
+            }
+            c.rank = DetFeatures.rankScore(f[0], f[1], f[2], f[4], c.prov, c.snapped, bands, g[0], g[1], b.lMedian.toDouble(), inner)
+            return c.rank
+        }
+        val ai = pool.indexOfFirst { it === a }.takeIf { it >= 0 }
+            ?: pool.indices.minByOrNull { i -> (0 until 8).maxOf { abs(pool[i].pts[it] - a.pts[it]) } }?.takeIf { i -> (0 until 8).maxOf { abs(pool[i].pts[it] - a.pts[it]) } < 1f }
+            ?: return null
+        val ra = rankOf(ai)
+        val order = pool.indices.sortedByDescending { rankOf(it) }
+        val aArea = polyArea(a.pts)
+        for (i in order) {
+            val gain = rankOf(i) - ra
+            if (gain <= DetFeatures.SWAP_MARGIN) break
+            val c = pool[i]
+            // Encoger el documento (una parte de la hoja: un pliegue, una sombra, un recuadro impreso) exige más ventaja
+            if (areas[i] < 0.8 * aArea && gain <= DetFeatures.SHRINK_MARGIN) continue
+            if (c.conf < SWAP_MIN_CONF) continue
+            if (b.scanLike && scanInside(c.pts, b)) continue
+            if (printedFrame(c.pts, b)) continue
+            debugLog?.invoke("core: reordenado por material %.2f -> %.2f".format(java.util.Locale.ROOT, ra, rankOf(i)))
+            return c
+        }
+        return null
+    }
+
+    /** Escaneo: ¿algún lado real de [q] tiene fuera papel blanco saturado (está DENTRO de la página)? */
+    private fun scanInside(q: FloatArray, b: Buffers): Boolean {
+        val cb = if (b.nChroma > 0) b.cBytes[0] else null
+        val cr = if (b.nChroma > 1) b.cBytes[1] else null
+        return DetFeatures.bands(q, b.lBytes, cb, cr, b.w, b.h, BORDER_PX).outWhite
+    }
+
+    /** Fracción de píxeles sin color (diferencia máxima entre canales <= 2): escaneos en grises, PDFs renderizados. */
+    private fun grayFraction(rgb: Mat, bag: MatBag): Double {
+        val ch = ArrayList<Mat>(3); Core.split(rgb, ch)
+        for (m in ch) bag.add(m)
+        val d1 = bag.mat(); val d2 = bag.mat(); val d3 = bag.mat()
+        Core.absdiff(ch[0], ch[1], d1); Core.absdiff(ch[1], ch[2], d2); Core.absdiff(ch[0], ch[2], d3)
+        Core.max(d1, d2, d1); Core.max(d1, d3, d1)
+        Imgproc.threshold(d1, d1, 2.0, 255.0, Imgproc.THRESH_BINARY_INV)
+        return Core.countNonZero(d1).toDouble() / max(1, rgb.rows() * rgb.cols())
     }
 
     /**
@@ -763,7 +856,11 @@ class DocumentDetector(private val tier: DeviceTier) {
         var best: Candidate? = null
         val s = scoreQuad(q, b, live)
         debugCand?.invoke(q, s * wq, "raw")
-        if (s > 0) { debugFeat?.invoke(q, b.feat, wq, "raw"); best = Candidate(q, s * wq, candidateConf(q, b, s * wq, wq), qualityConf(b.feat, wq)) }
+        if (s > 0) {
+            debugFeat?.invoke(q, b.feat, wq, "raw")
+            best = Candidate(q, s * wq, candidateConf(q, b, s * wq, wq), qualityConf(b.feat, wq), b.feat.copyOf(), wq, false)
+            if (!live) b.pool.add(best)
+        }
         // Misma hipótesis ajustada a los bordes reales (vértices del casco desplazados, esquinas redondeadas)
         val sq = snapQuad(q, b) ?: return best
         val s2 = scoreQuad(sq, b, live)
@@ -772,7 +869,9 @@ class DocumentDetector(private val tier: DeviceTier) {
         debugCand?.invoke(sq, s2 * ws, "snap")
         if (s2 > 0) {
             debugFeat?.invoke(sq, b.feat, ws, "snap")
-            if (best == null || s2 * ws > best.score) best = Candidate(sq, s2 * ws, candidateConf(sq, b, s2 * ws, ws), qualityConf(b.feat, ws))
+            val c2 = Candidate(sq, s2 * ws, candidateConf(sq, b, s2 * ws, ws), qualityConf(b.feat, ws), b.feat.copyOf(), ws, true)
+            if (!live) b.pool.add(c2)
+            if (best == null || s2 * ws > best.score) best = c2
         }
         return best
     }
@@ -924,7 +1023,7 @@ class DocumentDetector(private val tier: DeviceTier) {
         val w = b.w; val h = b.h
         val a = polyArea(q)
         val af = a / (w.toDouble() * h)
-        if (af < (if (live) 0.1 else 0.08) || af > 0.995) return -1.0
+        if (af < (if (live) 0.1 else 0.035) || af > 0.995) return -1.0
         // Convexidad: todos los productos cruz con el mismo signo
         var sign = 0
         var maxCos = 0.0
@@ -1580,6 +1679,9 @@ class DocumentDetector(private val tier: DeviceTier) {
     /** Hipótesis por rectas (desactivable en el banco de pruebas). */
     internal var lineQuads = true
 
+    /** Reordenación por material (desactivable en el banco de pruebas). */
+    internal var rerank = true
+
     /** Búsqueda de la hoja superior (desactivable en el banco de pruebas). */
     internal var sheetRefine = true
     internal var debugBoxes: ((List<IntArray>) -> Unit)? = null
@@ -1594,8 +1696,10 @@ class DocumentDetector(private val tier: DeviceTier) {
     private fun candidateConf(q: FloatArray, b: Buffers, score: Double, provenance: Double): Double {
         val c0 = scoreToConf(score)
         val qc = qualityConf(b.feat, provenance)
-        if (qc <= c0) return c0
-        return max(c0, qc * paperFactor(q, b))
+        // Documento muy pequeño en el encuadre (< 8 %): hace falta más evidencia (etiquetas, carteles, pantallas lejanas)
+        val small = min(1.0, b.feat[0] / SMALL_DOC_AREA)
+        if (qc <= c0) return c0 * small
+        return max(c0, qc * paperFactor(q, b)) * small
     }
 
     /**
@@ -1652,6 +1756,15 @@ class DocumentDetector(private val tier: DeviceTier) {
         /** Diferencia mínima de luminancia o tono entre ambos lados para considerar materiales distintos. */
         private const val SEP_MIN_L = 18
         private const val SEP_MIN_C = 6
+
+        /** Escaneo: fracción mínima de píxeles sin color y de papel blanco saturado (L >= [SCAN_WHITE_L]). */
+        private const val SCAN_GRAY = 0.9
+        private const val SCAN_WHITE_FRAC = 0.2
+        private const val SCAN_WHITE_L = 245.0
+        /** Fracción del encuadre por debajo de la cual la confianza se reduce en proporción al área. */
+        private const val SMALL_DOC_AREA = 0.08
+        /** Confianza mínima de la hipótesis que sustituye a la elegida en la reordenación por material. */
+        private const val SWAP_MIN_CONF = 0.35
 
         /** Candidatos (por puntuación) en los que se comprueba si son un marco impreso. */
         private const val MAX_FRAME_CHECKS = 6
