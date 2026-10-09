@@ -109,7 +109,10 @@ object TextRegions {
         fun release() { n.release(); dark.release(); gain.release(); ruling.release() }
     }
 
-    internal fun prepare(rgb: Mat, bgSide: Int = 384, refineSide: Int = 512): Prepared = MatBag().use { bag ->
+    internal fun prepare(rgb0: Mat, bgSide: Int = 384, refineSide: Int = 512): Prepared = MatBag().use { bag ->
+        // Pizarra / pantalla en modo oscuro: escritura CLARA sobre fondo oscuro -> se invierte (tiza -> tinta oscura
+        // sobre blanco) y el resto de la tubería no cambia
+        val rgb = if (lightOnDark(rgb0, bag)) bag.mat().also { Core.bitwise_not(rgb0, it); log?.invoke("polaridad invertida") } else rgb0
         val bg = bag.add(Cv.estimateBackground(rgb, bgSide, refine = true, refineSide = refineSide))
         val n = Mat()
         Cv.divideByBackground(rgb, bg, n)
@@ -126,7 +129,10 @@ object TextRegions {
         val ch = ArrayList<Mat>(3); Core.split(n, ch)
         for (c in ch) bag.add(c)
         val v = bag.mat(); Core.max(ch[0], ch[1], v); Core.max(v, ch[2], v)
-        val (noise, pm) = Cv.paperStats(Cv.histogram(v))
+        // (papel >= 1: con una página casi negra -pizarra, texto claro sobre fondo oscuro- el nivel puede salir 0 y
+        // las rampas relativas a él darían 0/0)
+        val (noise, pm0) = Cv.paperStats(Cv.histogram(v))
+        val pm = max(pm0, 1.0)
         val dark = Mat()
         Core.bitwise_not(v, dark)
         Core.subtract(dark, Scalar(255.0 - pm), dark)
@@ -148,6 +154,27 @@ object TextRegions {
         v.release(); mn.release(); chroma.release(); wv.release()
         val ruling = suppressRuling(dark, gain, bag)
         Prepared(n, dark, gain, ruling, pm, noise)
+    }
+
+    /**
+     * ¿Escritura clara sobre fondo oscuro? A ~1000 px, en gris: diferencia con el fondo local (mediana 31x31);
+     * se comparan las fracciones de píxeles mucho más claros (> +40) y mucho más oscuros (< -40) que su entorno
+     * ([HwStats.isLightOnDark]).
+     */
+    private fun lightOnDark(rgb: Mat, bag: MatBag): Boolean {
+        val g = bag.mat(); Cv.downscale(rgb, g, 1000)
+        val gray = bag.mat(); Imgproc.cvtColor(g, gray, if (g.channels() == 4) Imgproc.COLOR_RGBA2GRAY else Imgproc.COLOR_RGB2GRAY)
+        g.release()
+        if (min(gray.cols(), gray.rows()) < 64) return false
+        val bg = bag.mat(); Imgproc.medianBlur(gray, bg, 31)
+        val d = bag.mat()
+        Core.subtract(gray, bg, d); Imgproc.threshold(d, d, 40.0, 255.0, Imgproc.THRESH_BINARY)
+        val bright = Core.countNonZero(d).toDouble() / d.total()
+        Core.subtract(bg, gray, d); Imgproc.threshold(d, d, 40.0, 255.0, Imgproc.THRESH_BINARY)
+        val dark = Core.countNonZero(d).toDouble() / d.total()
+        log?.invoke("polaridad claro=%.4f oscuro=%.4f".format(bright, dark))
+        gray.release(); bg.release(); d.release()
+        return HwStats.isLightOnDark(bright, dark)
     }
 
     /**
@@ -202,7 +229,7 @@ object TextRegions {
         // gl = nivel típico de la rejilla (mediana en la huella gruesa; umbrales de detección)
         val gl = Cv.percentile(Cv.histogram(q, lines), 0.5).toDouble()
         // Rectas típicamente OSCURAS (tablas, formularios impresos): no es una rejilla clara de cuaderno
-        if (gl >= 60.0) { lines.setTo(Scalar(0.0)); return lines }
+        if (gl >= 60.0) { log?.invoke("ruling dark gl=$gl"); lines.setTo(Scalar(0.0)); return lines }
         val remove = bag.mat(); remove.create(dark.size(), CvType.CV_8UC1); remove.setTo(Scalar(0.0))
         val band = bag.mat(); val o = bag.mat(); val t = bag.mat()
         // Media resolución por máximo 3x3 centrado (la línea fina conserva su oscuridad); elementos a -9..9° (la hoja
@@ -358,6 +385,8 @@ object TextRegions {
     internal class Comp(
         val x: Int, val y: Int, val w: Int, val h: Int, val area: Int,
         val meanDark: Double, val halfWidth: Float, val onRuling: Double, val label: Int,
+        /** Oscuridad máxima en el mapa sin normalizar (0 si no se pidió). */
+        val maxRaw: Int = 0,
     )
 
     internal fun layout(p: Prepared): Layout = MatBag().use { bag ->
@@ -370,11 +399,18 @@ object TextRegions {
         val g = bag.mat(); Imgproc.resize(p.gain, g, dw.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
         Core.pow(g, NOISE_GAIN_EXP, g)
         val dn = bag.mat(); dw.convertTo(dn, CvType.CV_32F); Core.divide(dn, g, dn)
-        val dn8 = bag.mat(); dn.convertTo(dn8, CvType.CV_8U)
         // Ruido del mapa ya suavizado (~0.6 del medido en el papel)
         val sigma = max(1.5, p.noise * 0.6)
         val tLow = max(5.0, 2.2 * sigma)
         val tHigh = max(11.0, 4.0 * sigma)
+        // Textura del papel (pergamino, papel viejo con manchas, grano grueso, transparencias tenues): el ruido medido
+        // en el histograma no la ve, y con el umbral bajo el papel entero se une en una sola componente con la
+        // escritura (y luego se borra como "mancha" o como "borde"). Donde la textura local del papel supera el
+        // ruido, la oscuridad se divide por ese exceso: los umbrales pasan a ser relativos a la textura local, igual
+        // que a la ganancia de las sombras ([paperTexture]).
+        val texF = paperTexture(dn, tLow, tHigh, bag)
+        val dn8 = bag.mat(); dn.convertTo(dn8, CvType.CV_8U)
+        log?.invoke("texF=%.2f".format(texF))
         // Huella de la rejilla a resolución de trabajo
         val rul = bag.mat()
         if (!p.ruling.empty()) {
@@ -388,12 +424,41 @@ object TextRegions {
         val rb = ByteArray(W * H); rul.get(0, 0, rb)
         val db = ByteArray(W * H); dn8.get(0, 0, db)
         val lab = IntArray(W * H)
-        val (nc, comps) = extractComps(weak, db, rb, lab, tHigh, bag)
+        val dtf = FloatArray(W * H)
+        val rawb = ByteArray(W * H); dw.get(0, 0, rawb)
+        val (nc, comps) = extractComps(weak, db, rb, lab, tHigh, bag, dtf, rawb)
         // Grosor típico del trazo y altura de letra (componentes medianas, sin motas ni restos de rejilla)
         val sized = comps.filter { it.area >= 12 && max(it.w, it.h) >= 5 }
         val hw50 = if (sized.isEmpty()) 1.0 else sized.map { it.halfWidth.toDouble() }.sorted()[sized.size / 2]
-        val hw80 = if (sized.isEmpty()) 1.5 else sized.map { it.halfWidth.toDouble() }.sorted()[(sized.size * 0.8).toInt().coerceAtMost(sized.size - 1)]
+        val hw80c = if (sized.isEmpty()) 1.5 else sized.map { it.halfWidth.toDouble() }.sorted()[(sized.size * 0.8).toInt().coerceAtMost(sized.size - 1)]
+        // Grosor de la tinta FIRME ponderado por longitud: cientos de motas finas (textura del papel, transparencias)
+        // no deben fijar el límite de "trazo grueso" por debajo del trazo real de la pluma o el rotulador
+        // (sin las que tocan el borde ni las enormes: marcos, cantos, sombras; a lo sumo x2 del percentil por número)
+        val firm = sized.filter {
+            it.meanDark >= 2.0 * tHigh && it.x > 2 && it.y > 2 && it.x + it.w < W - 2 && it.y + it.h < H - 2 &&
+                max(it.w, it.h) <= max(W, H) / 6
+        }
+        // (peso = longitud del trazo ~ área / semiancho: los trazos largos y finos mandan; las anillas de una
+        // espiral o los borrones, macizos y cortos, no)
+        val hw80 = min(2.0 * hw80c, max(hw80c, HwStats.weightedPercentile(firm.map { it.halfWidth.toDouble() },
+            firm.map { it.area / max(1.0, it.halfWidth.toDouble()) }, 0.6) ?: 0.0))
         val thickLim = max(4.0, 2.4 * max(hw80, 1.0))
+        // Fracción de cada componente con distancia al borde >= thickLim/2: una mancha maciza (espiral, borde
+        // oscuro, sombra) es gruesa en buena parte de su área; una palabra con algún borrón de tinta, no
+        // (sólo las candidatas a mancha, recorriendo su caja)
+        val thickFrac = FloatArray(nc)
+        run {
+            val lim = (0.5 * thickLim).toFloat()
+            for (c in comps) {
+                if (c.halfWidth <= thickLim) continue
+                var cnt = 0
+                for (y in c.y until c.y + c.h) {
+                    var i = y * W + c.x
+                    for (x in 0 until c.w) { if (lab[i] == c.label && dtf[i] >= lim) cnt++; i++ }
+                }
+                thickFrac[c.label] = cnt.toFloat() / max(1, c.area)
+            }
+        }
         // Letras: trazos finos, claramente marcados y fuera de la rejilla
         val letterCand = sized.filter {
             it.halfWidth <= thickLim && it.h >= 6 && it.h <= H / 6 && it.onRuling < 0.5 && it.meanDark >= 1.4 * tHigh &&
@@ -406,7 +471,7 @@ object TextRegions {
             letterCand.map { BoxGrouping.Box(it.x, it.y, it.x + it.w, it.y + it.h) }, max(2, (lh0 * 0.4).roundToInt()))
         val lh = if (letterCand.size < 3) lh0
         else BoxGrouping.percentile(letterCand.map { if (vertical) it.w else it.h }.toIntArray(), 0.5, 20).toDouble().coerceIn(10.0, W / 8.0)
-        log?.invoke("work ${W}x$H s=%.3f tLow=%.1f tHigh=%.1f hw50=%.2f hw80=%.2f thickLim=%.1f lh=%.1f vertical=$vertical comps=${comps.size}".format(s, tLow, tHigh, hw50, hw80, thickLim, lh))
+        log?.invoke("work ${W}x$H s=%.3f tLow=%.1f tHigh=%.1f hw50=%.2f hw80c=%.2f hw80=%.2f thickLim=%.1f lh=%.1f vertical=$vertical comps=${comps.size}".format(s, tLow, tHigh, hw50, hw80c, hw80, thickLim, lh))
 
         // --- Manchas gruesas que no son letras (espiral, huecos, bordes oscuros) -> zona en blanco
         val blobLabels = BooleanArray(nc)
@@ -414,7 +479,7 @@ object TextRegions {
         var anyBlob = false; var anySoft = false
         val touch = 2
         for (c in comps) {
-            if (c.halfWidth <= thickLim) continue
+            if (c.halfWidth <= thickLim || thickFrac[c.label] < BLOB_THICK_FRAC) continue
             // Trazo grueso pero no oscuro ni enorme (palabra tachada, letras apiñadas, marcador): es escritura
             val edge = c.x <= 2 || c.y <= 2 || c.x + c.w >= W - 2 || c.y + c.h >= H - 2
             if (!edge && c.meanDark < 3.5 * tHigh && c.halfWidth <= 2 * thickLim) continue
@@ -482,9 +547,11 @@ object TextRegions {
             Imgproc.resize(bs, blank, dw.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
             Imgproc.threshold(blank, blank, 127.0, 255.0, Imgproc.THRESH_BINARY)
         }
-        // --- Espiral / anillas: columna (o fila) de >= 5 manchas grandes, macizas y alargadas en perpendicular,
-        // alineadas y repartidas por buena parte de la página -> banda en blanco (con sus alambres y sombras)
-        for (band in findBindings(comps, lh, W, H, tHigh, hw50)) {
+        // --- Espiral / anillas: columna (o fila) de >= 8 manchas grandes y macizas, alineadas, de ancho parecido,
+        // con paso regular, sin letras entre ellas y repartidas por buena parte de la página -> banda en blanco
+        // (con sus alambres y sombras)
+        for (band in findBindings(comps, lh, W, H, tHigh, hw50, vertical, letterCand)) {
+            log?.invoke("espiral ${band.x0.roundToInt()},${band.y0.roundToInt()}-${band.x1.roundToInt()},${band.y1.roundToInt()} th=${band.thickness}")
             Imgproc.line(blank, org.opencv.core.Point(band.x0, band.y0), org.opencv.core.Point(band.x1, band.y1), Scalar(255.0), band.thickness)
         }
         // Segunda pasada sin las zonas en blanco: los trazos finos pegados a una mancha (línea de un diagrama que
@@ -498,7 +565,7 @@ object TextRegions {
         if (Core.countNonZero(blank) > 0 || anySoft) {
             val nb = bag.mat(); Core.bitwise_not(blank, nb)
             Core.bitwise_and(weak, nb, weak)
-            comps2 = extractComps(weak, db, rb, lab, tHigh, bag).second
+            comps2 = extractComps(weak, db, rb, lab, tHigh, bag, raw = rawb).second
         } else comps2 = comps.filter { !blobLabels[it.label] }
 
         // --- Imágenes: zonas grandes y macizas de contenido no-papel (fotos, bloques de color)
@@ -527,8 +594,11 @@ object TextRegions {
             // (largos a lo largo del borde: una letra cortada por el borde -"I" de "Informe", el resto de una palabra
             // al pie de la hoja- es corta o poco maciza y se conserva)
             val fillC = c.area.toDouble() / max(1, c.w * c.h)
-            if ((touchLR && c.h >= 3 * c.w && (c.h >= 2.5 * lh || fillC >= 0.5 && c.h >= 1.6 * lh)) ||
-                (touchTB && c.w >= 3 * c.h && (c.w >= 2.5 * lh || fillC >= 0.5 && c.w >= 1.6 * lh))) continue
+            // (y estrechos -una franja-: un bloque de escritura fundido por la textura que llega al borde no lo es)
+            val stripLR = c.w <= 0.2 * W || fillC >= 0.5
+            val stripTB = c.h <= 0.2 * H || fillC >= 0.5
+            if ((touchLR && stripLR && c.h >= 3 * c.w && (c.h >= 2.5 * lh || fillC >= 0.5 && c.h >= 1.6 * lh)) ||
+                (touchTB && stripTB && c.w >= 3 * c.h && (c.w >= 2.5 * lh || fillC >= 0.5 && c.w >= 1.6 * lh))) continue
             if (((touchLR && c.w <= 2 * lh) || (touchTB && c.h <= 2 * lh)) && c.halfWidth > 1.6 * hw80) continue
             // Dentro de una imagen: ya se conserva entera
             if (images.any { c.x >= it.x0 && c.y >= it.y0 && x1 <= it.x1 && y1 <= it.y1 }) continue
@@ -597,6 +667,16 @@ object TextRegions {
             Imgproc.dilate(ink, ink, Cv.kernel(Imgproc.MORPH_ELLIPSE, Cv.odd(max(3, (lh / f).roundToInt()))))
             Imgproc.GaussianBlur(ink, ink, Size(0.0, 0.0), max(1.0, lh * 0.6 / f))
         }
+        // Dos tintas (transparencia del reverso, manchas): fuerza de cada componente aceptada = su oscuridad máxima
+        val twoInk = run {
+            val cs = keepComps.filter { it.label in finalLabels && max(it.w, it.h) >= 0.5 * lh }
+            HwStats.twoInk(cs.map { it.maxRaw.toDouble() }, cs.map { it.area.toDouble() })
+        }
+        log?.invoke("twoInk $twoInk")
+        // Con dos tintas, la tinta débil (transparencia del reverso, manchas) no se toma por trazo firme allí donde
+        // no hay tinta principal cerca: el nivel de la zona tiene un suelo del 60 % de la tinta principal (la débil
+        // sale en gris claro, proporcional a su oscuridad, en vez de negra y uniforme)
+        if (twoInk.detected) Core.max(ink, Scalar(TWO_INK_FLOOR * twoInk.front), ink)
         val smallLabels = HashSet<Int>()
         for (c in keepComps) if (max(c.w, c.h) < 0.4 * lh) smallLabels.add(c.label)
         val coherent = coherenceMap(lab, finalLabels, smallLabels, dw, ink, W, H, bag)
@@ -604,6 +684,62 @@ object TextRegions {
         log?.invoke("strokeHalf work=%.2f (hw50=%.2f)".format(half, hw50))
         Layout(regions.sortedWith(compareBy({ it.top }, { it.left })), lh / s, blank, s, tLow, ink, keep, half / s, coherent)
     }
+
+    /**
+     * Normaliza [dn] (32F, in-place) por la textura local del papel; devuelve el factor máximo aplicado (1 = sin
+     * textura). Textura = alta frecuencia del papel fuera de la tinta, por bloques de 8x8 y mediana en ~1/10 de la
+     * página; factor = clamp([TEX_K]·textura / tLow, 1, [TEX_MAX]), como campo suave.
+     */
+    private fun paperTexture(dn: Mat, tLow: Double, tHigh: Double, bag: MatBag): Double {
+        val W = dn.cols(); val H = dn.rows()
+        // Sólo la parte de alta frecuencia (|d - suavizado|, recortada a 3·tLow): el grano y las fibras del papel la
+        // tienen; el halo de un texto desenfocado o una sombra suave, no (no deben bajar la sensibilidad)
+        val hp = bag.mat(); Imgproc.GaussianBlur(dn, hp, Size(0.0, 0.0), TEX_SIGMA)
+        Core.absdiff(dn, hp, hp)
+        Core.min(hp, Scalar(3.0 * tLow), hp)
+        // ...y sólo FUERA de la tinta: los bordes de las letras también son alta frecuencia. Peso = 1 lejos de los
+        // píxeles claramente oscuros (> 2·tHigh, con 2 px de margen)
+        val ink = bag.mat(); Core.compare(dn, Scalar(2.0 * tHigh), ink, Core.CMP_GT)
+        Imgproc.dilate(ink, ink, Cv.kernel(Imgproc.MORPH_RECT, 5))
+        val w = bag.mat(); Core.bitwise_not(ink, ink); ink.convertTo(w, CvType.CV_32F, 1.0 / 255.0)
+        ink.release()
+        Core.multiply(hp, w, hp)
+        // Media por bloques de 8x8 sobre el papel; bloques casi todo tinta -> sin textura medible (0)
+        val ss = Size(max(4.0, (W / 8.0).roundToInt().toDouble()), max(4.0, (H / 8.0).roundToInt().toDouble()))
+        val t = bag.mat(); Imgproc.resize(hp, t, ss, 0.0, 0.0, Imgproc.INTER_AREA)
+        val ws = bag.mat(); Imgproc.resize(w, ws, ss, 0.0, 0.0, Imgproc.INTER_AREA)
+        hp.release(); w.release()
+        val few = bag.mat(); Core.compare(ws, Scalar(0.3), few, Core.CMP_LT)
+        Core.max(ws, Scalar(1e-3), ws); Core.divide(t, ws, t)
+        t.setTo(Scalar(0.0), few)
+        // MEDIANA de los bloques en el entorno (~1/10 de la página): manchas sueltas no cuentan
+        val t8 = bag.mat(); t.convertTo(t8, CvType.CV_8U, 4.0)
+        val k = Cv.odd(max(3, (max(ss.width, ss.height) / 10.0).roundToInt())).coerceAtMost(31)
+        Imgproc.medianBlur(t8, t8, k)
+        // factor = clamp(TEX_K·T / tLow, 1, TEX_MAX), campo suave
+        t8.convertTo(t, CvType.CV_32F, TEX_K / (4.0 * tLow))
+        Imgproc.blur(t, t, Size(k.toDouble(), k.toDouble()))
+        Core.max(t, Scalar(1.0), t); Core.min(t, Scalar(TEX_MAX), t)
+        val mx = Core.minMaxLoc(t).maxVal
+        if (mx <= 1.02) return 1.0
+        val tf = bag.mat(); Imgproc.resize(t, tf, dn.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
+        Core.divide(dn, tf, dn)
+        return mx
+    }
+
+    /** Textura del papel: la oscuridad se normaliza donde su alta frecuencia media supera tLow / TEX_K. */
+    private const val TEX_K = 2.5
+    private const val TEX_MAX = 4.0
+    private const val TEX_SIGMA = 2.0
+
+    /** Área máxima de letras sueltas dentro de una banda de espiral (fracción del área de las anillas). */
+    private const val BINDING_LETTERS = 0.15
+
+    /** Suelo del nivel de tinta de la zona (fracción de la tinta principal) cuando hay dos tintas. */
+    private const val TWO_INK_FLOOR = 0.6
+
+    /** Fracción mínima de área gruesa (distancia al borde >= thickLim/2) para tomar una componente por mancha. */
+    private const val BLOB_THICK_FRAC = 0.15f
 
     /**
      * Trazos FIRMES (se les da intensidad uniforme en el render) frente a manchas tenues (transparencias del reverso,
@@ -660,14 +796,18 @@ object TextRegions {
     }
 
     /** Componentes de [weak] con algún píxel > [tHigh] (histéresis). Rellena [lab] con las etiquetas. */
-    private fun extractComps(weak: Mat, db: ByteArray, rb: ByteArray, lab: IntArray, tHigh: Double, bag: MatBag): Pair<Int, List<Comp>> {
+    private fun extractComps(
+        weak: Mat, db: ByteArray, rb: ByteArray, lab: IntArray, tHigh: Double, bag: MatBag,
+        dtOut: FloatArray? = null, raw: ByteArray? = null,
+    ): Pair<Int, List<Comp>> {
         val labels = bag.mat(); val stats = bag.mat(); val cents = bag.mat()
         val nc = Imgproc.connectedComponentsWithStats(weak, labels, stats, cents, 8, CvType.CV_32S)
         val dt = bag.mat(); Imgproc.distanceTransform(weak, dt, Imgproc.DIST_L2, 3)
         labels.get(0, 0, lab)
-        val dtf = FloatArray(lab.size); dt.get(0, 0, dtf)
+        val dtf = dtOut ?: FloatArray(lab.size); dt.get(0, 0, dtf)
         dt.release(); labels.release(); cents.release()
         val maxDt = FloatArray(nc); val sumD = LongArray(nc); val strong = BooleanArray(nc); val onR = IntArray(nc)
+        val mxR = IntArray(nc)
         val th = tHigh.toInt()
         for (i in lab.indices) {
             val c = lab[i]; if (c == 0) continue
@@ -676,6 +816,7 @@ object TextRegions {
             if (d > th) strong[c] = true
             if (dtf[i] > maxDt[c]) maxDt[c] = dtf[i]
             if (rb[i].toInt() != 0) onR[c]++
+            if (raw != null) { val r = raw[i].toInt() and 0xFF; if (r > mxR[c]) mxR[c] = r }
         }
         val st = IntArray(nc * 5); if (nc > 0) stats.get(0, 0, st)
         stats.release()
@@ -684,19 +825,20 @@ object TextRegions {
             if (!strong[c]) continue
             val o = c * 5
             val a = st[o + 4]
-            comps.add(Comp(st[o], st[o + 1], st[o + 2], st[o + 3], a, sumD[c].toDouble() / a, maxDt[c], onR[c].toDouble() / a, c))
+            comps.add(Comp(st[o], st[o + 1], st[o + 2], st[o + 3], a, sumD[c].toDouble() / a, maxDt[c], onR[c].toDouble() / a, c, mxR[c]))
         }
         return nc to comps
     }
 
     /**
      * Bandas de encuadernación (espiral): componentes grandes (lado largo >= 3.5 % de la página, corto >= 1.5 %), macizas
-     * (>= 20 % de su caja), oscuras y gruesas; >= 4 alineadas (centro a <= 4 % de la página), casi contiguas, que
+     * (>= 20 % de su caja), oscuras y gruesas; >= 8 alineadas (centro a <= 4 % de la página), casi contiguas, con paso
+     * regular, sin letras sueltas dentro de la banda ([HwBinding.isRingRow]), que
      * cubren >= 35 % de la página. Devuelve las bandas (con margen) en coordenadas de trabajo.
      */
     internal class Band(val x0: Double, val y0: Double, val x1: Double, val y1: Double, val thickness: Int)
 
-    internal fun findBindings(comps: List<Comp>, lh: Double, W: Int, H: Int, tHigh: Double, hw50: Double): List<Band> {
+    internal fun findBindings(comps: List<Comp>, lh: Double, W: Int, H: Int, tHigh: Double, hw50: Double, textVertical: Boolean = false, letters: List<Comp> = emptyList()): List<Band> {
         val side = max(W, H).toDouble()
         // Anillas: oscuras (sombra y hueco) y gruesas; una línea de texto larga (escrita en vertical) no lo es
         val big = comps.filter {
@@ -730,6 +872,51 @@ object TextRegions {
                     }
                 }
                 if (members.size < 4) continue
+                // Anillas de una misma espiral: tamaño parecido (ancho perpendicular a la banda dentro de x0.55..1.8
+                // de la mediana); el resto de condiciones (paso, estrechez, sin letras dentro) en [HwBinding.isRingRow]
+                fun acrossExt(c: Comp) = if (vertical) c.w else c.h
+                fun alongExt(c: Comp) = if (vertical) c.h else c.w
+                val medAcross = members.map { acrossExt(cand[it]).toDouble() }.sorted()[members.size / 2]
+                members = members.filter { acrossExt(cand[it]).toDouble() in (0.55 * medAcross)..(1.8 * medAcross) }
+                if (members.size < 4) continue
+                var halfB = 0.0
+                for (m in members) {
+                    val c = cand[m]; val center = a * along(c) + b
+                    val e0 = if (vertical) c.x.toDouble() else c.y.toDouble()
+                    val e1 = if (vertical) (c.x + c.w).toDouble() else (c.y + c.h).toDouble()
+                    halfB = max(halfB, max(center - e0, e1 - center))
+                }
+                // Dentro de la banda no hay letras: las anillas son manchas gruesas y la zona entre ellas es papel o
+                // alambre. Una "fila de anillas" hecha de palabras fundidas (manuscrito antiguo, letra gruesa) lleva
+                // dentro muchas letras sueltas de tamaño normal. Se descartan las anillas con letras a su altura y se
+                // exige que queden casi todas (y pocas letras en toda la banda)
+                val memberSet = members.map { cand[it].label }.toHashSet()
+                val lo0 = members.minOf { if (vertical) cand[it].y else cand[it].x }
+                val hi0 = members.maxOf { if (vertical) cand[it].y + cand[it].h else cand[it].x + cand[it].w }
+                val inBand = letters.filter { c ->
+                    val al = along(c)
+                    c.label !in memberSet && al >= lo0 && al <= hi0 && abs(across(c) - (a * al + b)) <= halfB
+                }
+                var ringArea = 0.0; for (m in members) ringArea += cand[m].area
+                val letterArea = inBand.sumOf { it.area.toDouble() }
+                val n0 = members.size
+                members = members.filter { m ->
+                    val c = cand[m]
+                    val a0 = if (vertical) c.y else c.x; val a1 = if (vertical) c.y + c.h else c.x + c.w
+                    inBand.filter { val al = along(it); al >= a0 && al <= a1 }.sumOf { it.area.toDouble() } < BINDING_LETTERS * c.area
+                }
+                val clean = letterArea < 2 * BINDING_LETTERS * ringArea && members.size >= 0.7 * n0
+                if (members.size < 4) continue
+                // Una espiral paralela a los renglones va en el borde (bloc de anillas arriba) o es muy regular y
+                // limpia (doble página con la escritura girada): un renglón de letras gruesas no lo es
+                val parallel = vertical == textVertical
+                if (!HwBinding.isRingRow(members.map { along(cand[it]) }, members.map { acrossExt(cand[it]).toDouble() },
+                        members.map { alongExt(cand[it]).toDouble() }, (if (vertical) W else H).toDouble(), clean,
+                        strict = parallel && run {
+                            val dim = (if (vertical) W else H).toDouble()
+                            val mid = a * (if (vertical) H else W) / 2.0 + b
+                            mid > 0.12 * dim && mid < 0.88 * dim
+                        })) continue
                 val lo = members.minOf { if (vertical) cand[it].y else cand[it].x }
                 val hi = members.maxOf { if (vertical) cand[it].y + cand[it].h else cand[it].x + cand[it].w }
                 if (hi - lo < 0.35 * (if (vertical) H else W)) continue
