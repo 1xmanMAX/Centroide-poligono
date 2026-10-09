@@ -717,3 +717,286 @@ object Cleanup {
         rf.convertTo(roi, roi.type())
     }
 }
+
+/**
+ * Restos del FONDO junto a los bordes de una página recortada (mesa, hierba, dedos que sujetan la hoja...): el
+ * recorte es un cuadrilátero de lados rectos y la hoja curvada tiene bordes curvos, así que entre ambos quedan cuñas
+ * del fondo dentro de la página. Se pintan del color del papel.
+ *
+ * Una franja que toca un borde de la salida se considera fondo sólo si:
+ * - no es papel por su color de fondo (cierre morfológico: el texto fino, aunque sea de color, no cuenta): textura de
+ *   color (vegetación, madera, tela, piel) o tono distinto del papel con algo de textura. Una sombra sobre la hoja
+ *   (más oscura, mismo tono, lisa) o un color liso impreso NO cuentan;
+ * - entra entre [MIN_DEPTH] y [MAX_DEPTH] del lado transversal;
+ * - se ESTRECHA hacia sus extremos como una cuña (el borde de la hoja es una curva suave); una foto o una banda de
+ *   color impresa pegada al borde empieza y acaba de golpe y se conserva. Una franja a lo largo de TODO el lado sólo
+ *   cuenta si su profundidad varía mucho (borde curvo); una banda de ancho constante se conserva.
+ * Sólo se aplica a páginas recortadas por un cuadrilátero ([PageProcessor]).
+ */
+internal object EdgeWedges {
+    /** Profundidad máxima de una cuña (fracción del lado transversal). */
+    const val MAX_DEPTH = 0.35
+
+    /** Profundidad mínima de una cuña que se rellena (fracción del lado transversal). */
+    const val MIN_DEPTH = 0.04
+
+    /** Lado largo de la imagen de análisis. */
+    const val SIDE = 500
+
+    /** Desactivable (banco de pruebas). */
+    @Volatile internal var enabled = true
+
+    /** Depuración (banco de pruebas): recibe la máscara no-papel y la de relleno (a [SIDE] px). */
+    @Volatile internal var debug: ((Mat, Mat) -> Unit)? = null
+
+    /**
+     * Profundidad, para cada posición t a lo largo del lado [side] (0 izq, 1 der, 2 sup, 3 inf), de la racha de
+     * píxeles no-papel ([np] != 0) que empieza en el borde (se toleran [lead] px iniciales de papel: el remuestreo
+     * pinta del papel una línea de 1-3 px en el canto). La profundidad cuenta desde el borde.
+     */
+    fun depths(np: ByteArray, w: Int, h: Int, side: Int, lead: Int = 0): IntArray {
+        val n = if (side < 2) h else w
+        val cross = if (side < 2) w else h
+        fun at(t: Int, d: Int): Boolean {
+            val x = when (side) { 0 -> d; 1 -> w - 1 - d; else -> t }
+            val y = when (side) { 2 -> d; 3 -> h - 1 - d; else -> t }
+            return np[y * w + x].toInt() != 0
+        }
+        return IntArray(n) { t ->
+            var d = 0
+            while (d < cross && d < lead && !at(t, d)) d++
+            if (d < cross && at(t, d)) {
+                while (d < cross && at(t, d)) d++
+                d
+            } else 0
+        }
+    }
+
+    /**
+     * Profundidad que se rellena en cada posición del lado a partir de las profundidades [d] (lado transversal
+     * [cross]).
+     * -1 = posición de esquina cuya racha recorre el lado vecino (ver [cornerRun]).
+     */
+    fun accept(d0: IntArray, cross: Int): IntArray {
+        val n = d0.size
+        val out = IntArray(n)
+        if (n < 8) return out
+        val zero = max(1, (0.006 * cross).roundToInt())
+        val d = bridgeGaps(d0, zero, max(2, (0.025 * n).roundToInt()))
+        val cap = MAX_DEPTH * cross
+        val off = max(2, (0.012 * n).roundToInt())
+        var t = 0
+        while (t < n) {
+            if (d[t] <= zero) { t++; continue }
+            var a = t
+            while (t < n && d[t] > zero) t++
+            var b = t // [a, b)
+            val a0 = a; val b0 = b
+            // Junto a una esquina el fondo de dos lados se une (la racha recorre todo el lado vecino): esas posiciones
+            // las cubre el otro lado
+            if (a == 0) while (a < b && d[a] > cap) a++
+            if (b == n) while (b > a && d[b - 1] > cap) b--
+            val atStart = a == 0 || d[a - 1] > cap; val atEnd = b == n || d[b] > cap
+            if (b - a < 3) continue
+            var mx = 0
+            for (i in a until b) mx = max(mx, d[i])
+            // Demasiado honda (no es una cuña junto al canto) o una astilla (< 4 % en las tres cuartas partes del tramo:
+            // apenas importa, y el canto de la hoja, la tapa del cuaderno o el marco de la pantalla se quedan como estaban)
+            if (mx > cap) continue
+            var deep = 0
+            for (i in a until b) if (d[i] >= MIN_DEPTH * cross) deep++
+            if (deep * 4 < b - a) continue
+            val ok = if (atStart && atEnd) {
+                // A lo largo de todo el lado: sólo si la profundidad varía mucho (borde curvo de la hoja); una banda
+                // de ancho constante (barra de estado de una pantalla, cabecera impresa, tapa del cuaderno) se conserva
+                val sorted = d.copyOfRange(a, b).sorted()
+                sorted[(0.1 * sorted.size).toInt()] <= 0.25 * mx
+            } else {
+                // Extremos interiores: la franja debe estrecharse (cuña), no empezar a toda profundidad (foto, banda)
+                val taper = { i: Int -> d[i.coerceIn(a, b - 1)] <= max(zero + 1.0, 0.5 * mx) }
+                (atStart || taper(a + off)) && (atEnd || taper(b - 1 - off)) && (b - a) >= 6 * off
+            }
+            if (ok) {
+                for (i in a until b) out[i] = d[i]
+                // Posiciones de esquina recortadas: -1 (la esquina se rellena si el lado vecino también es fondo)
+                for (i in a0 until a) out[i] = -1
+                for (i in b until b0) out[i] = -1
+            }
+        }
+        return out
+    }
+
+    /** Número de posiciones de esquina (-1) al principio ([fromStart]) o al final de [acc]. */
+    fun cornerRun(acc: IntArray, fromStart: Boolean): Int {
+        var k = 0
+        while (k < acc.size && acc[if (fromStart) k else acc.size - 1 - k] == -1) k++
+        return k
+    }
+
+    /**
+     * Huecos cortos (<= [maxGap] posiciones con profundidad <= [zero]) entre dos tramos de fondo: una mancha clara
+     * en el fondo no parte la cuña en dos. Se rellenan con la menor de las dos profundidades vecinas.
+     */
+    fun bridgeGaps(d: IntArray, zero: Int, maxGap: Int): IntArray {
+        val r = d.copyOf()
+        var t = 0
+        val n = d.size
+        while (t < n) {
+            if (r[t] > zero) { t++; continue }
+            val a = t
+            while (t < n && r[t] <= zero) t++
+            if (a > 0 && t < n && t - a <= maxGap) {
+                val v = min(r[a - 1], r[t])
+                for (i in a until t) r[i] = v
+            }
+        }
+        return r
+    }
+}
+
+/** Pinta del color del papel las cuñas del fondo junto a los bordes de [rgb] (RGB 8UC3, en sitio). true = cambió. */
+internal fun Cleanup.fillEdgeWedges(rgb: Mat): Boolean = MatBag().use { bag ->
+    val w = rgb.cols(); val h = rgb.rows()
+    if (!EdgeWedges.enabled || w < 64 || h < 64) return@use false
+    val sm = bag.mat()
+    Cv.downscale(rgb, sm, EdgeWedges.SIDE)
+    val sw = sm.cols(); val sh = sm.rows()
+    // Fondo sin el texto: cierre (los trazos finos oscuros desaparecen) y suavizado
+    val bg = bag.mat()
+    Imgproc.morphologyEx(sm, bg, Imgproc.MORPH_CLOSE, Cv.kernel(Imgproc.MORPH_RECT, Cv.odd(max(5, max(sw, sh) / 70))))
+    Imgproc.medianBlur(bg, bg, 5)
+    val paper = Cv.paperColor(sm)
+    val pr = paper.`val`[0]; val pg = paper.`val`[1]; val pb = paper.`val`[2]
+    val pl = (pr + pg + pb) / 3.0
+    if (pl < 90.0) return@use false // sin papel claro de referencia (pizarra, documento oscuro)
+    val px = ByteArray(sw * sh * 3); bg.get(0, 0, px)
+    // Textura de color (desviación local de R−G y B−G): el papel con tinta negra/azul uniforme apenas la tiene; la
+    // vegetación, la madera o la tela sí
+    val tex = FloatArray(sw * sh)
+    run {
+        val f = bag.mat(); bg.convertTo(f, CvType.CV_32FC3)
+        val ch = ArrayList<Mat>(3); Core.split(f, ch)
+        val ksz = Size(9.0, 9.0)
+        val acc = bag.mat(); acc.create(sh, sw, CvType.CV_32F); acc.setTo(Scalar(0.0))
+        val c = bag.mat(); val m = bag.mat(); val m2 = bag.mat()
+        for (o in intArrayOf(0, 2)) {
+            Core.subtract(ch[o], ch[1], c)
+            Imgproc.blur(c, m, ksz)
+            Core.multiply(c, c, m2); Imgproc.blur(m2, m2, ksz)
+            Core.multiply(m, m, m); Core.subtract(m2, m, m2)
+            Core.add(acc, m2, acc)
+        }
+        for (x in ch) x.release()
+        Imgproc.blur(acc, acc, Size(5.0, 5.0))
+        acc.get(0, 0, tex)
+    }
+    val np = ByteArray(sw * sh)
+    for (i in 0 until sw * sh) {
+        val r = (px[3 * i].toInt() and 0xFF).toDouble()
+        val g = (px[3 * i + 1].toInt() and 0xFF).toDouble()
+        val b = (px[3 * i + 2].toInt() and 0xFF).toDouble()
+        val l = (r + g + b) / 3.0
+        val k = l / pl
+        val dist = max(abs(r - pr * k), max(abs(g - pg * k), abs(b - pb * k)))
+        // (sólo color y textura: una sombra sobre la hoja es más oscura pero del mismo tono, y sin textura)
+        // Un color liso distinto del papel (banda impresa, tapa del cuaderno) no basta: hace falta algo de textura
+        if (tex[i] > 60f || (dist > 22.0 + 0.08 * l && tex[i] > 20f)) np[i] = -1
+    }
+    // Motas claras dentro del fondo (flores, reflejos) y motas oscuras sobre el papel: fuera
+    val npm = bag.mat(); npm.create(sh, sw, CvType.CV_8UC1); npm.put(0, 0, np)
+    Imgproc.morphologyEx(npm, npm, Imgproc.MORPH_CLOSE, Cv.kernel(Imgproc.MORPH_ELLIPSE, 5))
+    Imgproc.morphologyEx(npm, npm, Imgproc.MORPH_OPEN, Cv.kernel(Imgproc.MORPH_ELLIPSE, 3))
+    npm.get(0, 0, np)
+    // Islas de "papel" pequeñas dentro del fondo (reflejos, flores, hojas claras): fondo
+    run {
+        // (apertura: las islas unidas a la hoja por cuellos finos también se separan)
+        val pap = bag.mat(); Core.bitwise_not(npm, pap)
+        Imgproc.morphologyEx(pap, pap, Imgproc.MORPH_OPEN, Cv.kernel(Imgproc.MORPH_ELLIPSE, 7))
+        val pb2 = ByteArray(sw * sh); pap.get(0, 0, pb2)
+        for (i in np.indices) if (pb2[i].toInt() == 0) np[i] = -1
+        val lab = bag.mat(); val st = bag.mat(); val ce = bag.mat()
+        val nc = Imgproc.connectedComponentsWithStats(pap, lab, st, ce, 4, CvType.CV_32S)
+        if (nc > 2) {
+            val a = IntArray(nc * 5); st.get(0, 0, a)
+            val minA = 0.02 * sw * sh
+            val li = IntArray(sw * sh); lab.get(0, 0, li)
+            for (i in li.indices) { val c = li[i]; if (c > 0 && a[c * 5 + 4] < minA) np[i] = -1 }
+        }
+        npm.put(0, 0, np)
+    }
+    val fill = bag.mat(); fill.create(sh, sw, CvType.CV_8UC1); fill.setTo(Scalar(0.0))
+    val fb = ByteArray(sw * sh)
+    var any = false
+    val accs = arrayOfNulls<IntArray>(4)
+    for (side in 0 until 4) {
+        // (el remuestreo pinta del papel lo que queda fuera de la hoja: a veces una franja de varios px en el canto)
+        val d = EdgeWedges.depths(np, sw, sh, side, lead = max(3, (0.03 * (if (side < 2) sw else sh)).roundToInt()))
+        val cross = if (side < 2) sw else sh
+        val acc = EdgeWedges.accept(d, cross)
+        accs[side] = acc
+        for (t in acc.indices) for (k in 0 until acc[t]) {
+            val x = when (side) { 0 -> k; 1 -> sw - 1 - k; else -> t }
+            val y = when (side) { 2 -> k; 3 -> sh - 1 - k; else -> t }
+            fb[y * sw + x] = -1; any = true
+        }
+    }
+    // Esquinas donde se unen el fondo de dos lados aceptados: el fondo dentro de la caja de la esquina
+    val reach = IntArray(4) // profundidad alcanzada desde cada lado (px de análisis), cajas de esquina incluidas
+    for (side in 0 until 4) for (v in accs[side]!!) reach[side] = max(reach[side], v)
+    for ((v, hz) in listOf(0 to 2, 0 to 3, 1 to 2, 1 to 3)) {
+        val left = v == 0; val top = hz == 2
+        val ny = EdgeWedges.cornerRun(accs[v]!!, fromStart = top)   // filas de esquina del lado vertical
+        val nx = EdgeWedges.cornerRun(accs[hz]!!, fromStart = left) // columnas de esquina del lado horizontal
+        if (nx == 0 || ny == 0) continue
+        reach[v] = max(reach[v], nx); reach[hz] = max(reach[hz], ny)
+        for (yy in 0 until ny) for (xx in 0 until nx) {
+            val x = if (left) xx else sw - 1 - xx; val y = if (top) yy else sh - 1 - yy
+            if (np[y * sw + x].toInt() != 0) { fb[y * sw + x] = -1; any = true }
+        }
+    }
+    fill.put(0, 0, fb)
+    EdgeWedges.debug?.invoke(npm, fill)
+    if (!any) return@use false
+    // Margen: la transición fondo/hoja (sombra del canto, interpolación) también se va
+    Imgproc.dilate(fill, fill, Cv.kernel(Imgproc.MORPH_ELLIPSE, 3))
+    // Mezcla suave (sin escalón: un canto recto y nítido entre el relleno y la hoja parecería una línea de tabla)
+    val soft = bag.mat()
+    Imgproc.GaussianBlur(fill, soft, Size(7.0, 7.0), 0.0)
+    Core.max(soft, fill, soft)
+    val full = bag.mat()
+    Imgproc.resize(soft, full, Size(w.toDouble(), h.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR)
+    val pc = Cv.paperColor(rgb)
+    // Sólo en franjas junto a los lados tocados (la mezcla en coma flotante de 20 MP enteros costaría ~1 s):
+    // izquierda y derecha a todo el alto, arriba y abajo entre ambas; sin solapes
+    val depth = IntArray(4) { side ->
+        val m = reach[side]
+        val sc = if (side < 2) w.toDouble() / sw else h.toDouble() / sh
+        // (+4 px: dilatación y suavizado de la máscara)
+        if (m == 0) 0 else min(if (side < 2) w else h, ((m + 4) * sc).roundToInt())
+    }
+    val xl = depth[0]; val xr = w - depth[1]
+    val rects = listOf(
+        Rect(0, 0, xl, h), Rect(max(xl, xr), 0, w - max(xl, xr), h),
+        Rect(xl, 0, max(0, xr - xl), depth[2]), Rect(xl, h - depth[3], max(0, xr - xl), depth[3]),
+    ).filter { it.width > 0 && it.height > 0 }
+    for (r in rects) blendRect(rgb, full, r, pc, bag)
+    true
+}
+
+/** rgb = rgb + (papel − rgb)·alfa dentro de [r] (alfa = [alphaMask]/255). */
+private fun blendRect(rgb: Mat, alphaMask: Mat, r: Rect, pc: Scalar, bag: MatBag) {
+    val roi = rgb.submat(r); val aRoi = alphaMask.submat(r)
+    try {
+        if (Core.countNonZero(aRoi) == 0) return
+        val alpha = bag.mat(); aRoi.convertTo(alpha, CvType.CV_32F, 1.0 / 255.0)
+        val a3 = bag.mat(); Core.merge(listOf(alpha, alpha, alpha), a3)
+        val f = bag.mat(); roi.convertTo(f, CvType.CV_32FC3)
+        val pm = bag.mat(); pm.create(r.height, r.width, CvType.CV_32FC3); pm.setTo(Scalar(pc.`val`[0], pc.`val`[1], pc.`val`[2]))
+        Core.subtract(pm, f, pm)       // papel − imagen
+        Core.multiply(pm, a3, pm)      // · alfa
+        Core.add(f, pm, f)
+        f.convertTo(roi, rgb.type())
+    } finally {
+        roi.release(); aRoi.release()
+    }
+}

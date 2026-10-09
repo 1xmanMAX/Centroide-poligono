@@ -152,6 +152,7 @@ class PageProcessor(val tier: DeviceTier) {
                 } finally {
                     out.release()
                 }
+                if (quad != null) cleanWedges(rgb, edits)
                 return rgb
             }
             // 3) Enderezado alrededor del centro con el lienzo AMPLIADO (como Cleanup.rotateExpand): las esquinas del
@@ -177,6 +178,7 @@ class PageProcessor(val tier: DeviceTier) {
             out.release()
             // Esquinas que el enderezado deja fuera del documento -> color del papel (no la mesa del fondo)
             if (rd != null) fillOutsideRotated(rgb, rd, preW, preH)
+            if (quad != null) cleanWedges(rgb, edits)
             return rgb
         } finally {
             rgba?.release()
@@ -246,6 +248,15 @@ class PageProcessor(val tier: DeviceTier) {
             }
         }
         return model
+    }
+
+    /**
+     * Cuñas del fondo que el recorte recto deja junto a los bordes curvos de la hoja ([EdgeWedges]): sólo en páginas
+     * RECORTADAS (sin recorte no hay cuñas: el fondo es parte de la foto que el usuario eligió) con el enderezado
+     * automático activo (no en DNI/tarjetas, cuyo diseño llega hasta el canto).
+     */
+    private fun cleanWedges(rgb: Mat, edits: PageEdits) {
+        if (edits.autoDewarp || edits.autoDeskew) runCatching { Cleanup.fillEdgeWedges(rgb) }
     }
 
     /** Rellena con el color del papel lo que queda fuera del rectángulo [srcW] x [srcH] girado por [rd] (3x3). */
@@ -369,6 +380,7 @@ class PageProcessor(val tier: DeviceTier) {
             val d = Cleanup.deskewMat(cur)
             cur.release(); cur = d
         }
+        if (quadKey != null) cleanWedges(cur, edits)
         return cur
     }
 
