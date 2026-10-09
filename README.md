@@ -129,7 +129,34 @@ Todo en `imaging/` (OpenCV 4.10, sin red). Tiempos medidos con el harness Python
   local en el canal mínimo (tinta negra y cuadrícula azul clara por igual), aperturas con segmentos largos a -12°/0°/12°,
   centros de trazo por columnas/filas, **seguimiento** con predicción de pendiente y **enlace** de tramos colineales a
   través del texto; cada cadena se depura (regresión local robusta + cuadrática) y se descarta si no es tinta fina
-  (los centros de renglón de texto no pasan). Sin líneas suficientes se usan las **líneas base de los renglones**.
+  (los centros de renglón de texto no pasan). Sin líneas suficientes se usan **guías del propio texto** (`TextGuides`),
+  que entran como familias horizontal y vertical en el mismo ajuste:
+  - **Renglones**: dos líneas por renglón, la **base** y la **línea media** (altura de la x). Se miden con perfiles de
+    tinta en ventanas de ±2 letras a lo largo del renglón, enderezadas con su centro: el mayor salto de densidad del
+    cuerpo de las letras, que no mueven las ascendentes, las mayúsculas ni las descendentes. La línea media sólo se usa
+    donde su distancia a la base es la del renglón (las cifras y las mayúsculas no tienen altura de x). Como ambas deben
+    quedar rectas, la separación constante corrige el escalado vertical local. Cada línea se depura con una regresión
+    robusta y se suaviza con una regresión local cuadrática. Las palabras cortas de los extremos que el seguimiento
+    dejó fuera se añaden al renglón.
+  - **Guías verticales**: cada renglón se corta en tramos por los huecos de más de 2.5 letras (calles entre columnas,
+    tabuladores). Los inicios de tramo de renglones consecutivos se enlazan cuando caen sobre una curva suave
+    (predicción con la pendiente reciente; se saltan renglones con sangría, viñetas, títulos centrados y renglones
+    cortos). Así salen el **margen izquierdo**, los **bordes de columna** y los tabuladores repetidos. Los finales
+    sólo cuentan si el texto está **justificado**: al menos el 65 % de los renglones de su zona acaban en la guía,
+    algo que no ocurre con texto en bandera. Una guía necesita al menos 6 renglones y un soporte de al menos el 60 %
+    de los renglones de su zona; además, la mediana de la distancia a la guía de todos los inicios cercanos debe ser
+    pequeña (una racha casual de inicios parecidos en letra a mano muy dispersa no es un margen), y se suaviza con una regresión local cuadrática. Su peso depende del número de
+    renglones, de la dispersión y del soporte. Con inicios dispersos (manuscrito: más de 0.07 letras + 0.5 px) la
+    guía es **amplia**: tolerancia mayor, peso 0.35, y no cuenta para decidir si la hoja es plana. Por encima de 0.4
+    letras de dispersión no se usa.
+  - **Decisión**: renglones y guías verticales se juzgan por separado. Basta con que un grupo esté curvado (por
+    ejemplo, un margen combado con renglones rectos), pero el grupo que ya era recto no puede torcerse. La curvatura de
+    una guía por debajo de su ruido no cuenta. Con 30 renglones o más y curvatura clara (≥ 1.6 veces el umbral de hoja plana) basta una mejora del 30 % (pliegues fuertes:
+    residuo hasta el 15 % del inicial). Si las guías verticales no encajan, se ajusta sólo con los renglones. Como último respaldo (texto muy
+    pequeño o renglones partidos por un pliegue) se usa la línea base de los pies de las letras.
+  - **Ángulo**: si no se aplica el enderezado curvo, el giro se mide con las pendientes de los renglones (mediana
+    ponderada, dispersión ≤ 0.35°) y de las guías verticales (deben coincidir en ±0.8°). Si eso no es coherente, se
+    recurre a los perfiles de proyección (`Cleanup.estimateSkew`).
   Modelo: campo directo suave (u, v) = F(x, y) en una rejilla bilineal de ~28 celdas por mínimos cuadrados en banda
   (v constante a lo largo de cada horizontal, u a lo largo de cada vertical, placa delgada, Cauchy-Riemann débil y ancla
   débil a la identidad), descarte iterativo de líneas y tramos atípicos (subrayados, trazos de escritura) y, en
@@ -144,7 +171,7 @@ Todo en `imaging/` (OpenCV 4.10, sin red). Tiempos medidos con el harness Python
   las cuñas de fondo texturado o de otro tono (hierba, mesa, dedos) que quedan dentro del recorte junto al borde
   (franja que se estrecha, 4-35 % del lado) se pintan del color del papel (`Cleanup.fillEdgeWedges`); las fotos o
   bandas de ancho constante pegadas al borde se conservan. El enderezado normal gira con el lienzo ampliado (no recorta las esquinas). El campo se invierte (Newton) en una rejilla de salida de 8 px y se guarda normalizado: vista previa, base de
-  los trazos de borrado y render final usan el mismo modelo (caché por recorte, rotación y firma de la página). El render
+  los trazos de borrado y render final usan el mismo modelo (caché por recorte, rotación y firma de la página: 16x16 grises y proporción, para que dos fotos parecidas sin recorte no compartan modelo). El render
   compone perspectiva + rotación + hoja curvada en un **único `remap` cúbico** desde el original, por franjas de 1 MP.
   Sintético (2000x2700, desviación máx. de las líneas antes -> después): libro 20.2 -> 2.8 px (tabla) y 23.8 -> 1.8 px
   (cuaderno, error de posición 24.1 -> 0.6 px rms), ondulación 18.2 -> 2.3/4.0, combado diagonal 4.6 -> 1.5/1.8, esquina

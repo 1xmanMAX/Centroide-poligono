@@ -104,8 +104,10 @@ class PageProcessor(val tier: DeviceTier) {
             if (edits.autoDewarp || edits.autoDeskew) {
                 val red = reducedRectified(src, quad, rot, if (edits.autoDewarp) GridDewarp.EST_SIDE else 1000)
                 try {
-                    if (edits.autoDewarp) model = dewarpModel(red, quadKey(quad, w, h), rot, cacheable = true)
-                    if (model == null && edits.autoDeskew) angle = Cleanup.estimateSkew(red)
+                    val est = if (edits.autoDewarp) dewarpModel(red, quadKey(quad, w, h), rot, cacheable = true) else null
+                    model = est?.model
+                    // Ángulo: renglones + márgenes del texto si son coherentes; si no, perfiles de proyección
+                    if (model == null && edits.autoDeskew) angle = est?.skew ?: Cleanup.estimateSkew(red)
                 } finally {
                     red.release()
                 }
@@ -210,7 +212,7 @@ class PageProcessor(val tier: DeviceTier) {
     // (normalizado), así lo que se ve y lo que se borra coincide con el resultado.
     // ---------------------------------------------------------------------------------
 
-    private class DewarpEntry(val quad: List<Int>?, val rot: Int, val sig: FloatArray, val model: GridDewarp.Model?)
+    private class DewarpEntry(val quad: List<Int>?, val rot: Int, val sig: FloatArray, val est: GridDewarp.Estimate)
     private val dewarpCache = ArrayDeque<DewarpEntry>()
     private val dewarpLock = Any()
 
@@ -219,28 +221,38 @@ class PageProcessor(val tier: DeviceTier) {
         listOf((it.x / w * 1000).roundToInt(), (it.y / h * 1000).roundToInt())
     }
 
-    /** Firma 8x8 de grises del documento rectificado (distingue páginas con el mismo recorte). */
+    /**
+     * Firma del documento rectificado: 16x16 grises + proporción (x100) al final. Distingue páginas con el mismo
+     * recorte (o sin recorte: fotos de hojas parecidas seguidas no deben compartir el modelo de otra).
+     */
     private fun signature(rgb: Mat): FloatArray = MatBag().use { bag ->
         val g = bag.add(Cv.gray(rgb))
         val s = bag.mat()
-        Imgproc.resize(g, s, Size(8.0, 8.0), 0.0, 0.0, Imgproc.INTER_AREA)
-        val b = ByteArray(64); s.get(0, 0, b)
-        FloatArray(64) { (b[it].toInt() and 0xFF).toFloat() }
+        Imgproc.resize(g, s, Size(16.0, 16.0), 0.0, 0.0, Imgproc.INTER_AREA)
+        val b = ByteArray(256); s.get(0, 0, b)
+        FloatArray(257) { if (it < 256) (b[it].toInt() and 0xFF).toFloat() else (100.0 * rgb.cols() / max(1, rgb.rows())).toFloat() }
+    }
+
+    private fun sameSignature(a: FloatArray, b: FloatArray): Boolean {
+        if (a.size != b.size || abs(a[256] - b[256]) > 1.5f) return false
+        var sum = 0f
+        for (i in 0 until 256) { val d = abs(a[i] - b[i]); if (d > 14f) return false; sum += d }
+        return sum / 256 <= 3f
     }
 
     /**
-     * Modelo de [GridDewarp] para el documento rectificado [rgb] (null = no corregir). Se reutiliza el de la caché
+     * Estimación de [GridDewarp] (modelo o null = no corregir, y ángulo del texto) para el documento rectificado [rgb]. Se reutiliza la de la caché
      * si coinciden recorte, rotación y firma; sólo se guardan estimaciones hechas con resolución suficiente (las
      * miniaturas no fijan el modelo del render final).
      */
-    private fun dewarpModel(rgb: Mat, quad: List<Int>?, rot: Int, cacheable: Boolean): GridDewarp.Model? {
+    private fun dewarpModel(rgb: Mat, quad: List<Int>?, rot: Int, cacheable: Boolean): GridDewarp.Estimate {
         val sig = signature(rgb)
         synchronized(dewarpLock) {
             dewarpCache.firstOrNull { e ->
-                e.rot == rot && e.quad == quad && e.sig.indices.all { abs(e.sig[it] - sig[it]) <= 8f }
-            }?.let { return it.model }
+                e.rot == rot && e.quad == quad && sameSignature(e.sig, sig)
+            }?.let { return it.est }
         }
-        val model = GridDewarp.estimate(rgb)
+        val model = GridDewarp.estimateFull(rgb)
         if (cacheable && max(rgb.cols(), rgb.rows()) >= 900) {
             synchronized(dewarpLock) {
                 dewarpCache.addFirst(DewarpEntry(quad, rot, sig, model))
@@ -372,12 +384,18 @@ class PageProcessor(val tier: DeviceTier) {
             cur.release(); cur = r
         }
         val rot = ((edits.rotation % 360) + 360) % 360
-        val model = if (edits.autoDewarp) dewarpModel(cur, quadKey, rot, cacheable = true) else null
+        val est = if (edits.autoDewarp) dewarpModel(cur, quadKey, rot, cacheable = true) else null
+        val model = est?.model
         if (model != null) {
             val d = GridDewarp.apply(cur, model)
             cur.release(); cur = d
         } else if (edits.autoDeskew) {
-            val d = Cleanup.deskewMat(cur)
+            val skew = est?.skew
+            val d = when {
+                skew == null -> Cleanup.deskewMat(cur)
+                skew == 0.0 -> cur.clone()
+                else -> Cleanup.rotateExpand(cur, skew)
+            }
             cur.release(); cur = d
         }
         if (quadKey != null) cleanWedges(cur, edits)

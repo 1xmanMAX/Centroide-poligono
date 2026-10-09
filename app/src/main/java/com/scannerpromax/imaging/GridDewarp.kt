@@ -29,7 +29,8 @@ import kotlin.math.tan
  *    los centros de cada trazo y **seguimiento** con predicción de pendiente ([DewarpMath.linkColumns]); los tramos
  *    cortados por texto o celdas se **enlazan** por continuidad de posición y pendiente
  *    ([DewarpMath.mergeChains]) y cada cadena se suaviza con una regresión local robusta (descarta atípicos).
- *    Si no hay suficientes líneas se usan los **renglones de texto** (componentes de letra unidos en horizontal).
+ *    Si no hay suficientes líneas se usan **guías del texto** ([TextGuides]): línea base y línea media de cada
+ *    renglón (horizontales) y margen izquierdo, bordes de columna, tabuladores y margen derecho justificado (verticales).
  * 2. **Modelo**: campo directo suave (u, v) = F(x, y) sobre una rejilla de control bilineal (~28 celdas en el lado
  *    largo) por mínimos cuadrados ([DewarpMath.solveField]): v constante a lo largo de cada línea horizontal, u
  *    constante a lo largo de cada vertical, energía de placa delgada (interpolación/extrapolación suave hasta los
@@ -102,6 +103,9 @@ object GridDewarp {
         var beforeDev = 0.0
         var afterDev = 0.0
         var textRows = false
+        var guides = 0
+        var first = ""
+        var skew: Double? = null
         var reason = ""
         var msLines = 0.0
         var msSolve = 0.0
@@ -114,38 +118,76 @@ object GridDewarp {
     // Estimación
     // =====================================================================================
 
+    /** Resultado de la estimación: modelo (null = no corregir) y ángulo global por renglones y márgenes (o null). */
+    internal class Estimate(val model: Model?, val skew: Double?)
+
     /** Estima el modelo sobre [rgb] (RGB 8UC3 ya rectificado, cualquier tamaño). null = no corregir. */
-    internal fun estimate(rgb: Mat, debug: Debug? = null): Model? = MatBag().use { bag ->
+    internal fun estimate(rgb: Mat, debug: Debug? = null): Model? = estimateFull(rgb, debug).model
+
+    /**
+     * Modelo y, si la hoja es de texto sin tabla, ángulo de enderezado (grados, convención de [Cleanup.estimateSkew])
+     * medido con los renglones y las guías verticales del texto: más fiable que las proyecciones. Sólo se usa si no se
+     * aplica el modelo.
+     */
+    internal fun estimateFull(rgb: Mat, debug: Debug? = null): Estimate = MatBag().use { bag ->
         val t0 = System.nanoTime()
         val sm = bag.mat()
         val scale = Cv.downscale(rgb, sm, EST_SIDE)
         val w = sm.cols(); val h = sm.rows()
         debug?.apply { width = w; height = h; this.scale = scale }
-        if (w < 200 || h < 200) return@use null.also { debug?.reason = "imagen pequeña" }
+        if (w < 200 || h < 200) return@use Estimate(null, null).also { debug?.reason = "imagen pequeña" }
         val ink = inkMap(sm, bag)
         val bin = bag.mat()
         val thr = inkThreshold(ink)
         Imgproc.threshold(ink, bin, thr, 255.0, Imgproc.THRESH_BINARY)
         debug?.apply { threshold = thr; this.ink = ink.clone(); this.bin = bin.clone() }
         val inkFrac = Core.countNonZero(bin).toDouble() / bin.total()
-        if (inkFrac < 0.002 || inkFrac > 0.45) return@use null.also { debug?.reason = "tinta %.3f".format(inkFrac) }
+        if (inkFrac < 0.002 || inkFrac > 0.45) return@use Estimate(null, null).also { debug?.reason = "tinta %.3f".format(inkFrac) }
 
         val longSide = max(w, h).toDouble()
         val hc = familyLines(bin, horizontal = true, longSide = longSide, bag = bag)
         val vc = familyLines(bin, horizontal = false, longSide = longSide, bag = bag)
         var textRows = false
-        var hl = hc; val vl = vc
+        var hl = hc; var vl = vc
+        var skew: Double? = null
+        var footRows: List<DewarpMath.LineObs> = emptyList()
         // Respaldo: renglones de texto si las líneas horizontales no cubren la hoja
         if (coverage(hl, h.toDouble()) < 0.35 && coverage(vl, w.toDouble()) < 0.35) {
-            val rows = textRowLines(bin, longSide, bag)
-            if (rows.size >= 4) { hl = rows; textRows = true }
+            val tl = textLayout(bin, longSide, bag)
+            if (tl != null && tl.rowSlopes.size >= 4) {
+                hl = tl.rows; textRows = true
+                footRows = tl.footRows
+                val gl = tl.guides.map { g -> DewarpMath.LineObs(false, g.x, g.y, weight = g.weight, loose = g.loose, noise = g.resid, guide = true) }
+                vl = vl + gl
+                debug?.guides = tl.guides.size
+                val strict = tl.guides.filter { !it.loose }
+                skew = TextGuides.skewFromGuides(
+                    tl.rowSlopes, tl.rowLens,
+                    DoubleArray(strict.size) { val g = strict[it]; DewarpMath.lineFit(g.y, g.x, 0, g.size).second },
+                    DoubleArray(strict.size) { strict[it].let { g -> (g.y[g.size - 1] - g.y[0]).toDouble() } },
+                )?.takeIf { abs(it) <= 10.0 }?.let { if (abs(it) < 0.3) 0.0 else it }
+            }
         }
-        debug?.apply { msLines = (System.nanoTime() - t0) / 1e6; this.textRows = textRows }
+        debug?.apply { msLines = (System.nanoTime() - t0) / 1e6; this.textRows = textRows; this.skew = skew }
         val t1 = System.nanoTime()
         val content = contentPoints(sm, bin, bag)
-        val res = fitModel(w.toDouble(), h.toDouble(), hl, vl, textRows, debug, content, paperMask(sm, bag))
+        val paper = paperMask(sm, bag)
+        var fit = fitModel(w.toDouble(), h.toDouble(), hl, vl, textRows, debug, content, paper)
+        // Las guías verticales del texto no encajan (o tuercen los renglones): sólo renglones, como antes
+        if (textFallback && fit.model == null && vl.size > vc.size && !fit.reason.startsWith("plana")) {
+            debug?.first = fit.reason
+            fit = fitModel(w.toDouble(), h.toDouble(), hl, vc, textRows, debug, content, paper)
+            debug?.guides = 0
+        }
+        // Último respaldo: las líneas base por los pies de las letras (texto muy pequeño o renglones partidos en un
+        // pliegue, donde los perfiles salen en pocos renglones)
+        if (textFallback && fit.model == null && footRows.size >= 4 && !fit.reason.startsWith("plana")) {
+            val f2 = fitModel(w.toDouble(), h.toDouble(), footRows, vc, textRows, debug, content, paper)
+            if (f2.model != null) fit = f2
+        }
         debug?.msSolve = (System.nanoTime() - t1) / 1e6
-        res
+        if (DewarpMath.trace) println("  estimación ${w}x$h: ${fit.reason} ${fit.model?.info ?: ""} ángulo=$skew")
+        Estimate(fit.model, skew)
     }
 
     /**
@@ -350,14 +392,39 @@ object GridDewarp {
         return k
     }
 
+    /** Guías del texto: renglones (línea base y media), guías verticales y altura típica de letra (px). */
+    internal class TextLayout(
+        val rows: List<DewarpMath.LineObs>,
+        val guides: List<TextGuides.Guide>,
+        val med: Double,
+        /** Pendiente dy/dx y longitud de cada renglón (ángulo global). */
+        val rowSlopes: DoubleArray,
+        val rowLens: DoubleArray,
+        /** Respaldo: sólo la línea base por los pies de las letras (método anterior). */
+        val footRows: List<DewarpMath.LineObs> = emptyList(),
+    )
+
+    /** Guías del texto activables por separado (banco de pruebas). */
+    internal var textGuides = true
+    internal var textProfile = true
+    internal var textXLine = true
+    internal var textCells = 28.0
+    internal var textTps = 3.0
+    internal var textImprove = 0.7
+    internal var textFallback = true
+
     /**
      * Respaldo sin líneas: renglones de texto. Componentes con tamaño de letra; se unen en horizontal (≈1.2 alturas
-     * de letra) y se siguen los centros de cada renglón como si fueran líneas horizontales.
+     * de letra) y se siguen los centros de cada renglón. Sobre cada centro se miden por perfiles ([TextGuides.rowEdges])
+     * la línea BASE y la línea MEDIA (altura de la x): dos líneas horizontales por renglón, rectas y paralelas en la
+     * hoja real (su separación constante corrige el escalado vertical local). Los inicios y finales de los tramos de
+     * cada renglón dan las guías VERTICALES ([TextGuides.alignedGuides]: margen izquierdo, bordes de columna,
+     * tabuladores y margen derecho si el texto está justificado).
      */
-    private fun textRowLines(bin: Mat, longSide: Double, bag: MatBag): List<DewarpMath.LineObs> {
+    private fun textLayout(bin: Mat, longSide: Double, bag: MatBag): TextLayout? {
         val labels = bag.mat(); val stats = bag.mat(); val cents = bag.mat()
         val n = Imgproc.connectedComponentsWithStats(bin, labels, stats, cents, 8, CvType.CV_32S)
-        if (n < 20) return emptyList()
+        if (n < 20) return null
         val st = IntArray(n * 5)
         stats.get(0, 0, st)
         val hs = ArrayList<Int>()
@@ -366,7 +433,7 @@ object GridDewarp {
             val hh = st[i * 5 + 3]; val ww = st[i * 5 + 2]
             if (hh in 5..maxH && ww < hh * 6) hs.add(hh)
         }
-        if (hs.size < 20) return emptyList()
+        if (hs.size < 20) return null
         hs.sort()
         val med = hs[hs.size / 2].toDouble()
         // Máscara sólo con componentes de letra
@@ -407,51 +474,125 @@ object GridDewarp {
             .filter { it.span >= med * 2 }
         val merged = DewarpMath.mergeChains(chains, maxBridge = (med * 5).toFloat(), tol = tol, fitLen = (med * 6).toFloat())
         val minLen = max(med * 10, w * 0.15).toFloat()
-        val centers = ArrayList<DewarpMath.Chain>()
+        val centers0 = ArrayList<DewarpMath.Chain>()
         for (c in merged) {
             if (c.span < minLen) continue
             val s = DewarpMath.robustSmooth(c, win = (med * 3).toFloat(), outTol = (med * 0.3).toFloat().coerceAtLeast(1.5f), minInlier = 0.6f) ?: continue
             val (_, b) = DewarpMath.lineFit(s.t, s.c, 0, s.size)
             if (abs(b) > 0.3) continue
-            centers.add(s)
+            centers0.add(s)
         }
-        // Línea base: el centro del renglón varía con mayúsculas/ascendentes; el pie de las letras es estable
-        // (las descendentes se descartan como atípicas en la regresión robusta).
+        // Componentes de letra: (x central, y central, y inferior, izquierda, derecha)
         val comps = ArrayList<FloatArray>()
         for (i in 1 until n) if (lut[i].toInt() != 0) {
             val l = st[i * 5]; val t = st[i * 5 + 1]; val ww = st[i * 5 + 2]; val hh = st[i * 5 + 3]
-            comps.add(floatArrayOf(l + ww / 2f, t + hh / 2f, (t + hh).toFloat()))
+            comps.add(floatArrayOf(l + ww / 2f, t + hh / 2f, (t + hh).toFloat(), l.toFloat(), (l + ww).toFloat()))
         }
-        val base = DewarpMath.baselines(centers, comps, (med * 0.6).toFloat())
+        val assigned = DewarpMath.assignToRows(centers0, comps, (med * 0.6).toFloat())
+        // Palabras cortas de los extremos que el seguimiento dejó fuera (el inicio real marca el margen)
+        val centers = if (textGuides) TextGuides.extendRows(centers0, comps, assigned, med.toFloat(), (2.5 * med).toFloat()) else centers0
         val out = ArrayList<DewarpMath.LineObs>()
-        for (b in base) {
-            if (b.size < 8 || b.span < minLen * 0.8f) continue
-            val s = DewarpMath.robustSmooth(b, win = (med * 4).toFloat(), outTol = (med * 0.18).toFloat().coerceAtLeast(1.2f), minInlier = 0.5f) ?: continue
-            out.add(DewarpMath.LineObs(true, s.t, s.c, weight = 0.5))
+        val slopes = ArrayList<Double>(); val lens = ArrayList<Double>()
+        val bases = arrayOfNulls<DewarpMath.Chain>(centers.size)
+        val fMed = med.toFloat()
+        for ((ri, cen) in centers.withIndex()) {
+            // Línea base y media por perfiles; si el perfil no sale, la base por los pies de las letras (las
+            // descendentes se descartan como atípicas en la regresión robusta)
+            val edges = if (textProfile) TextGuides.rowEdges(mask, w, h, cen, fMed) else null
+            val sOut = (med * 0.18).toFloat().coerceAtLeast(1.2f)
+            var base: DewarpMath.Chain? = null
+            var top: DewarpMath.Chain? = null
+            if (edges != null) {
+                base = TextGuides.smoothRow(edges.second, win = (med * 5).toFloat(), outTol = sOut, minInlier = 0.6f)
+                // Línea media sólo donde la altura de la x es la del renglón (cifras y mayúsculas no tienen altura
+                // de x: ahí el borde superior es otro)
+                val tp = TextGuides.consistentTop(edges.first, edges.second, (0.12 * med).toFloat().coerceAtLeast(1.2f))
+                if (tp != null) top = TextGuides.smoothRow(tp, win = (med * 5).toFloat(), outTol = sOut, minInlier = 0.6f)
+            }
+            if (base == null || base.span < minLen * 0.6f) {
+                val l = assigned[ri]
+                if (l.size >= 8) {
+                    val b = DewarpMath.Chain(FloatArray(l.size) { l[it][0] }, FloatArray(l.size) { l[it][2] })
+                    if (b.span >= minLen * 0.8f) base = DewarpMath.robustSmooth(b, win = (med * 4).toFloat(), outTol = sOut, minInlier = 0.5f)
+                }
+                top = null
+            }
+            if (base == null) continue
+            bases[ri] = base
+            val wRow = if (top != null && textXLine) 0.35 else 0.5
+            out.add(DewarpMath.LineObs(true, base.t, base.c, weight = wRow))
+            if (top != null && textXLine && top.span >= minLen * 0.6f) out.add(DewarpMath.LineObs(true, top.t, top.c, weight = wRow))
+            val (_, b) = DewarpMath.lineFit(base.t, base.c, 0, base.size)
+            slopes.add(b); lens.add(base.span.toDouble())
         }
-        return out
+        // Tramos de cada renglón (cortes en huecos > 2.5 letras: calles entre columnas, tabuladores)
+        val guides = ArrayList<TextGuides.Guide>()
+        if (textGuides && centers.size >= 4) {
+            val segs = ArrayList<TextGuides.Seg>()
+            val gap = (2.5 * med).toFloat()
+            for ((ri, cen) in centers.withIndex()) {
+                val l = assigned[ri]
+                if (l.isEmpty()) continue
+                l.sortBy { it[3] }
+                val ref = bases[ri] ?: cen
+                val lefts = FloatArray(l.size) { l[it][3] }; val rights = FloatArray(l.size) { l[it][4] }
+                for (r in TextGuides.splitRow(lefts, rights, gap)) {
+                    if (r.last - r.first < 1) continue
+                    val xs = lefts[r.first]
+                    var xe = rights[r.first]; for (q in r) xe = max(xe, rights[q])
+                    segs.add(TextGuides.Seg(ri, xs, DewarpMath.interp(ref, xs), xe, DewarpMath.interp(ref, xe)))
+                }
+            }
+            // Paso entre renglones: mediana de la distancia de cada renglón al vecino más próximo que lo solapa
+            val near = ArrayList<Float>()
+            for (a in centers) {
+                val tm = (a.t0 + a.t1) / 2; val ya = DewarpMath.interp(a, tm)
+                var best = Float.MAX_VALUE
+                for (b in centers) if (b !== a && tm >= b.t0 && tm <= b.t1) { val d = abs(DewarpMath.interp(b, tm) - ya); if (d > med * 0.8 && d < best) best = d }
+                if (best < Float.MAX_VALUE) near.add(best)
+            }
+            near.sort()
+            val pitch = if (near.isEmpty()) (2.2 * med).toFloat() else near[near.size / 2].coerceIn((1.2 * med).toFloat(), (5 * med).toFloat())
+            guides.addAll(TextGuides.alignedGuides(segs, fMed, pitch, w.toFloat(), start = true))
+            guides.addAll(TextGuides.alignedGuides(segs, fMed, pitch, w.toFloat(), start = false))
+            if (DewarpMath.trace) for (g in guides) println("  guía ${if (g.start) "inicio" else "final"} n=${g.size} x=%.0f y=%.0f..%.0f resid=%.2f soporte=%.2f peso=%.2f${if (g.loose) " amplia" else ""}".format(g.x[0], g.y[0], g.y[g.size - 1], g.resid, g.support, g.weight))
+        }
+        // Respaldo: líneas base por los pies de las letras (las descendentes se descartan como atípicas)
+        val foot = ArrayList<DewarpMath.LineObs>()
+        if (textProfile) for (l in assigned) {
+            if (l.size < 8) continue
+            val b = DewarpMath.Chain(FloatArray(l.size) { l[it][0] }, FloatArray(l.size) { l[it][2] })
+            if (b.span < minLen * 0.8f) continue
+            val s = DewarpMath.robustSmooth(b, win = (med * 4).toFloat(), outTol = (med * 0.18).toFloat().coerceAtLeast(1.2f), minInlier = 0.5f) ?: continue
+            foot.add(DewarpMath.LineObs(true, s.t, s.c, weight = 0.5))
+        }
+        return TextLayout(out, guides, med, slopes.toDoubleArray(), lens.toDoubleArray(), foot)
     }
 
     /**
      * Ajuste del campo, descarte de líneas atípicas, igualado del paso en cuadrículas regulares, decisión de
      * seguridad e inversión. Coordenadas en px de la imagen de estimación ([w] x [h]).
      */
+    /** Resultado del ajuste: modelo o null y el motivo ("plana", "no mejora", ... o "aplicado"). */
+    internal class Fit(val model: Model?, val reason: String)
+
     internal fun fitModel(
         w: Double, h: Double,
         hLines: List<DewarpMath.LineObs>, vLines: List<DewarpMath.LineObs>,
         textRows: Boolean, debug: Debug?, content: FloatArray? = null, paper: Triple<ByteArray, Int, Int>? = null,
-    ): Model? {
+    ): Fit {
+        fun fail(r: String) = Fit(null, r).also { debug?.reason = r }
         val longSide = max(w, h)
-        val cells = 28.0
+        val cells = if (textRows) textCells else 28.0
         val nx = max(4, (w / longSide * cells).roundToInt() + 1)
         val ny = max(4, (h / longSide * cells).roundToInt() + 1)
         val hx = w / (nx - 1); val hy = h / (ny - 1)
         val step = 0.45 * min(hx, hy)
         var lines = (hLines + vLines).mapNotNull { DewarpMath.resample(it, step) }.toMutableList()
         val nH0 = lines.count { it.horizontal }; val nV0 = lines.size - nH0
-        if (nH0 + nV0 < 3) return null.also { debug?.reason = "pocas líneas ($nH0 H, $nV0 V)" }
+        if (nH0 + nV0 < 3) return fail("pocas líneas ($nH0 H, $nV0 V)")
         // Curvatura inicial: desviación de cada línea respecto de su recta
-        val wt = DewarpMath.Weights()
+        val wt = if (textRows) DewarpMath.Weights(tps = textTps) else DewarpMath.Weights()
         var field = DewarpMath.solveField(w, h, nx, ny, lines, wt)
         // Descarte robusto (2 pasadas)
         val rejected = ArrayList<DewarpMath.LineObs>()
@@ -488,11 +629,11 @@ object GridDewarp {
                 field = DewarpMath.solveField(w, h, nx, ny, lines, wt)
             }
         }
-        val before = lines.map { DewarpMath.straightnessDev(it) }.sorted()
-        val after = lines.map { DewarpMath.lineResidual(field, it) }.sorted()
+        val judged = lines.filter { !it.loose }.ifEmpty { lines }
+        fun p90(l: List<Double>) = if (l.isEmpty()) 0.0 else l.sorted()[(l.size * 0.9).toInt().coerceAtMost(l.size - 1)]
         // Percentil 90: una esquina doblada afecta a pocas líneas pero debe corregirse
-        val p80b = before[(before.size * 0.9).toInt().coerceAtMost(before.size - 1)]
-        val p80a = after[(after.size * 0.9).toInt().coerceAtMost(after.size - 1)]
+        val p80b = p90(judged.map { DewarpMath.straightnessDev(it) })
+        val p80a = p90(judged.map { DewarpMath.lineResidual(field, it) })
         val nH = lines.count { it.horizontal }; val nV = lines.size - nH
         debug?.apply {
             this.hLines.clear(); this.vLines.clear(); this.rejected.clear()
@@ -502,13 +643,32 @@ object GridDewarp {
             this.field = field; beforeDev = p80b; afterDev = p80a
         }
         val info = "H=$nH V=$nV texto=$textRows antes=%.2f después=%.2f".format(p80b, p80a)
-        if (lines.size < 3) return null.also { debug?.reason = "pocas líneas tras descarte; $info" }
+        if (lines.size < 3) return fail("pocas líneas tras descarte; $info")
         // Hoja ya plana: nada que enderezar (el giro lo resuelve el enderezado normal)
         val flatLimit = 1.4 * longSide / EST_SIDE
-        if (p80b < flatLimit) return null.also { debug?.reason = "plana; $info" }
-        if (p80a > 0.55 * p80b || p80a > 3.0) return null.also { debug?.reason = "no mejora; $info" }
+        if (textRows) {
+            // Texto: las guías verticales del texto se juzgan aparte de los renglones (y demás líneas): un margen
+            // combado con renglones rectos también es hoja curvada; el grupo que ya era recto no debe torcerse
+            val fams = listOf(false, true).map { g -> judged.filter { it.guide == g } }.filter { it.isNotEmpty() }
+            val b = fams.map { f -> p90(f.map { max(0.0, DewarpMath.straightnessDev(it) - 2 * it.noise) }) }
+            if (DewarpMath.trace) for (l in judged.filter { it.guide }) println("  guía x=%.0f y=%.0f..%.0f n=${l.size} desv=%.2f ruido=%.2f residuo=%.2f".format(l.x[0], l.y[0], l.y[l.size - 1], DewarpMath.straightnessDev(l), l.noise, DewarpMath.lineResidual(field, l)))
+            val a = fams.map { f -> p90(f.map { DewarpMath.lineResidual(field, it) }) }
+            if (b.all { it < flatLimit }) return fail("plana; $info")
+            for (k in b.indices) {
+                // Muchos renglones claramente curvados: una mejora del 30 % ya compensa; en pliegues fuertes el residuo
+                // absoluto puede quedar algo por encima de 3 px con una rectitud 7 veces mejor
+                val many = fams[k].size >= 30 && b[k] >= 1.6 * flatLimit
+                val ratio = if (many) textImprove else 0.55
+                val cap = if (many) max(3.0, 0.15 * b[k]) else 3.0
+                val ok = if (b[k] >= flatLimit) a[k] <= ratio * b[k] else a[k] <= max(flatLimit, 1.5 * b[k])
+                if (!ok || a[k] > cap) return fail("no mejora; $info grupos antes=${b.map { "%.2f".format(it) }} después=${a.map { "%.2f".format(it) }}")
+            }
+        } else {
+            if (p80b < flatLimit) return fail("plana; $info")
+            if (p80a > 0.55 * p80b || p80a > 3.0) return fail("no mejora; $info")
+        }
         val jac = DewarpMath.jacobianRange(field)
-        if (jac.first < 0.45 || jac.second > 2.2) return null.also { debug?.reason = "jacobiano ${"%.2f..%.2f".format(jac.first, jac.second)}; $info" }
+        if (jac.first < 0.45 || jac.second > 2.2) return fail("jacobiano ${"%.2f..%.2f".format(jac.first, jac.second)}; $info")
         // Lienzo de salida: el plano rectificado ampliado hasta contener (con 2 px de margen) la imagen por el campo
         // del contenido junto a los bordes: lo que el campo empuja hacia fuera no se recorta
         val rescued = if (content != null) DewarpMath.rescuedPoints(field, content, 6000) else FloatArray(0)
@@ -521,17 +681,17 @@ object GridDewarp {
         // Inversión en rejilla de salida
         val gw = max(2, ceil((u1 - u0) / INV_STEP).toInt() + 1)
         val gh = max(2, ceil((v1 - v0) / INV_STEP).toInt() + 1)
-        val inv = DewarpMath.invert(field, gw, gh, u0, v0, u1, v1) ?: return null.also { debug?.reason = "inversión; $info" }
+        val inv = DewarpMath.invert(field, gw, gh, u0, v0, u1, v1) ?: return fail("inversión; $info")
         val map = FloatArray(gw * gh * 2)
         for (i in 0 until gw * gh) {
             map[2 * i] = (inv[2 * i] / (w - 1)).toFloat()
             map[2 * i + 1] = (inv[2 * i + 1] / (h - 1)).toFloat()
         }
         val cov = min(1.0, (nH + nV) / 12.0)
-        val conf = (cov * (1.0 - p80a / max(1e-6, p80b))).coerceIn(0.0, 1.0)
+        val conf = (cov * (1.0 - min(1.0, p80a / max(1e-6, p80b)))).coerceIn(0.0, 1.0)
         val extInfo = if (u0 < 0 || v0 < 0 || u1 > w || v1 > h) " lienzo %.1f,%.1f..%.1f,%.1f".format(u0, v0, u1 - w, v1 - h) else ""
         debug?.reason = "aplicado; $info$extInfo"
-        return Model(gw, gh, map, conf, info + extInfo, u0 / w, v0 / h, u1 / w, v1 / h, paper?.first, paper?.second ?: 0, paper?.third ?: 0)
+        return Fit(Model(gw, gh, map, conf, info + extInfo, u0 / w, v0 / h, u1 / w, v1 / h, paper?.first, paper?.second ?: 0, paper?.third ?: 0), "aplicado")
     }
 
     // =====================================================================================
@@ -659,11 +819,17 @@ internal object DewarpMath {
         val y: FloatArray,
         val weight: Double = 1.0,
         val target: Double = Double.NaN,
+        /** Guía poco exacta (inicios de renglón a mano): no decide si la hoja es plana ni si el ajuste mejora. */
+        val loose: Boolean = false,
+        /** Ruido de posición estimado de la línea (px rms; guías del texto): la curvatura por debajo no cuenta. */
+        val noise: Double = 0.0,
+        /** Guía vertical del texto (inicios/finales alineados). */
+        val guide: Boolean = false,
     ) {
         val size get() = x.size
         fun along(i: Int) = if (horizontal) x[i] else y[i]
         fun cross(i: Int) = if (horizontal) y[i] else x[i]
-        fun withTarget(t: Double) = LineObs(horizontal, x, y, weight, t)
+        fun withTarget(t: Double) = LineObs(horizontal, x, y, weight, t, loose, noise, guide)
     }
 
     private class Builder {
@@ -902,11 +1068,11 @@ internal object DewarpMath {
     }
 
     /**
-     * Asigna cada componente de letra ([comps]: x central, y central, y inferior) al renglón [centers] más próximo
-     * (|y central − centro del renglón| < [maxDist]) y devuelve, por renglón, los pies de sus letras ordenados por x.
+     * Asigna cada componente de letra ([comps]: x central, y central, y inferior, ...) al renglón [centers] más
+     * próximo (|y central − centro del renglón| < [maxDist]); por renglón, sus componentes ordenadas por x.
      */
-    fun baselines(centers: List<Chain>, comps: List<FloatArray>, maxDist: Float): List<Chain> {
-        val pts = Array(centers.size) { ArrayList<FloatArray>() }
+    fun assignToRows(centers: List<Chain>, comps: List<FloatArray>, maxDist: Float): List<MutableList<FloatArray>> {
+        val pts = List(centers.size) { ArrayList<FloatArray>() }
         for (cp in comps) {
             var best = -1; var bd = maxDist
             for ((k, ch) in centers.withIndex()) {
@@ -916,10 +1082,8 @@ internal object DewarpMath {
             }
             if (best >= 0) pts[best].add(cp)
         }
-        return pts.map { l ->
-            l.sortBy { it[0] }
-            Chain(FloatArray(l.size) { l[it][0] }, FloatArray(l.size) { l[it][2] })
-        }.filter { it.size > 0 }
+        for (l in pts) l.sortBy { it[0] }
+        return pts
     }
 
     /** Valor de la cadena en t (interpolación lineal, constante fuera del tramo). */
@@ -982,7 +1146,7 @@ internal object DewarpMath {
             }
         }
         if (xs.size < 3) return null
-        return LineObs(l.horizontal, xs.toFloatArray(), ys.toFloatArray(), l.weight, l.target)
+        return LineObs(l.horizontal, xs.toFloatArray(), ys.toFloatArray(), l.weight, l.target, l.loose, l.noise, l.guide)
     }
 
     /** Desviación máxima (px) de una línea respecto de su recta de ajuste (curvatura antes de corregir). */
@@ -1238,7 +1402,7 @@ internal object DewarpMath {
                 val good = ok[i]
                 var j = i
                 while (j < l.size && ok[j] == good) j++
-                val seg = LineObs(l.horizontal, l.x.copyOfRange(i, j), l.y.copyOfRange(i, j), l.weight, l.target)
+                val seg = LineObs(l.horizontal, l.x.copyOfRange(i, j), l.y.copyOfRange(i, j), l.weight, l.target, l.loose, l.noise, l.guide)
                 if (good) { if (j - i >= 3) out.add(seg) } else rejected?.add(seg)
                 i = j
             }
