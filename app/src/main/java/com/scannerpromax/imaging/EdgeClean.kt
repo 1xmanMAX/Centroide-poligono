@@ -42,6 +42,7 @@ internal object EdgeClean {
         val acrossDim: Int,      // dimensión de la imagen perpendicular al lado
         val alongDim: Int,
         val hugRuns: Int = 1,    // tramos pegados al lado (una franja: pocos; una línea de letras: uno por letra)
+        val sheetEdge: Boolean = false,   // el lado es el canto de la hoja (enderezado por los cantos): no hay mesa
     )
 
     /** Escala de la página: altura de letra y semiancho del trazo típicos (px de trabajo). */
@@ -54,6 +55,9 @@ internal object EdgeClean {
             c.across <= max(2.0 * s.letter, 0.05 * c.acrossDim) && c.along >= 2.5 * c.across &&
             c.hugRuns <= max(3.0, c.along / (4.0 * s.letter))
         if (band) return true
+        // En un canto de la hoja (la salida termina justo en ella) lo pegado al lado es contenido: cabecera de color,
+        // foto o titular a sangre; sólo la franja fina (sombra del canto) es un resto
+        if (c.sheetEdge) return false
         // Mancha maciza (sombra, mesa, anilla, hueco oscuro): gruesa en buena parte de su área; nunca una foto enorme
         // (pequeña -esquina, astilla, anilla- o alargada a lo largo del borde -sombra del canto-; una zona grande y
         // compacta pegada al borde puede ser la foto de una tarjeta y no se toca)
@@ -69,9 +73,10 @@ internal object EdgeClean {
     /**
      * Limpia [out] (8UC1 u 8UC3, fondo blanco) en el sitio. Devuelve el número de componentes borradas.
      * [src]: imagen de entrada del filtro (RGB, mismo encuadre aunque otro tamaño) para reconocer el fondo ajeno a la
-     * hoja; [letterHint]: altura de letra conocida (px de [out]) o 0.
+     * hoja; [letterHint]: altura de letra conocida (px de [out]) o 0. [sheetSides]: lados que son cantos de la hoja
+     * (bits 0 superior, 1 derecho, 2 inferior, 3 izquierdo; [ImageEnhancer.Options.sheetSides]).
      */
-    fun clean(out: Mat, src: Mat? = null, letterHint: Double = 0.0, inside: Mat? = null): Int = MatBag().use { bag ->
+    fun clean(out: Mat, src: Mat? = null, letterHint: Double = 0.0, inside: Mat? = null, sheetSides: Int = 0): Int = MatBag().use { bag ->
         val fw = out.cols(); val fh = out.rows()
         if (min(fw, fh) < 64) return@use 0
         // Oscuridad (luminancia: la tinta de color es oscura; los fondos pastel de una tarjeta o un sombreado, no, y no
@@ -114,6 +119,13 @@ internal object EdgeClean {
         fun touches(l: Int): Boolean {
             val o = l * 5
             return st[o] <= m || st[o + 1] <= m || st[o] + st[o + 2] >= W - m || st[o + 1] + st[o + 3] >= H - m
+        }
+        /** ¿Toca el borde sólo por lados que son cantos de la hoja? */
+        fun onlySheetSides(l: Int): Boolean {
+            if (sheetSides == 0) return false
+            val o = l * 5
+            val tT = st[o + 1] <= m; val tR = st[o] + st[o + 2] >= W - m; val tB = st[o + 1] + st[o + 3] >= H - m; val tL = st[o] <= m
+            return !((tT && sheetSides and 1 == 0) || (tR && sheetSides and 2 == 0) || (tB && sheetSides and 4 == 0) || (tL && sheetSides and 8 == 0))
         }
         // Escala de la página con las componentes interiores de tamaño de letra
         val hs = ArrayList<Int>(); val hws = ArrayList<Double>()
@@ -184,10 +196,10 @@ internal object EdgeClean {
             fun frac(b: BooleanArray) = b.count { it }.toDouble() / max(1, b.size)
             fun runs(b: BooleanArray): Int { var n = 0; var prev = false; for (v in b) { if (v && !prev) n++; prev = v }; return n }
             val sides = ArrayList<EdgeComp>()
-            if (tT) sides.add(EdgeComp(cw, ch, frac(hugT), tf, area, fill, corner, H, W, hugRuns = runs(hugT)))
-            if (tB) sides.add(EdgeComp(cw, ch, frac(hugB), tf, area, fill, corner, H, W, hugRuns = runs(hugB)))
-            if (tL) sides.add(EdgeComp(ch, cw, frac(hugL), tf, area, fill, corner, W, H, hugRuns = runs(hugL)))
-            if (tR) sides.add(EdgeComp(ch, cw, frac(hugR), tf, area, fill, corner, W, H, hugRuns = runs(hugR)))
+            if (tT) sides.add(EdgeComp(cw, ch, frac(hugT), tf, area, fill, corner, H, W, hugRuns = runs(hugT), sheetEdge = sheetSides and 1 != 0))
+            if (tB) sides.add(EdgeComp(cw, ch, frac(hugB), tf, area, fill, corner, H, W, hugRuns = runs(hugB), sheetEdge = sheetSides and 4 != 0))
+            if (tL) sides.add(EdgeComp(ch, cw, frac(hugL), tf, area, fill, corner, W, H, hugRuns = runs(hugL), sheetEdge = sheetSides and 8 != 0))
+            if (tR) sides.add(EdgeComp(ch, cw, frac(hugR), tf, area, fill, corner, W, H, hugRuns = runs(hugR), sheetEdge = sheetSides and 2 != 0))
             if (sides.any { decide(it, scale) } && !hasTextHoles(l, x0, y0, cw, ch)) { remove[l] = true; nRemoved++; dbg("decide", l) }
         }
         // Líneas del canto de la hoja algo separadas del borde (el recorte dejó una tira de fondo): larga, fina, paralela
@@ -372,7 +384,7 @@ internal object EdgeClean {
         // cortada por el borde está rodeada de papel
         if (gb != null) {
             for (l in 1 until nc) {
-                if (remove[l] || !touches(l)) continue
+                if (remove[l] || !touches(l) || onlySheetSides(l)) continue
                 val o = l * 5; val x0 = st[o]; val y0 = st[o + 1]; val cw = st[o + 2]; val ch = st[o + 3]
                 val pad = max(2, (0.3 * letter).roundToInt())
                 if (max(cw, ch) > 3 * letter) continue
