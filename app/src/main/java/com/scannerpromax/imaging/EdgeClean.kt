@@ -332,6 +332,27 @@ internal object EdgeClean {
                     if (cov < 0.75 * along) continue
                     val thMed = th.filter { it > 0 }.sorted().let { if (it.isEmpty()) 0 else it[it.size / 2] }
                     if (thMed > max(3.0, 0.35 * letter)) continue
+                    // un renglón de letra fina (tique, formulario) también es "fino" en la mediana, pero sus trazos
+                    // verticales ocupan la altura de la letra en muchas columnas; una raya, en casi ninguna (sólo donde
+                    // la cruza la rejilla)
+                    // (el trazo vertical se sigue fuera de la caja del tramo: la apertura sólo deja la parte de abajo o
+                    // de arriba de las letras)
+                    val tallMin = max(6.0, 0.4 * letter)
+                    var tall = 0
+                    for (t in 0 until along) {
+                        if (th[t] == 0) continue
+                        var lo = Int.MAX_VALUE; var hi = -1
+                        for (q in 0 until across) {
+                            val x = if (horiz) px0 + t else px0 + q; val y = if (horiz) py0 + q else py0 + t
+                            if (wb[y * W + x].toInt() != 0) { val v = if (horiz) y else x; lo = min(lo, v); hi = max(hi, v) }
+                        }
+                        val lim = if (horiz) H else W
+                        fun ink(v: Int) = if (horiz) wb[v * W + px0 + t].toInt() != 0 else wb[(py0 + t) * W + v].toInt() != 0
+                        while (lo > 0 && ink(lo - 1) && hi - lo < 4 * tallMin) lo--
+                        while (hi < lim - 1 && ink(hi + 1) && hi - lo < 4 * tallMin) hi++
+                        if (hi - lo + 1 >= tallMin) tall++
+                    }
+                    if (tall > 0.15 * cov) continue
                     // tira entre el tramo y el borde
                     val strip = when (sideIdx) {
                         0 -> intArrayOf(px0, 0, px0 + pw, py0)
