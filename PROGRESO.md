@@ -5,7 +5,7 @@ Actualízalo en cada paso importante (y haz commit + push).
 
 ## Estado actual (2026-10-10)
 - Rama de trabajo: `ccr-4d2f0b52-3ktfkq` (se sube siempre a `origin`).
-- Último APK entregado al usuario: v9 (enderezado con guías de texto, commit e92c03d).
+- Último APK entregado al usuario: v10 (ronda v2 integrada, commit df776c4). Sin tareas en curso; pendiente el feedback del usuario con la v10.
 - Ronda v2 INTEGRADA en `ccr-4d2f0b52-3ktfkq` (detección, hojas dobladas, legibilidad, robustez + 3 correcciones de
   integración: EdgeClean respeta los cantos, renglón fino != raya, cuadrícula tramada en el PDF B/N).
   - Banco completo `integrado_v2` (1613 imágenes, con OCR): informe en `/tmp/claude-0/bench/REPORT_v2.md`,
@@ -33,3 +33,4 @@ Actualízalo en cada paso importante (y haz commit + push).
 - v7: trazos manuscritos uniformes, sin pérdida en bordes.
 - v8: banco de 333 imágenes y 4 mejoras (detección 44%→22,6% de fallo, DIBCO FM 43→73,6).
 - v9: enderezado con renglones y márgenes del texto.
+- v10 (2026-10-10, commit df776c4): ronda v2 con banco de 1613 imágenes — detección (fallo 45,6→40,8 %), hojas dobladas por trozos, legibilidad/tipo de página, bordes a blanco, cuadrícula conservada con interruptor, tinta de color en B/N, 0 errores de tubería.
