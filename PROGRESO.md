@@ -6,12 +6,9 @@ Actualízalo en cada paso importante (y haz commit + push).
 ## Estado actual (2026-10-10)
 - Rama de trabajo: `ccr-4d2f0b52-3ktfkq` (se sube siempre a `origin`).
 - Último APK entregado al usuario: v9 (enderezado con guías de texto, commit e92c03d).
-- En curso: ronda de mejoras v2 con el banco ampliado (1613 imágenes). Workflow "escaner-mejora-v2c".
-  - Detección de bordes: terminada, commit 5b8d9f4 en worktree `.claude/worktrees/wf_d9562b86-921-1` (pendiente de integrar).
-  - Hojas dobladas: commit WIP c3221a9 en worktree `wf_d9562b86-921-2` (cerrando).
-  - Legibilidad / clasificación de página: commit WIP 25df608 en worktree `wf_4a397aff-60a-2` (en curso).
-  - Robustez + bordes en blanco + cuadrícula conservada (petición del usuario): worktree nuevo del workflow (en curso).
-  - Integración final: pendiente (cherry-pick de las 4 áreas, banco completo, APK, push).
+- En curso: integración v2 (las 4 áreas ya integradas y subidas en `ccr-4d2f0b52-3ktfkq`):
+  - Detección cb97d7e, hojas dobladas 3eaeb99, legibilidad (commit propio), robustez adbcf82.
+  - Pendiente: banco completo `integrado_v2` (en marcha), revisión de fotos del usuario, APK release, REPORT_v2.md, limpieza de worktrees.
 
 ## Peticiones del usuario pendientes
 1. Pintar de blanco las manchas de los bordes que no son texto.
