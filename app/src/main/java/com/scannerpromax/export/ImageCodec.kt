@@ -14,6 +14,21 @@ import kotlin.math.sqrt
  * Utilidades de decodificación/codificación para exportar (PDF e imágenes) cuidando la memoria:
  * inSampleSize + escalado exacto, presupuesto de píxeles según la memoria libre real del proceso.
  */
+/** Decisión pura de 1 bit (testeable): umbral fijo, trama ordenada 4x4 para los grises claros aislados. */
+internal object BinaryDither {
+    /** Hasta este nivel un gris claro aislado se trama (por encima, papel: blanco). */
+    const val LIGHT_MAX = 230
+    private val BAYER = intArrayOf(0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5)
+
+    fun white(lum: Int, x: Int, y: Int, darkNear: Boolean, threshold: Int = 150): Boolean {
+        if (lum < threshold) return false
+        if (darkNear || lum >= LIGHT_MAX) return true
+        // fracción de blanco = (lum - umbral) / (LIGHT_MAX - umbral): gris 195 -> ~56 % blanco (línea punteada clara)
+        val f = (lum - threshold).toDouble() / (LIGHT_MAX - threshold)
+        return f * 16 > BAYER[(y and 3) * 4 + (x and 3)] + 0.5
+    }
+}
+
 internal object ImageCodec {
 
     /** Dimensiones del archivo sin decodificar píxeles. */
@@ -121,23 +136,41 @@ internal object ImageCodec {
     }
 
     /** Empaqueta el bitmap en 1 bit por píxel (1 = blanco), filas alineadas a byte, como espera PDF /DeviceGray /BPC 1. */
+    /**
+     * 1 bit por píxel (1 = blanco) para el PDF. Umbral fijo [threshold]; los grises CLAROS aislados (la cuadrícula o
+     * los renglones conservados en gris claro, sin tinta oscura alrededor) se traman ([BinaryDither]) para que no
+     * desaparezcan; los bordes suavizados de las letras (junto a tinta oscura) siguen con el umbral fijo.
+     */
     fun packBits(bmp: Bitmap, out: OutputStream, threshold: Int = 150) {
         val w = bmp.width
         val h = bmp.height
         val row = IntArray(w)
         val packed = ByteArray((w + 7) / 8)
-        for (y in 0 until h) {
+        fun lumRow(y: Int, dst: IntArray) {
             bmp.getPixels(row, 0, w, 0, y, w, 1)
-            java.util.Arrays.fill(packed, 0)
             for (x in 0 until w) {
                 val c = row[x]
-                val lum = (((c shr 16) and 0xFF) * 77 + ((c shr 8) and 0xFF) * 150 + (c and 0xFF) * 29) shr 8
-                if (lum >= threshold) {
+                dst[x] = (((c shr 16) and 0xFF) * 77 + ((c shr 8) and 0xFF) * 150 + (c and 0xFF) * 29) shr 8
+            }
+        }
+        var prev = IntArray(w); var cur = IntArray(w); var next = IntArray(w)
+        if (h > 0) lumRow(0, cur)
+        for (y in 0 until h) {
+            if (y + 1 < h) lumRow(y + 1, next)
+            java.util.Arrays.fill(packed, 0)
+            for (x in 0 until w) {
+                var darkNear = false
+                for (dx in -1..1) {
+                    val xx = x + dx; if (xx < 0 || xx >= w) continue
+                    if (cur[xx] < threshold || (y > 0 && prev[xx] < threshold) || (y + 1 < h && next[xx] < threshold)) { darkNear = true; break }
+                }
+                if (BinaryDither.white(cur[x], x, y, darkNear, threshold)) {
                     val i = x shr 3
                     packed[i] = (packed[i].toInt() or (0x80 ushr (x and 7))).toByte()
                 }
             }
             out.write(packed)
+            val t = prev; prev = cur; cur = next; next = t
         }
     }
 
