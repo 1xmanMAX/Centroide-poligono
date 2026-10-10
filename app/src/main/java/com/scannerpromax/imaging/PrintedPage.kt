@@ -193,7 +193,7 @@ internal object PrintedPage {
      * Render de [rgb] (8UC3) con [style]. [fast] = vista previa (sin ampliación). [maxPixels] = límite de píxeles
      * de la salida (la ampliación de la letra pequeña no lo supera). COLOR -> 8UC3, BLACK_WHITE -> 8UC1.
      */
-    fun render(rgb: Mat, style: TextRegions.Style, fast: Boolean, maxPixels: Int, stats: Stats? = null): Mat = MatBag().use { bag ->
+    fun render(rgb: Mat, style: TextRegions.Style, fast: Boolean, maxPixels: Int, stats: Stats? = null, sheetSides: Int = 0): Mat = MatBag().use { bag ->
         val st = stats ?: analyze(rgb)
         val w = rgb.cols(); val h = rgb.rows()
         val color = style == TextRegions.Style.COLOR
@@ -232,7 +232,8 @@ internal object PrintedPage {
         val images = if (color) emptyList() else findImageBlocks(smN, ow, oh, bag)
         // Fondo que el recorte dejó dentro (mesa, hueco oscuro entre hojas, en los bordes): manchas oscuras, gruesas
         // y pegadas al borde de la imagen -> blanco (si no, en B/N quedan como manchas negras)
-        val outside = outsideMask(smN, pm, bag)
+        // (en los lados recortados por los cantos de la hoja no hay mesa: lo pegado a ellos es contenido)
+        val outside = if (sheetSides == 15) null else outsideMask(smN, pm, bag, sheetSides)
         val outsideFull = if (outside == null) null else bag.mat().also { Imgproc.resize(outside, it, Size(ow.toDouble(), oh.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR) }
         // Sombras: la división por el fondo amplifica el ruido del papel (ganancia g) -> el punto blanco local baja
         // con el ruido local (σ·g^0.85) para que el papel en sombra quede igual de blanco que el iluminado. Se
@@ -422,7 +423,7 @@ internal object PrintedPage {
      * (< 55 % del papel), gruesas (sobreviven a una apertura de ~0.8 % del lado) y conectadas con el borde de la
      * imagen. Null si no hay.
      */
-    private fun outsideMask(smN: Mat, pm: Double, bag: MatBag): Mat? {
+    private fun outsideMask(smN: Mat, pm: Double, bag: MatBag, sheetSides: Int = 0): Mat? {
         val g = bag.add(Cv.gray(smN))
         val w = g.cols(); val h = g.rows(); val side = max(w, h)
         val m = bag.mat(); Core.compare(g, Scalar(0.55 * pm), m, Core.CMP_LT)
@@ -434,7 +435,10 @@ internal object PrintedPage {
         val keep = BooleanArray(nc); var any = false
         for (c in 1 until nc) {
             val x = st[c * 5]; val y = st[c * 5 + 1]; val bw = st[c * 5 + 2]; val bh = st[c * 5 + 3]
-            if (x <= 1 || y <= 1 || x + bw >= w - 1 || y + bh >= h - 1) { keep[c] = true; any = true }
+            // (sólo los lados que no son cantos de la hoja: [sheetSides])
+            val touches = (y <= 1 && (sheetSides and 1) == 0) || (x + bw >= w - 1 && (sheetSides and 2) == 0) ||
+                (y + bh >= h - 1 && (sheetSides and 4) == 0) || (x <= 1 && (sheetSides and 8) == 0)
+            if (touches) { keep[c] = true; any = true }
         }
         if (!any) return null
         val lab = IntArray(w * h); labels.get(0, 0, lab)

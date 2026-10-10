@@ -91,6 +91,7 @@ class PageProcessor(val tier: DeviceTier) {
     /** [geometryFull] sobre un Mat RGBA (que se libera). */
     internal fun geometryFullMat(input: Mat, edits: PageEdits, maxSide: Int): Mat {
         var rgba: Mat? = input
+        sheetExact.set(0)
         try {
             val src = rgba!!
             val w = src.cols(); val h = src.rows()
@@ -102,14 +103,19 @@ class PageProcessor(val tier: DeviceTier) {
             var model: GridDewarp.Model? = null
             var angle = 0.0
             if (edits.autoDewarp || edits.autoDeskew) {
-                val red = reducedRectified(src, quad, rot, if (edits.autoDewarp) GridDewarp.EST_SIDE else 1000)
+                val side = if (edits.autoDewarp) GridDewarp.EST_SIDE else 1000
+                // La foto reducida sirve para la imagen de estimación y, si hace falta, para el plano ampliado de los cantos
+                val small = shrunk(src, quad, side)
+                val red = reducedRectified(small, w, h, quad, rot, side)
                 try {
-                    val est = if (edits.autoDewarp) dewarpModel(red, quadKey(quad, w, h), rot, cacheable = true) else null
+                    val est = if (edits.autoDewarp) dewarpModel(red, quadKey(quad, w, h), rot, cacheable = true) {
+                        if (quad != null) borderInput(small, w, h, quad, rot, side, red.cols(), red.rows()) else null
+                    } else null
                     model = est?.model
                     // Ángulo: renglones + márgenes del texto si son coherentes; si no, perfiles de proyección
                     if (model == null && edits.autoDeskew) angle = est?.skew ?: Cleanup.estimateSkew(red)
                 } finally {
-                    red.release()
+                    red.release(); small.release()
                 }
             }
             if (quad == null && angle == 0.0 && model == null) {
@@ -154,7 +160,10 @@ class PageProcessor(val tier: DeviceTier) {
                 } finally {
                     out.release()
                 }
-                if (quad != null) cleanWedges(rgb, edits)
+                // Con el modelo por los cantos la salida ya es la hoja (sin cuñas de fondo): la limpieza de cuñas sólo
+                // podría tomar por fondo una franja de la propia hoja (margen de otro tono, tapa de un cuaderno)
+                if (quad != null && !model.beyond) cleanWedges(rgb, edits)
+                sheetExact.set(if (model.beyond) model.sheetSides else 0)
                 return rgb
             }
             // 3) Enderezado alrededor del centro con el lienzo AMPLIADO (como Cleanup.rotateExpand): las esquinas del
@@ -187,24 +196,59 @@ class PageProcessor(val tier: DeviceTier) {
         }
     }
 
-    /**
-     * Versión reducida (INTER_AREA, lado largo del documento ≈ [side]) rectificada y rotada: base de las
-     * estimaciones (hoja curvada, ángulo). Devuelve RGB.
-     */
-    private fun reducedRectified(rgba: Mat, quad: Quad?, rot: Int, side: Int): Mat = MatBag().use { bag ->
+    /** Foto [rgba] reducida (INTER_AREA) para que el documento ([quad] o la imagen) mida ≈ [side] de lado largo (nuevo Mat). */
+    private fun shrunk(rgba: Mat, quad: Quad?, side: Int): Mat {
         val w = rgba.cols(); val h = rgba.rows()
         val (qw, qh) = quad?.let { PerspectiveCorrector.quadExtent(it) } ?: (w.toDouble() to h.toDouble())
         val sc = min(1.0, side / max(1.0, max(qw, qh)))
-        val small = bag.mat()
+        val small = Mat()
         if (sc < 1.0) {
             Imgproc.resize(rgba, small, Size(max(1.0, (w * sc).roundToInt().toDouble()), max(1.0, (h * sc).roundToInt().toDouble())), 0.0, 0.0, Imgproc.INTER_AREA)
         } else rgba.copyTo(small)
+        return small
+    }
+
+    /**
+     * Versión reducida ([small] = [shrunk] de una foto de [w] x [h]) rectificada y rotada: base de las estimaciones
+     * (hoja curvada, ángulo). Devuelve RGB.
+     */
+    private fun reducedRectified(small: Mat, w: Int, h: Int, quad: Quad?, rot: Int, side: Int): Mat = MatBag().use { bag ->
         val q = quad?.let { PerspectiveCorrector.scaleQuad(it, small.cols().toDouble() / w, small.rows().toDouble() / h) }
         val warped = bag.add(cropMat(small, q, 0, side))
         val rgb = bag.mat()
         Imgproc.cvtColor(warped, rgb, Imgproc.COLOR_RGBA2RGB)
         val code = when (rot) { 90 -> Core.ROTATE_90_CLOCKWISE; 180 -> Core.ROTATE_180; 270 -> Core.ROTATE_90_COUNTERCLOCKWISE; else -> -1 }
         if (code >= 0) Mat().also { Core.rotate(rgb, it, code) } else rgb.clone()
+    }
+
+    /**
+     * Plano rectificado AMPLIADO para buscar los cantos de la hoja ([DwBorder]): misma reducción y homografía que
+     * [reducedRectified] (la hoja nominal coincide píxel a píxel con la imagen de estimación de [ew] x [eh]) más un
+     * margen tomado de la foto alrededor del recorte, con su máscara de validez (255 = dentro de la foto).
+     */
+    private fun borderInput(small: Mat, w: Int, h: Int, quad: Quad, rot: Int, side: Int, ew: Int, eh: Int): DwBorder.Input? = MatBag().use { bag ->
+        val q = PerspectiveCorrector.scaleQuad(quad, small.cols().toDouble() / w, small.rows().toDouble() / h)
+        val hg = PerspectiveCorrector.homography(q, 0, side, small.cols(), small.rows())
+        val (rw, rh) = if (rot == 90 || rot == 270) hg.height to hg.width else hg.width to hg.height
+        if (rw != ew || rh != eh) return@use null
+        val mxu = DwBorder.marginFor(hg.width); val myu = DwBorder.marginFor(hg.height)
+        val m = hg.m.copyOf()
+        // Traslación (mx, my) tras la homografía
+        for (c in 0..2) { m[c] += mxu * m[6 + c]; m[3 + c] += myu * m[6 + c] }
+        val mm = bag.mat(); mm.create(3, 3, CvType.CV_64F); mm.put(0, 0, *m)
+        val sz = Size((hg.width + 2 * mxu).toDouble(), (hg.height + 2 * myu).toDouble())
+        val warped = bag.mat()
+        Imgproc.warpPerspective(small, warped, mm, sz, hg.interp, Core.BORDER_CONSTANT)
+        val ones = bag.mat(); ones.create(small.rows(), small.cols(), CvType.CV_8UC1); ones.setTo(org.opencv.core.Scalar(255.0))
+        val valid0 = bag.mat()
+        Imgproc.warpPerspective(ones, valid0, mm, sz, Imgproc.INTER_NEAREST, Core.BORDER_CONSTANT)
+        val rgb = bag.mat()
+        Imgproc.cvtColor(warped, rgb, Imgproc.COLOR_RGBA2RGB)
+        val code = when (rot) { 90 -> Core.ROTATE_90_CLOCKWISE; 180 -> Core.ROTATE_180; 270 -> Core.ROTATE_90_COUNTERCLOCKWISE; else -> -1 }
+        val img = Mat(); val valid = Mat()
+        if (code >= 0) { Core.rotate(rgb, img, code); Core.rotate(valid0, valid, code) } else { rgb.copyTo(img); valid0.copyTo(valid) }
+        val (mx, my) = if (rot == 90 || rot == 270) myu to mxu else mxu to myu
+        DwBorder.Input(img, valid, mx, my, ew, eh)
     }
 
     // ---------------------------------------------------------------------------------
@@ -245,14 +289,19 @@ class PageProcessor(val tier: DeviceTier) {
      * si coinciden recorte, rotación y firma; sólo se guardan estimaciones hechas con resolución suficiente (las
      * miniaturas no fijan el modelo del render final).
      */
-    private fun dewarpModel(rgb: Mat, quad: List<Int>?, rot: Int, cacheable: Boolean): GridDewarp.Estimate {
+    private fun dewarpModel(rgb: Mat, quad: List<Int>?, rot: Int, cacheable: Boolean, border: (() -> DwBorder.Input?)? = null): GridDewarp.Estimate {
         val sig = signature(rgb)
         synchronized(dewarpLock) {
             dewarpCache.firstOrNull { e ->
                 e.rot == rot && e.quad == quad && sameSignature(e.sig, sig)
             }?.let { return it.est }
         }
-        val model = GridDewarp.estimateFull(rgb)
+        val bi = border?.let { runCatching { it() }.getOrNull() }
+        val model = try {
+            GridDewarp.estimateFull(rgb, border = bi)
+        } finally {
+            bi?.img?.release(); bi?.valid?.release()
+        }
         if (cacheable && max(rgb.cols(), rgb.rows()) >= 900) {
             synchronized(dewarpLock) {
                 dewarpCache.addFirst(DewarpEntry(quad, rot, sig, model))
@@ -311,11 +360,20 @@ class PageProcessor(val tier: DeviceTier) {
      * la zona del documento mida ~[maxSide]; así el warp no produce aliasing y es muy rápido.
      */
     private fun geometryPreview(original: Bitmap, edits: PageEdits, maxSide: Int): Mat {
+        sheetExact.set(0)
         val ow = original.width; val oh = original.height
         val (qw, qh) = edits.quad?.let { PerspectiveCorrector.quadExtent(it) } ?: (ow.toDouble() to oh.toDouble())
         val wanted = min(1.0, maxSide * 1.1 / max(1.0, max(qw, qh)))
         // Cuantizar la escala para reutilizar la caché aunque el quad cambie un poco
         val scale = if (wanted >= 0.999) 1.0 else (wanted * 20).let { kotlin.math.ceil(it) / 20.0 }.coerceAtMost(1.0)
+        // Con recorte y enderezado automático, la misma composición que el render final (perspectiva + rotación + hoja
+        // curvada en un único remuestreo): el modelo por los cantos de la hoja ([DwBorder]) toma de la foto lo que queda
+        // fuera del recorte, que la imagen ya recortada no tiene
+        if (edits.autoDewarp && edits.quad != null && !PerspectiveCorrector.isFullFrame(edits.quad, ow, oh)) {
+            val input = synchronized(previewLock) { previewSourceFor(original, scale).clone() }
+            val q = PerspectiveCorrector.scaleQuad(edits.quad, input.cols().toDouble() / ow, input.rows().toDouble() / oh)
+            return geometryFullMat(input, edits.copy(quad = q), maxSide)
+        }
         val warped = synchronized(previewLock) {
             val src = previewSourceFor(original, scale)
             val q = edits.quad?.let { PerspectiveCorrector.scaleQuad(it, src.cols().toDouble() / ow, src.rows().toDouble() / oh) }
@@ -398,7 +456,7 @@ class PageProcessor(val tier: DeviceTier) {
             }
             cur.release(); cur = d
         }
-        if (quadKey != null) cleanWedges(cur, edits)
+        if (quadKey != null && model?.beyond != true) cleanWedges(cur, edits)
         return cur
     }
 
@@ -406,8 +464,17 @@ class PageProcessor(val tier: DeviceTier) {
     // Filtro + limpieza + borrado manual
     // =====================================================================================
 
+    /**
+     * Lados (bits, [GridDewarp.Model.sheetSides]) en los que la última geometría de este hilo terminó EXACTAMENTE en
+     * los cantos de la hoja (modelo por los cantos): allí no hay mesa que limpiar. Lo lee
+     * [finish] (misma secuencia geometría -> filtro en el mismo hilo en el render, la vista previa y el banco).
+     */
+    private val sheetExact = ThreadLocal<Int>()
+
     /** Libera [geo]; devuelve el Mat final (8UC3 u 8UC1). */
-    private fun finish(geo: Mat, edits: PageEdits, opt: ImageEnhancer.Options, progress: ProgressCallback?): Mat {
+    private fun finish(geo: Mat, edits: PageEdits, opt0: ImageEnhancer.Options, progress: ProgressCallback?): Mat {
+        // Contenido pegado al canto (cabecera de color, foto a sangre): con la salida recortada en los cantos no es fondo
+        val opt = (sheetExact.get() ?: 0).let { if (it != 0) opt0.copy(sheetSides = it) else opt0 }
         // AUTO se clasifica una sola vez (a 256 px) y se usa tanto para el filtro como para decidir la limpieza
         val analysis = if (edits.filter == FilterType.AUTO) runCatching { ImageEnhancer.analyzeMat(geo) }.getOrNull() else null
         val effective = ImageEnhancer.effectiveFilter(edits.filter, analysis)

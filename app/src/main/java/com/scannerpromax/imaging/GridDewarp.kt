@@ -46,11 +46,17 @@ import kotlin.math.tan
  *    NORMALIZADO ([Model]): el mismo modelo sirve para la vista previa y el render final (coherencia de los trazos
  *    de borrado). A resolución completa se interpola por franjas y se compone con la homografía de la perspectiva:
  *    un ÚNICO remuestreo (`remap` cúbico) desde la foto original.
+ * 5. **Cantos de la hoja** ([DwBorder]): si se da el plano rectificado AMPLIADO alrededor del recorte, los cantos
+ *    curvados o quebrados (hoja combada, doblada o arrugada) entran en el ajuste con su posición impuesta (los lados
+ *    del rectángulo de salida) junto con las líneas de la hoja; la salida es exactamente la hoja ([Model.beyond]).
  */
 object GridDewarp {
 
     /** Igualar el paso de cuadrículas regulares (desactivable en el banco de pruebas). */
     internal var regularize = true
+
+    /** Motivo de la última estimación (banco de pruebas). */
+    @Volatile internal var lastInfo = ""
 
     /** Lado largo de la imagen de estimación. */
     const val EST_SIDE = 1600
@@ -85,6 +91,14 @@ object GridDewarp {
         val paper: ByteArray? = null,
         val paperW: Int = 0,
         val paperH: Int = 0,
+        /**
+         * El mapa puede salir del plano rectificado (valores < 0 o > 1): el modelo por los CANTOS de la hoja
+         * ([DwBorder]) recupera de la foto lo que el recorte dejó fuera. Sólo se pinta del color del papel lo que cae
+         * fuera de la FOTO (o del plano, si no hay homografía hacia la foto).
+         */
+        val beyond: Boolean = false,
+        /** Con [beyond]: lados de la salida que son cantos detectados (bits 0 superior, 1 derecho, 2 inferior, 3 izquierdo). */
+        val sheetSides: Int = 0,
     ) {
         /** Tamaño de la salida para un plano rectificado de [w] x [h]. */
         fun outWidth(w: Int): Int = max(1, (w * (x1 - x0)).roundToInt())
@@ -129,7 +143,7 @@ object GridDewarp {
      * medido con los renglones y las guías verticales del texto: más fiable que las proyecciones. Sólo se usa si no se
      * aplica el modelo.
      */
-    internal fun estimateFull(rgb: Mat, debug: Debug? = null): Estimate = MatBag().use { bag ->
+    internal fun estimateFull(rgb: Mat, debug: Debug? = null, border: DwBorder.Input? = null): Estimate = MatBag().use { bag ->
         val t0 = System.nanoTime()
         val sm = bag.mat()
         val scale = Cv.downscale(rgb, sm, EST_SIDE)
@@ -185,9 +199,84 @@ object GridDewarp {
             val f2 = fitModel(w.toDouble(), h.toDouble(), footRows, vc, textRows, debug, content, paper)
             if (f2.model != null) fit = f2
         }
+        // Cantos de la hoja (plano ampliado alrededor del recorte): si están curvados, quebrados o desplazados respecto
+        // del recorte, el modelo por los cantos (con las líneas de la hoja) sustituye al de sólo líneas
+        var borderInfo = ""
+        if (border != null && DwBorder.enabled) {
+            val r = borderFit(border, fit, hl, vl, textRows, content)
+            borderInfo = r.second
+            if (r.first != null) fit = Fit(r.first, "aplicado", fit.lines)
+        }
         debug?.msSolve = (System.nanoTime() - t1) / 1e6
+        lastInfo = "${fit.reason} ${fit.model?.info ?: ""} | $borderInfo"
         if (DewarpMath.trace) println("  estimación ${w}x$h: ${fit.reason} ${fit.model?.info ?: ""} ángulo=$skew")
         Estimate(fit.model, skew)
+    }
+
+    /** Pliegues por placa delgada reponderada ([DewarpMath.foldWeights]); desactivable en el banco de pruebas. */
+    internal var foldIrls = true
+
+    /** Segunda diferencia mínima (px de estimación a 1600 px, por celda) para tratar una curvatura como pliegue. */
+    internal var foldMinAbs = 1.0
+
+    /** Dos reajustes con la placa delgada reponderada en los pliegues ([DewarpMath.foldWeights]). */
+    internal fun refold(
+        field0: DewarpMath.Field, w: Double, h: Double, nx: Int, ny: Int, lines: List<DewarpMath.LineObs>, wt: DewarpMath.Weights,
+    ): DewarpMath.Field {
+        var field = field0
+        val minAbs = foldMinAbs * max(w, h) / EST_SIDE
+        var bend: DoubleArray? = null
+        repeat(2) {
+            val b = DewarpMath.foldWeights(field, minAbs) ?: return field
+            bend = bend?.let { old -> DoubleArray(b.size) { min(old[it], b[it]) } } ?: b
+            field = DewarpMath.solveField(w, h, nx, ny, lines, wt, bend)
+        }
+        return field
+    }
+
+    /** Umbral (px de estimación a 1600 px) de desviación de los cantos para usar el modelo por los cantos. */
+    internal var borderMinDev = 4.0
+
+    /** Modelo por los cantos de la hoja ([DwBorder]) o null, y el motivo. */
+    private fun borderFit(
+        border: DwBorder.Input, fit: Fit, hl: List<DewarpMath.LineObs>, vl: List<DewarpMath.LineObs>, textRows: Boolean, content: FloatArray,
+    ): Pair<Model?, String> {
+        // Tabla o cuadrícula densa ya enderezada por sus líneas (la guía más precisa): no se toca. En un cuaderno el
+        // "canto" es ambiguo (tapa, espiral, hojas de debajo)
+        if (fit.model != null && !textRows) {
+            val nH = fit.lines.count { it.horizontal }; val nV = fit.lines.size - nH
+            if (nH >= 10 && nV >= 10) return null to "malla densa H=$nH V=$nV"
+        }
+        val sides0 = DwBorder.detect(border, DewarpMath.trace)
+        // Líneas: las que el ajuste de sólo líneas conservó (o todas las candidatas si no llegó a depurarlas)
+        val base = fit.lines.ifEmpty { hl + vl }
+        val mx = border.mx.toFloat(); val my = border.my.toFloat()
+        val shifted = base.map { l ->
+            // (el paso igualado de un cuaderno se conserva: su posición objetivo se desplaza con el marco)
+            val tg = if (l.target.isNaN()) Double.NaN else l.target + if (l.horizontal) my else mx
+            DewarpMath.LineObs(l.horizontal, FloatArray(l.size) { l.x[it] + mx }, FloatArray(l.size) { l.y[it] + my }, l.weight, tg, l.loose, l.noise, l.guide)
+        }
+        // Ni contenido fino fuera del canto ni líneas de la hoja cortadas por él
+        val sides = DwBorder.dropCutting(DwBorder.dropLossy(sides0, content, border.mx, border.my), shifted)
+        val tag = "cantos ${sides0.size}->${sides.size}"
+        if (sides.size < 2) return null to tag
+        val sig = DwBorder.significance(sides)
+        // Desviación mínima: 4 px a 1600 px y nunca menos de 4 px (en imágenes pequeñas el ruido del canto pesa más)
+        val minDev = max(borderMinDev * max(border.w, border.h).toDouble() / EST_SIDE, borderMinDev)
+        if (sig < minDev) return null to "$tag rectos %.1f".format(sig)
+        val W = border.img.cols().toDouble(); val H = border.img.rows().toDouble()
+        // Si el ajuste falla, se quita el canto más dudoso (el que más se aparta de su recta) y se reintenta
+        var cur = sides
+        val log = StringBuilder()
+        while (cur.size >= 2) {
+            val why = StringBuilder()
+            val m = DwBorder.fit(W, H, mx.toDouble(), my.toDouble(), border.w.toDouble(), border.h.toDouble(), cur, shifted, textRows, why, fit.after)
+            if (m != null) return m to "$tag desv=%.1f $log APLICADO $why".format(sig)
+            log.append("[").append(why).append("] ")
+            cur = cur - cur.maxByOrNull { max(it.dev, it.offset) }!!
+            if (DwBorder.significance(cur) < minDev) break
+        }
+        return null to "$tag desv=%.1f $log".format(sig)
     }
 
     /**
@@ -574,14 +663,19 @@ object GridDewarp {
      * seguridad e inversión. Coordenadas en px de la imagen de estimación ([w] x [h]).
      */
     /** Resultado del ajuste: modelo o null y el motivo ("plana", "no mejora", ... o "aplicado"). */
-    internal class Fit(val model: Model?, val reason: String)
+    internal class Fit(
+        val model: Model?, val reason: String, val lines: List<DewarpMath.LineObs> = emptyList(),
+        /** Rectitud de las líneas tras el campo (percentil 90, px) si se aplicó; NaN si no. */
+        val after: Double = Double.NaN,
+    )
 
     internal fun fitModel(
         w: Double, h: Double,
         hLines: List<DewarpMath.LineObs>, vLines: List<DewarpMath.LineObs>,
         textRows: Boolean, debug: Debug?, content: FloatArray? = null, paper: Triple<ByteArray, Int, Int>? = null,
     ): Fit {
-        fun fail(r: String) = Fit(null, r).also { debug?.reason = r }
+        var kept: List<DewarpMath.LineObs> = emptyList()
+        fun fail(r: String) = Fit(null, r, kept).also { debug?.reason = r }
         val longSide = max(w, h)
         val cells = if (textRows) textCells else 28.0
         val nx = max(4, (w / longSide * cells).roundToInt() + 1)
@@ -629,6 +723,11 @@ object GridDewarp {
                 field = DewarpMath.solveField(w, h, nx, ny, lines, wt)
             }
         }
+        // Pliegues: placa delgada reponderada (curvatura concentrada en las aristas de pliegue). No en una malla densa
+        // (cuadrícula de cuaderno, tabla): sus líneas ya fijan el campo en todas partes y el resultado debe ser estable
+        val denseGrid = !textRows && lines.count { it.horizontal } >= 10 && lines.count { !it.horizontal } >= 10
+        if (foldIrls && !denseGrid) field = refold(field, w, h, nx, ny, lines, wt)
+        kept = lines
         val judged = lines.filter { !it.loose }.ifEmpty { lines }
         fun p90(l: List<Double>) = if (l.isEmpty()) 0.0 else l.sorted()[(l.size * 0.9).toInt().coerceAtMost(l.size - 1)]
         // Percentil 90: una esquina doblada afecta a pocas líneas pero debe corregirse
@@ -691,7 +790,7 @@ object GridDewarp {
         val conf = (cov * (1.0 - min(1.0, p80a / max(1e-6, p80b)))).coerceIn(0.0, 1.0)
         val extInfo = if (u0 < 0 || v0 < 0 || u1 > w || v1 > h) " lienzo %.1f,%.1f..%.1f,%.1f".format(u0, v0, u1 - w, v1 - h) else ""
         debug?.reason = "aplicado; $info$extInfo"
-        return Fit(Model(gw, gh, map, conf, info + extInfo, u0 / w, v0 / h, u1 / w, v1 / h, paper?.first, paper?.second ?: 0, paper?.third ?: 0), "aplicado")
+        return Fit(Model(gw, gh, map, conf, info + extInfo, u0 / w, v0 / h, u1 / w, v1 / h, paper?.first, paper?.second ?: 0, paper?.third ?: 0), "aplicado", lines, p80a)
     }
 
     // =====================================================================================
@@ -742,7 +841,13 @@ object GridDewarp {
                     coarse, strip, aff, Size(outW.toDouble(), rows.toDouble()),
                     Imgproc.INTER_LINEAR or Imgproc.WARP_INVERSE_MAP, Core.BORDER_REPLICATE,
                 )
-                run {
+                val m = if (hm != null) { Core.perspectiveTransform(strip, strip2, hm); strip2 } else strip
+                if (model.beyond && hm != null) {
+                    // Modelo por los cantos: sólo lo que cae fuera de la foto
+                    Core.inRange(m, Scalar(-0.5, -0.5), Scalar(src.cols() - 0.5, src.rows() - 0.5), inside)
+                    val o = outside.submat(y0, y0 + rows, 0, outW)
+                    Core.bitwise_not(inside, o); o.release()
+                } else run {
                     // Fuera del plano rectificado (= fuera de la hoja recortada)
                     Core.inRange(strip, Scalar(-0.5, -0.5), Scalar(outW0 - 0.5, outH0 - 0.5), inside)
                     val o = outside.submat(y0, y0 + rows, 0, outW)
@@ -754,7 +859,6 @@ object GridDewarp {
                         Imgproc.threshold(pz, z, 127.0, 255.0, Imgproc.THRESH_BINARY_INV); z.release()
                     }
                 }
-                val m = if (hm != null) { Core.perspectiveTransform(strip, strip2, hm); strip2 } else strip
                 val dst = out.submat(y0, y0 + rows, 0, outW)
                 Imgproc.remap(src, dst, m, Mat(), interp, Core.BORDER_REPLICATE)
                 dst.release()
@@ -1249,6 +1353,10 @@ internal object DewarpMath {
         }
         /** Suma w·(Σ c_k·x_{idx_k} − r)². */
         fun residual(idx: IntArray, c: DoubleArray, m: Int, r: Double, w: Double) {
+            // Una restricción que no cabe en la banda (muestras de una línea a más de una fila de celdas) se ignora
+            var lo = Int.MAX_VALUE; var hi = Int.MIN_VALUE
+            for (k in 0 until m) if (c[k] != 0.0) { lo = min(lo, idx[k]); hi = max(hi, idx[k]) }
+            if (hi - lo > b) return
             for (k in 0 until m) {
                 val ik = idx[k]; val ck = c[k] * w
                 if (ck == 0.0) continue
@@ -1291,7 +1399,7 @@ internal object DewarpMath {
      * consecutivas de cada línea deben quedar a la misma v (horizontales) o u (verticales); placa delgada en
      * ambas componentes; Cauchy-Riemann débil por celda; ancla débil a la identidad; objetivos de paso opcionales.
      */
-    fun solveField(w: Double, h: Double, nx: Int, ny: Int, lines: List<LineObs>, wt: Weights): Field {
+    fun solveField(w: Double, h: Double, nx: Int, ny: Int, lines: List<LineObs>, wt: Weights, bend: DoubleArray? = null): Field {
         val nn = nx * ny
         val sys = BandSys(2 * nn, 4 * nx + 7)
         val hx = w / (nx - 1); val hy = h / (ny - 1)
@@ -1333,18 +1441,20 @@ internal object DewarpMath {
         for (comp in 0..1) {
             for (j in 0 until ny) for (i in 0 until nx) {
                 val n = j * nx + i
+                val bn = bend?.get(n) ?: 1.0
                 if (i in 1..nx - 2) {
                     idx[0] = 2 * (n - 1) + comp; c[0] = 1.0; idx[1] = 2 * n + comp; c[1] = -2.0; idx[2] = 2 * (n + 1) + comp; c[2] = 1.0
-                    sys.residual(idx, c, 3, 0.0, wxx)
+                    sys.residual(idx, c, 3, 0.0, wxx * bn)
                 }
                 if (j in 1..ny - 2) {
                     idx[0] = 2 * (n - nx) + comp; c[0] = 1.0; idx[1] = 2 * n + comp; c[1] = -2.0; idx[2] = 2 * (n + nx) + comp; c[2] = 1.0
-                    sys.residual(idx, c, 3, 0.0, wyy)
+                    sys.residual(idx, c, 3, 0.0, wyy * bn)
                 }
                 if (i < nx - 1 && j < ny - 1) {
                     idx[0] = 2 * n + comp; c[0] = 1.0; idx[1] = 2 * (n + 1) + comp; c[1] = -1.0
                     idx[2] = 2 * (n + nx) + comp; c[2] = -1.0; idx[3] = 2 * (n + nx + 1) + comp; c[3] = 1.0
-                    sys.residual(idx, c, 4, 0.0, wxy)
+                    val bc = if (bend == null) 1.0 else minOf(bend[n], bend[n + 1], bend[n + nx], bend[n + nx + 1])
+                    sys.residual(idx, c, 4, 0.0, wxy * bc)
                 }
             }
         }
@@ -1370,6 +1480,33 @@ internal object DewarpMath {
         val x = sys.solve()
         return Field(nx, ny, w, h, DoubleArray(nn) { x[2 * it] }, DoubleArray(nn) { x[2 * it + 1] })
     }
+
+    /**
+     * PLIEGUES: pesos por nodo de la placa delgada para un nuevo ajuste (mínimos cuadrados reponderados, tipo Huber).
+     * Un pliegue es una arista recta donde la hoja cambia de pendiente: el campo es continuo pero su derivada salta, y
+     * la placa delgada (que penaliza la curvatura al cuadrado) lo reparte en varias celdas, dejando los renglones
+     * ondulados a ambos lados. Donde la segunda diferencia del campo (px por celda) supera claramente la típica de la
+     * hoja, el peso baja como [thr]/g: la curvatura se concentra en la arista y el resto queda casi plano por trozos.
+     * Null si no hay ningún nodo así (hoja curvada suave: el ajuste no cambia).
+     */
+    fun foldWeights(f: Field, minAbs: Double, floor: Double = 0.1): DoubleArray? {
+        val nx = f.nx; val ny = f.ny
+        val g = DoubleArray(nx * ny)
+        for (j in 0 until ny) for (i in 0 until nx) {
+            val n = j * nx + i
+            var m = 0.0
+            if (i in 1..nx - 2) m = max(m, hypot(f.u[n - 1] - 2 * f.u[n] + f.u[n + 1], f.v[n - 1] - 2 * f.v[n] + f.v[n + 1]))
+            if (j in 1..ny - 2) m = max(m, hypot(f.u[n - nx] - 2 * f.u[n] + f.u[n + nx], f.v[n - nx] - 2 * f.v[n] + f.v[n + nx]))
+            g[n] = m
+        }
+        val sorted = g.sorted()
+        val thr = max(minAbs, foldRatio * sorted[sorted.size / 2])
+        if (sorted.last() <= thr) return null
+        return DoubleArray(nx * ny) { if (g[it] > thr) max(floor, thr / g[it]) else 1.0 }
+    }
+
+    /** Ver [foldWeights]: múltiplo de la mediana a partir del cual una curvatura se trata como pliegue. */
+    internal var foldRatio = 3.0
 
     /** Residuo de una línea tras el campo: máx |v − media| (horizontal) o |u − media| (vertical). */
     fun lineResidual(f: Field, l: LineObs): Double {

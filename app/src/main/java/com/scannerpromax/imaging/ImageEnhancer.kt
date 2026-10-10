@@ -38,7 +38,15 @@ import kotlin.math.sqrt
 object ImageEnhancer {
 
     /** Opciones internas: gama del equipo, modo rápido (vista previa) y límite de píxeles. */
-    internal data class Options(val highEnd: Boolean, val fast: Boolean, val maxPixels: Int, val lowEnd: Boolean = !highEnd) {
+    internal data class Options(
+        val highEnd: Boolean, val fast: Boolean, val maxPixels: Int, val lowEnd: Boolean = !highEnd,
+        /**
+         * Lados de la imagen que son cantos de la hoja (bits 0 superior, 1 derecho, 2 inferior, 3 izquierdo; enderezado
+         * por los cantos, [GridDewarp.Model.sheetSides]): lo oscuro pegado a ellos es contenido de la hoja (cabecera,
+         * foto a sangre), no mesa que el recorte dejó dentro.
+         */
+        val sheetSides: Int = 0,
+    ) {
         companion object {
             fun default(): Options {
                 val maxMem = Runtime.getRuntime().maxMemory()
@@ -483,7 +491,7 @@ object ImageEnhancer {
         }
         if (stats != null && stats.printed) {
             val k = base.cols().toDouble() / max(1, rgb.cols())
-            return@use PrintedPage.render(base, style, opt.fast, opt.maxPixels, if (k != 1.0) stats.scaled(k) else stats)
+            return@use PrintedPage.render(base, style, opt.fast, opt.maxPixels, if (k != 1.0) stats.scaled(k) else stats, sheetSides = opt.sheetSides)
         }
         // Si la segmentación de cuaderno falla con una imagen atípica (no por memoria), la ruta que conserva todo
         try {
@@ -491,7 +499,7 @@ object ImageEnhancer {
         } catch (e: Exception) {
             if (Cv.isOutOfMemory(e)) throw e
             val k = base.cols().toDouble() / max(1, rgb.cols())
-            PrintedPage.render(base, style, opt.fast, opt.maxPixels, stats?.let { if (k != 1.0) it.scaled(k) else it })
+            PrintedPage.render(base, style, opt.fast, opt.maxPixels, stats?.let { if (k != 1.0) it.scaled(k) else it }, sheetSides = opt.sheetSides)
         }
     }
 

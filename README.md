@@ -157,6 +157,31 @@ Todo en `imaging/` (OpenCV 4.10, sin red). Tiempos medidos con el harness Python
   - **Ángulo**: si no se aplica el enderezado curvo, el giro se mide con las pendientes de los renglones (mediana
     ponderada, dispersión ≤ 0.35°) y de las guías verticales (deben coincidir en ±0.8°). Si eso no es coherente, se
     recurre a los perfiles de proyección (`Cleanup.estimateSkew`).
+  - **Cantos de la hoja** (`DwBorder`, hojas curvadas, dobladas y arrugadas): en la hoja real los cuatro cantos son
+    rectos; en la foto son curvas o quebradas (cada pliegue cambia la pendiente del canto) y el recorte recto deja fuera
+    lo que se sale de él o dentro cuñas de la mesa. Sobre el plano rectificado AMPLIADO (un 7 % por lado, tomado de la
+    foto) se buscan los cantos con perfiles transversales a ≤ 800 px de la imagen sin texto (cierre) en Lab: contraste
+    entre ambos lados por lo "papel" del lado interior (luminosidad y croma del papel de la hoja) y penalizado si más
+    allá vuelve a haber papel (el borde de una cabecera de color o de una foto pegada al canto no es el canto);
+    programación dinámica con pendiente acotada; un lado se acepta con apoyo ≥ 60 %, si no deja fuera escritura y si no
+    corta ninguna línea de la hoja (un renglón o una regla que sigue más allá del "canto" indica una sombra o un rizo).
+    Los cantos entran en el mismo ajuste que las líneas como líneas con POSICIÓN impuesta (superior en v = 0, izquierdo
+    en u = 0...); los lados sin canto fiable quedan en el lado del recorte. La salida es exactamente la hoja: lo que se
+    salía del recorte se recupera de la foto en el mismo `remap` y la mesa queda fuera. Se usa si algún canto se aparta
+    ≥ 4 px (a 1600 px) de su recta o del recorte, las líneas de la hoja no quedan más torcidas, los cantos encajan
+    (≤ 3 px) y el jacobiano está en 0.5..2; si falla, se reintenta sin el canto más dudoso. Las tablas y cuadrículas
+    densas ya enderezadas por sus líneas (≥ 10 + 10) no se tocan. Los lados que son canto se comunican a los filtros
+    (`Model.sheetSides` -> `ImageEnhancer.Options.sheetSides`): allí no hay mesa, así que la limpieza del fondo pegado
+    al borde de `PrintedPage` no borra lo que toca esos lados (cabecera de color o foto a sangre); en los lados que
+    siguen en el recorte se limpia como siempre. Banco (manifest_v2 frente a la base e92c03d, MS-SSIM / LD): DIR300
+    0.441 -> 0.473 / 15.4 -> 12.8 px, UVDoc 0.379 -> 0.425 / 21.3 -> 17.9, WarpDoc 0.273 -> 0.287 / 26.4 -> 25.5,
+    Inv3DReal doblada 0.456 -> 0.462 / 13.0 -> 12.3 (allí manda el recorte); OCR "Texto resaltado" hoja curvada
+    CER 28.2 -> 27.4 %; fotos de cuaderno y tabla sin cambios. Coste: geometría +20 % (render completo +12 %).
+  - **Pliegues** (aristas rectas por trozos): un pliegue es una arista donde la hoja cambia de pendiente; la placa
+    delgada (curvatura al cuadrado) la reparte en varias celdas y deja los renglones ondulados a ambos lados. Tras el
+    primer ajuste se repite dos veces con la placa delgada reponderada (tipo Huber) en los nodos cuya segunda diferencia
+    supera 3 veces la mediana (y ≥ 1 px a 1600 px): la curvatura se concentra en la arista y el resto queda casi plano
+    por trozos. No en mallas densas (cuadrícula de cuaderno, tabla): sus líneas ya fijan el campo.
   Modelo: campo directo suave (u, v) = F(x, y) en una rejilla bilineal de ~28 celdas por mínimos cuadrados en banda
   (v constante a lo largo de cada horizontal, u a lo largo de cada vertical, placa delgada, Cauchy-Riemann débil y ancla
   débil a la identidad), descarte iterativo de líneas y tramos atípicos (subrayados, trazos de escritura) y, en
