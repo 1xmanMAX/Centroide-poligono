@@ -711,4 +711,58 @@ internal object Cv {
         return t is org.opencv.core.CvException &&
             (msg.contains("Insufficient memory", ignoreCase = true) || msg.contains("Failed to allocate", ignoreCase = true))
     }
+
+    /**
+     * Gris para binarizar con los TRAZOS FINOS de color (bolígrafo rojo o verde desvaído) tan oscuros como su canal más
+     * absorbido: [g] (8UC1, mezcla de luminancia y canal máximo, que deja claros los fondos de color) baja en
+     * cd' = 1.5·max(0, cd − fondo − 25), con cd = g − min(R,G,B) y fondo = su apertura a ~0.5·[letter] (las
+     * barras, sombreados, resaltadores anchos y el papel de color no cambian; la cuadrícula azul clara, de croma bajo,
+     * tampoco). In-place. [n] RGB 8UC3 del mismo tamaño.
+     */
+    fun darkenColorStrokes(n: Mat, g: Mat, letter: Double) {
+        if (n.channels() < 3 || n.size() != g.size()) return
+        val ch = ArrayList<Mat>(3); Core.split(n, ch)
+        val cd = Mat(); val mn = Mat()
+        try {
+            Core.min(ch[0], ch[1], mn); Core.min(mn, ch[2], mn)
+            Core.subtract(g, mn, cd)                       // 8U: g - min (satura en 0)
+            // Dominante de color en la tinta oscura (papel de color normalizado: la tinta negra de un pósit verde sale
+            // magenta y sus bordes, con franjas de color): la tinta oscura típica no es neutra -> no se toca
+            run {
+                val dark = Mat(); Imgproc.threshold(g, dark, 100.0, 255.0, Imgproc.THRESH_BINARY_INV)
+                val nd = Core.countNonZero(dark)
+                if (nd > 0.002 * g.total()) {
+                    val mx = Mat(); Core.max(ch[0], ch[1], mx); Core.max(mx, ch[2], mx); Core.subtract(mx, mn, mx)
+                    val med = percentile(histogram(mx, dark), 0.5)
+                    mx.release()
+                    if (med > 22) { dark.release(); return }
+                }
+                dark.release()
+            }
+            // Sólo donde el canal más absorbido es claramente más oscuro que el del papel de alrededor (mediana a ~3
+            // letras): un trazo de tinta; no el ruido de color de la compresión junto a los trazos ni el grano del papel
+            val strokeMask = Mat()
+            run {
+                val q = Mat(); val f = 4.0
+                Imgproc.resize(mn, q, Size(max(1.0, (mn.cols() / f).roundToInt().toDouble()), max(1.0, (mn.rows() / f).roundToInt().toDouble())), 0.0, 0.0, Imgproc.INTER_AREA)
+                Imgproc.medianBlur(q, q, odd((3.0 * letter / f).roundToInt().coerceIn(3, 31)))
+                Imgproc.resize(q, strokeMask, mn.size(), 0.0, 0.0, Imgproc.INTER_LINEAR); q.release()
+                Core.subtract(strokeMask, mn, strokeMask)          // papel - trazo (satura en 0)
+                Imgproc.threshold(strokeMask, strokeMask, 35.0, 255.0, Imgproc.THRESH_BINARY_INV)   // 255 = NO es trazo
+            }
+            // Fondo de croma: apertura a ~0.5 letras (las estructuras más anchas que un trazo: papel de color, sombreados,
+            // barras y resaltadores son el fondo)
+            val base = Mat(); Imgproc.morphologyEx(cd, base, Imgproc.MORPH_OPEN, kernel(Imgproc.MORPH_ELLIPSE, odd((0.5 * letter).roundToInt().coerceIn(5, 31))))
+            Core.subtract(cd, base, cd)
+            // y sólo sobre papel casi neutro (en un pósit verde o una cartulina de color la binarización ya separa la
+            // tinta y el realce sólo añadía motas junto a los trazos)
+            run { val col = Mat(); Imgproc.threshold(base, col, 20.0, 255.0, Imgproc.THRESH_BINARY); Core.bitwise_or(strokeMask, col, strokeMask); col.release() }
+            base.release()
+            cd.convertTo(cd, -1, 1.5, -37.5)
+            cd.setTo(Scalar(0.0), strokeMask); strokeMask.release()
+            Core.subtract(g, cd, g)
+        } finally {
+            cd.release(); mn.release(); for (c in ch) c.release()
+        }
+    }
 }

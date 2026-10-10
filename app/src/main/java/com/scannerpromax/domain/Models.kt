@@ -108,6 +108,7 @@ data class PageEdits(
     val autoDenoise: Boolean = true,        // limpiar ruido/puntos
     val autoDeskew: Boolean = true,         // enderezar texto torcido unos grados
     val autoDewarp: Boolean = true,         // enderezar hoja curvada/combada (malla de líneas de tablas y cuadrículas)
+    val keepRuling: Boolean = true,         // conservar la cuadrícula / renglones del cuaderno (limpia, tono claro) en Texto resaltado y B/N
     val eraseStrokes: List<EraseStroke> = emptyList(),
 )
 

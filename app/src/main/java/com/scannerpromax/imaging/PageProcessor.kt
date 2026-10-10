@@ -479,7 +479,7 @@ class PageProcessor(val tier: DeviceTier) {
         val analysis = if (edits.filter == FilterType.AUTO) runCatching { ImageEnhancer.analyzeMat(geo) }.getOrNull() else null
         val effective = ImageEnhancer.effectiveFilter(edits.filter, analysis)
         var cur = try {
-            ImageEnhancer.applyMat(geo, edits.filter, edits.adjustments, opt, analysis)
+            ImageEnhancer.applyMat(geo, edits.filter, edits.adjustments, opt.copy(keepRuling = edits.keepRuling), analysis)
         } finally {
             geo.release()
         }

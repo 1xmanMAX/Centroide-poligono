@@ -558,6 +558,9 @@ internal object PrintedPage {
         Core.bitwise_or(blk, rule, blk)
         thin.release(); rule.release()
         val mix = bag.mat(); Core.addWeighted(g, 0.5, v, 0.5, 0.0, mix)
+        // Tinta de color desvaída (roja, verde) en trazos finos -> más oscura; los bloques y el rayado de color
+        // largo conservan después la mezcla clara (mix se calculó antes del realce)
+        Cv.darkenColorStrokes(n, g, win / 2.5)
         if (Core.countNonZero(blk) > 0) {
             Imgproc.dilate(blk, blk, Cv.kernel(Imgproc.MORPH_ELLIPSE, 3))
             mix.copyTo(g, blk)

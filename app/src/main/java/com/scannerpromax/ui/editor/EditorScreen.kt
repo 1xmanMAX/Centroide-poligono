@@ -36,6 +36,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.Notes
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.RotateLeft
 import androidx.compose.material.icons.automirrored.filled.RotateRight
@@ -278,6 +279,7 @@ fun EditorScreen(
                             autoDenoise = src.autoDenoise,
                             autoDeskew = src.autoDeskew,
                             autoDewarp = src.autoDewarp,
+                            keepRuling = src.keepRuling,
                             // Cambiar el enderezado mueve la geometría: los trazos de esa página dejarían de coincidir.
                             eraseStrokes = if (e.autoDeskew != src.autoDeskew || e.autoDewarp != src.autoDewarp) emptyList() else e.eraseStrokes,
                         )
@@ -867,6 +869,9 @@ private fun CleanPanel(
         }
         CleanSwitch(Icons.Filled.GridOn, "Enderezar hoja curvada", "Aplana hojas dobladas usando las líneas de tablas y cuadrículas", e.autoDewarp) {
             onDewarp(it)
+        }
+        CleanSwitch(Icons.AutoMirrored.Filled.Notes, "Conservar cuadrícula / renglones", "Las líneas del cuaderno salen finas y claras; desactívalo para quitarlas", e.keepRuling) {
+            session.update(e.copy(keepRuling = it))
         }
         Spacer(Modifier.height(6.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {

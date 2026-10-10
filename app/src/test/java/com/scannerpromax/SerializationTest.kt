@@ -35,6 +35,14 @@ class SerializationTest {
         assertEquals(doc, back)
     }
 
+    @Test fun keepRulingCompatibleConJsonAntiguo() {
+        // Ediciones guardadas antes de existir el campo: se conserva la cuadrícula (valor por defecto)
+        val old = json.decodeFromString<PageEdits>("""{"rotation":90,"autoDewarp":false}""")
+        assertEquals(true, old.keepRuling)
+        val off = PageEdits(keepRuling = false)
+        assertEquals(false, json.decodeFromString<PageEdits>(json.encodeToString(off)).keepRuling)
+    }
+
     @Test fun camposDesconocidosSeIgnoran() {
         val s = """{"id":"x","title":"t","createdAt":0,"updatedAt":0,"futuro":true}"""
         val d = json.decodeFromString<Document>(s)

@@ -1422,7 +1422,23 @@ internal object DewarpMath {
                 if (d < 1e-3) continue
                 stencil(l.x[k + 1].toDouble(), l.y[k + 1].toDouble(), comp, 1.0, 0)
                 stencil(l.x[k].toDouble(), l.y[k].toDouble(), comp, -1.0, 4)
-                sys.residual(idx, c, 8, 0.0, wt.line * l.weight / d)
+                var lo = idx[0]; var hi = idx[0]
+                for (q in 1 until 8) { lo = min(lo, idx[q]); hi = max(hi, idx[q]) }
+                if (hi - lo <= sys.b) {
+                    sys.residual(idx, c, 8, 0.0, wt.line * l.weight / d)
+                } else {
+                    // Muestras consecutivas a más de una celda (línea con huecos largos): el par se sale de la banda
+                    // del sistema -> se parte en tramos de <= 1 celda (muelles en serie: misma rigidez total)
+                    val x0 = l.x[k].toDouble(); val y0 = l.y[k].toDouble()
+                    val dx = l.x[k + 1] - x0; val dy = l.y[k + 1] - y0
+                    val m = max(2, kotlin.math.ceil(max(abs(dx) / hx, abs(dy) / hy)).toInt())
+                    for (q in 0 until m) {
+                        val a0 = q.toDouble() / m; val a1 = (q + 1).toDouble() / m
+                        stencil(x0 + dx * a1, y0 + dy * a1, comp, 1.0, 0)
+                        stencil(x0 + dx * a0, y0 + dy * a0, comp, -1.0, 4)
+                        sys.residual(idx, c, 8, 0.0, wt.line * l.weight * m / d)
+                    }
+                }
             }
             if (!l.target.isNaN()) {
                 val len = (0 until l.size - 1).sumOf { hypot((l.x[it + 1] - l.x[it]).toDouble(), (l.y[it + 1] - l.y[it]).toDouble()) }

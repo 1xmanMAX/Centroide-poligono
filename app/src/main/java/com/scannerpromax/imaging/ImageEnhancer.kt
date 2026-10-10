@@ -46,6 +46,8 @@ object ImageEnhancer {
          * foto a sangre), no mesa que el recorte dejó dentro.
          */
         val sheetSides: Int = 0,
+        /** Cuaderno: conservar la cuadrícula / renglones (limpios y claros) en vez de borrarlos ([PageEdits.keepRuling]). */
+        val keepRuling: Boolean = true,
     ) {
         companion object {
             fun default(): Options {
@@ -96,9 +98,9 @@ object ImageEnhancer {
         applyBitmap(src, filter, adjustments, Options.default())
 
     /** Variante con perfil del dispositivo: [fast] = vista previa (sin des-ruido costoso ni super-resolución). */
-    fun apply(src: Bitmap, filter: FilterType, adjustments: Adjustments, tier: DeviceTier, fast: Boolean): Bitmap {
+    fun apply(src: Bitmap, filter: FilterType, adjustments: Adjustments, tier: DeviceTier, fast: Boolean, keepRuling: Boolean = true): Bitmap {
         Cv.configureThreads(tier)
-        return applyBitmap(src, filter, adjustments, Options.of(tier, fast))
+        return applyBitmap(src, filter, adjustments, Options.of(tier, fast).copy(keepRuling = keepRuling))
     }
 
     /**
@@ -491,16 +493,21 @@ object ImageEnhancer {
         }
         if (stats != null && stats.printed) {
             val k = base.cols().toDouble() / max(1, rgb.cols())
-            return@use PrintedPage.render(base, style, opt.fast, opt.maxPixels, if (k != 1.0) stats.scaled(k) else stats, sheetSides = opt.sheetSides)
+            return@use PrintedPage.render(base, style, opt.fast, opt.maxPixels, if (k != 1.0) stats.scaled(k) else stats, sheetSides = opt.sheetSides).also { cleanEdges(it, base) }
         }
         // Si la segmentación de cuaderno falla con una imagen atípica (no por memoria), la ruta que conserva todo
         try {
-            TextRegions.render(base, style, opt.fast)
+            TextRegions.render(base, style, opt.fast, opt.keepRuling)
         } catch (e: Exception) {
             if (Cv.isOutOfMemory(e)) throw e
             val k = base.cols().toDouble() / max(1, rgb.cols())
-            PrintedPage.render(base, style, opt.fast, opt.maxPixels, stats?.let { if (k != 1.0) it.scaled(k) else it }, sheetSides = opt.sheetSides)
+            PrintedPage.render(base, style, opt.fast, opt.maxPixels, stats?.let { if (k != 1.0) it.scaled(k) else it }, sheetSides = opt.sheetSides).also { cleanEdges(it, base) }
         }
+    }
+
+    /** Bordes del resultado: lo que no es contenido junto al borde (sombra del canto, fondo, manchas) -> blanco ([EdgeClean]). */
+    private fun cleanEdges(out: Mat, src: Mat) {
+        runCatching { EdgeClean.clean(out, src) }.onFailure { if (Cv.isOutOfMemory(it)) throw it }
     }
 
     /**

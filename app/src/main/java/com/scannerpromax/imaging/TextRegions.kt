@@ -105,8 +105,11 @@ object TextRegions {
         val ruling: Mat,     // 8UC1 huella fina de las rectas claras, resolución completa (puede estar vacío)
         val paper: Double,
         val noise: Double,
+        val rulingH: Mat = Mat(),   // 8UC1 huella fina de las rectas claras horizontales, a media resolución (o vacía)
+        val rulingV: Mat = Mat(),   // ídem verticales
+        val rulingColor: DoubleArray? = null,   // RGB medio normalizado de la rejilla (null si no hay)
     ) {
-        fun release() { n.release(); dark.release(); gain.release(); ruling.release() }
+        fun release() { n.release(); dark.release(); gain.release(); ruling.release(); rulingH.release(); rulingV.release() }
     }
 
     internal fun prepare(rgb0: Mat, bgSide: Int = 384, refineSide: Int = 512): Prepared = MatBag().use { bag ->
@@ -152,8 +155,11 @@ object TextRegions {
         // Memoria: los intermedios a resolución completa se liberan antes del paso más pesado
         for (c in ch) c.release()
         v.release(); mn.release(); chroma.release(); wv.release()
-        val ruling = suppressRuling(dark, gain, bag)
-        Prepared(n, dark, gain, ruling, pm, noise)
+        val rh = Mat(); val rv = Mat()
+        val ruling = suppressRuling(dark, gain, bag, rh, rv)
+        // Color de la rejilla (para redibujarla limpia con su tono, [PageEdits.keepRuling])
+        val rc = if (!ruling.empty() && Core.countNonZero(ruling) > 200) Core.mean(n, ruling).`val`.copyOf(3) else null
+        Prepared(n, dark, gain, ruling, pm, noise, rh, rv, rc)
     }
 
     /**
@@ -192,7 +198,7 @@ object TextRegions {
      *     <= límite): un trazo que la cruza o va encima y es más oscuro, o una recta mucho más oscura que la
      *     rejilla de alrededor (línea de un diagrama a bolígrafo o lápiz marcado), se conserva.
      */
-    private fun suppressRuling(dark: Mat, gain: Mat, bag: MatBag): Mat {
+    private fun suppressRuling(dark: Mat, gain: Mat, bag: MatBag, outH: Mat? = null, outV: Mat? = null): Mat {
         val w = dark.cols(); val h = dark.rows()
         val lines = Mat()
         if (min(w, h) < 200) return lines
@@ -309,6 +315,8 @@ object TextRegions {
             Core.bitwise_or(bandAll, band, bandAll)   // sólo donde la recta es clara (no renglones de texto impreso)
             Core.bitwise_and(fine, t, fine)
             Core.bitwise_or(bandFine, fine, bandFine)
+            // Huella fina por dirección a media resolución (reconstrucción de la rejilla limpia)
+            (if (i == 0) outH else outV)?.let { Imgproc.resize(fine, it, hs, 0.0, 0.0, Imgproc.INTER_AREA); Imgproc.threshold(it, it, 60.0, 255.0, Imgproc.THRESH_BINARY) }
             Core.compare(o, Scalar(0.35 * gl), t, Core.CMP_GE); Core.bitwise_and(band, t, band)
             o.convertTo(o, -1, EXPL_K, EXPL_C)
             Core.min(o, limFull, o)   // nunca se borra nada más oscuro que una línea clara de la rejilla
@@ -993,13 +1001,31 @@ object TextRegions {
      * Render del filtro sobre [rgb] (8UC3, resolución completa; no se modifica). COLOR: 8UC3 (tinta con su
      * color reforzado sobre blanco puro); BLACK_WHITE: 8UC1 (tinta negra con bordes suaves sobre blanco puro).
      */
-    internal fun render(rgb: Mat, style: Style, fast: Boolean = false): Mat = MatBag().use { bag ->
+    internal fun render(rgb: Mat, style: Style, fast: Boolean = false, keepRuling: Boolean = true): Mat = MatBag().use { bag ->
         val p = prepare(rgb, bgSide = if (fast) 256 else 384, refineSide = if (fast) 320 else 512)
         try {
             val lay = layout(p)
             try {
                 val t0 = System.nanoTime()
-                compose(p, lay, style, bag).also { log?.invoke("compose $style %.0f ms".format((System.nanoTime() - t0) / 1e6)) }
+                val out = compose(p, lay, style, bag).also { log?.invoke("compose $style %.0f ms".format((System.nanoTime() - t0) / 1e6)) }
+                // Cuadrícula del cuaderno reconstruida: delimita la zona de escritura (limpieza de bordes) y se redibuja
+                // limpia si se conserva
+                val grid = runCatching { rulingGrid(p) }.onFailure { if (Cv.isOutOfMemory(it)) throw it }.getOrNull()
+                val region = grid?.let { g -> runCatching { gridRegion(g, p) }.getOrNull() }
+                var drawGrid = grid
+                try {
+                    runCatching { EdgeClean.clean(out, rgb, lay.letterHeight, region?.second) }.onFailure { if (Cv.isOutOfMemory(it)) throw it }
+                    // La rejilla cubre toda la zona de escritura (también bajo las sombras donde no se vio)
+                    if (keepRuling && grid != null && region != null) {
+                        val core = region.first; val cw = core.cols(); val ch = core.rows()
+                        val cb = ByteArray(cw * ch); core.get(0, 0, cb)
+                        val ins = { x: Int, y: Int -> x in 0 until cw && y in 0 until ch && cb[y * cw + x].toInt() != 0 }
+                        drawGrid = RulingGrid.Grid(RulingGrid.extendWithin(grid.h, true, grid.slopeH, cw, ins),
+                            RulingGrid.extendWithin(grid.v, false, grid.slopeV, ch, ins), grid.periodH, grid.periodV)
+                    }
+                } finally { region?.first?.release(); region?.second?.release() }
+                if (keepRuling && drawGrid != null) runCatching { drawRuling(out, p, lay, style == Style.COLOR, drawGrid) }.onFailure { if (Cv.isOutOfMemory(it)) throw it }
+                out
             } finally { lay.release() }
         } finally { p.release() }
     }
@@ -1062,6 +1088,155 @@ object TextRegions {
             nRoi.release(); oRoi.release()
         }
         return out
+    }
+
+    /** Oscuridad máxima (0..255, canal más absorbido) de la cuadrícula conservada en "Texto resaltado" y en B/N. */
+    private const val RULING_TONE_COLOR = 70.0
+    private const val RULING_TONE_BW = 60.0
+
+    /**
+     * Cuadrícula / renglones conservados ([PageEdits.keepRuling]): las rectas claras borradas del mapa de tinta se
+     * reconstruyen ([RulingGrid]) y se redibujan finas, continuas y de tono claro uniforme (en COLOR con el tono de
+     * la propia rejilla, en B/N gris claro), por debajo de la tinta (mezcla multiplicativa). No se dibujan en las zonas
+     * en blanco (espiral, cantos, fondo).
+     */
+    /** Rectas de la cuadrícula / renglones a media resolución ([Prepared.rulingH] / [Prepared.rulingV]); null si no hay. */
+    private fun rulingGrid(p: Prepared): RulingGrid.Grid? {
+        val ref = if (!p.rulingH.empty()) p.rulingH else p.rulingV
+        if (ref.empty()) return null
+        val mw = ref.cols(); val mh = ref.rows()
+        fun bytes(m: Mat): ByteArray? = if (m.empty() || m.cols() != mw || m.rows() != mh || Core.countNonZero(m) == 0) null
+            else ByteArray(mw * mh).also { m.get(0, 0, it) }
+        val g = RulingGrid.extractGrid(bytes(p.rulingH), bytes(p.rulingV), mw, mh)
+        log?.invoke("rejilla: ${g.h.size} H + ${g.v.size} V paso %.1f/%.1f".format(g.periodH, g.periodV))
+        return if (g.h.size + g.v.size >= 3) g else null
+    }
+
+    /**
+     * Zona de escritura del cuaderno (8UC1 a media resolución, 255 = dentro): las celdas de la cuadrícula (o las bandas
+     * entre renglones) cerradas a 1.5 pasos y con medio paso de margen. null si la rejilla no es fiable (pocas rectas
+     * o sin paso regular): entonces la limpieza de bordes usa sólo el borde de la imagen.
+     */
+    private fun gridRegion(g: RulingGrid.Grid, p: Prepared): Pair<Mat, Mat>? {
+        // Sólo rectas observadas y sin las de los extremos que no siguen el paso (canto de la hoja, borde del marco)
+        val hs = RulingGrid.trimToPeriod(g.h, g.periodH); val vs = RulingGrid.trimToPeriod(g.v, g.periodV)
+        val okH = hs.size >= 6 && g.periodH > 2; val okV = vs.size >= 6 && g.periodV > 2
+        if (!okH) return null
+        val ref = if (!p.rulingH.empty()) p.rulingH else p.rulingV
+        val mw = ref.cols(); val mh = ref.rows()
+        fun draw(lines: List<RulingGrid.Line>, hor: Boolean, kx: Int, ky: Int): Mat {
+            val m = Mat(mh, mw, CvType.CV_8UC1, Scalar(0.0))
+            for (l in lines) {
+                val pts = ArrayList<org.opencv.core.Point>()
+                var t = l.start
+                while (true) {
+                    val c = l.at(t)
+                    pts.add(if (hor) org.opencv.core.Point(t, c) else org.opencv.core.Point(c, t))
+                    if (t >= l.end) break
+                    t = min(l.end, t + 8.0)
+                }
+                if (pts.size < 2) continue
+                val mp = org.opencv.core.MatOfPoint(*pts.toTypedArray())
+                Imgproc.polylines(m, listOf(mp), false, Scalar(255.0), 1)
+                mp.release()
+            }
+            Imgproc.morphologyEx(m, m, Imgproc.MORPH_CLOSE, Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(kx.toDouble(), ky.toDouble())))
+            return m
+        }
+        // Bandas entre renglones (acotadas a lo largo por los renglones) ∩ bandas entre verticales (acotadas por las
+        // verticales extremas): la zona no se sale del marco aunque los renglones se prolongaran hasta el canto
+        val m = draw(hs, true, 3, Cv.odd((1.5 * g.periodH).roundToInt().coerceAtLeast(3)))
+        if (okV) {
+            val mv = draw(vs, false, Cv.odd((1.5 * g.periodV).roundToInt().coerceAtLeast(3)), 3)
+            Core.bitwise_and(m, mv, m); mv.release()
+        }
+        // Cada página es un rectángulo: la zona de cada componente grande es su rectángulo mínimo (las celdas que faltan bajo
+        // una sombra o una escritura densa, también junto al borde, quedan dentro)
+        run {
+            val contours = ArrayList<org.opencv.core.MatOfPoint>(); val hier = Mat()
+            Imgproc.findContours(m.clone(), contours, hier, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
+            hier.release()
+            m.setTo(Scalar(0.0))
+            val hulls = ArrayList<org.opencv.core.MatOfPoint>()
+            for (c in contours) {
+                if (Imgproc.contourArea(c) < 0.03 * mw * mh) { c.release(); continue }
+                // (rectángulo mínimo: una página es un rectángulo; la envolvente de una zona en L dejaría fuera la esquina
+                // que tapaba la sombra)
+                val r = Imgproc.minAreaRect(org.opencv.core.MatOfPoint2f(*c.toArray()))
+                val corners = arrayOfNulls<org.opencv.core.Point>(4); r.points(corners)
+                hulls.add(org.opencv.core.MatOfPoint(*Array(4) { corners[it]!! }))
+                c.release()
+            }
+            if (hulls.isNotEmpty()) Imgproc.fillPoly(m, hulls, Scalar(255.0))
+            for (h in hulls) h.release()
+        }
+        // Zona plausible: una página de cuaderno ocupa buena parte de la imagen
+        if (Core.countNonZero(m) < 0.2 * m.total()) { m.release(); return null }
+        // (núcleo: las celdas; zona: con medio paso de margen)
+        val mx = Cv.odd(max(3, (0.5 * max(g.periodH, if (okV) g.periodV else 0.0)).roundToInt()))
+        val zone = Mat(); Imgproc.dilate(m, zone, Cv.kernel(Imgproc.MORPH_RECT, mx))
+        return m to zone
+    }
+
+    private fun drawRuling(out: Mat, p: Prepared, lay: Layout, color: Boolean, grid: RulingGrid.Grid) = MatBag().use { bag ->
+        val ref = if (!p.rulingH.empty()) p.rulingH else p.rulingV
+        if (ref.empty()) return@use
+        val mw = ref.cols(); val mh = ref.rows()
+        val lines = grid.h.map { it to true } + grid.v.map { it to false }
+        if (lines.size < 3) return@use
+        val fw = out.cols(); val fh = out.rows()
+        val kx = fw.toDouble() / mw; val ky = fh.toDouble() / mh
+        val alpha = bag.mat(); alpha.create(fh, fw, CvType.CV_8UC1); alpha.setTo(Scalar(0.0))
+        val thick = max(1, (max(fw, fh) / 2600.0).roundToInt())
+        val shift = 3; val sub = (1 shl shift).toDouble()
+        for ((l, hor) in lines) {
+            val pts = ArrayList<org.opencv.core.Point>()
+            var t = l.start
+            while (true) {
+                val c = l.at(t)
+                // centro del píxel de media resolución -> coordenadas completas
+                val x = ((if (hor) t else c) + 0.5) * kx - 0.5; val y = ((if (hor) c else t) + 0.5) * ky - 0.5
+                pts.add(org.opencv.core.Point((x * sub).roundToInt().toDouble(), (y * sub).roundToInt().toDouble()))
+                if (t >= l.end) break
+                t = min(l.end, t + 8.0)
+            }
+            if (pts.size < 2) continue
+            val mp = org.opencv.core.MatOfPoint(*pts.toTypedArray())
+            Imgproc.polylines(alpha, listOf(mp), false, Scalar(255.0), thick, Imgproc.LINE_AA, shift)
+            mp.release()
+        }
+        // Fuera de las zonas en blanco (espiral, cantos oscuros)
+        if (Core.countNonZero(lay.blank) > 0) {
+            val bf = bag.mat(); Imgproc.resize(lay.blank, bf, Size(fw.toDouble(), fh.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR)
+            Imgproc.threshold(bf, bf, 0.0, 255.0, Imgproc.THRESH_BINARY)
+            alpha.setTo(Scalar(0.0), bf); bf.release()
+        }
+        // Tono: el de la rejilla (oscuridad por canal respecto del papel) escalado a una oscuridad máxima fija
+        val pm = p.paper
+        val rc = p.rulingColor
+        val tone = if (color) RULING_TONE_COLOR else RULING_TONE_BW
+        val dk = DoubleArray(3) { if (rc == null) 1.0 else max(0.0, pm - rc[it]) }
+        val dm = dk.max()
+        val col = DoubleArray(3) { if (!color || dm < 6.0) 255.0 - tone else 255.0 - tone * dk[it] / dm }
+        // out_c *= 1 - a·(1 - col_c/255), por franjas
+        val stripH = max(16, STRIP_PIXELS / max(1, fw))
+        val f = bag.mat(); val f3 = bag.mat()
+        var y0 = 0
+        while (y0 < fh) {
+            val y1 = min(fh, y0 + stripH)
+            val aR = alpha.submat(y0, y1, 0, fw); val oR = out.submat(y0, y1, 0, fw)
+            if (color) {
+                val fs = ArrayList<Mat>(3)
+                for (c in 0..2) { val m = bag.mat(); aR.convertTo(m, CvType.CV_8U, -(255.0 - col[c]) / 255.0, 255.0); fs.add(m) }
+                Core.merge(fs, f3); for (m in fs) m.release()
+                Core.multiply(oR, f3, oR, 1.0 / 255.0)
+            } else {
+                aR.convertTo(f, CvType.CV_8U, -(255.0 - col[0]) / 255.0, 255.0)
+                Core.multiply(oR, f, oR, 1.0 / 255.0)
+            }
+            aR.release(); oR.release()
+            y0 = y1
+        }
     }
 
     /** Intermedios reutilizados entre franjas del render. */
