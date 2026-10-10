@@ -6,13 +6,16 @@ Actualízalo en cada paso importante (y haz commit + push).
 ## Estado actual (2026-10-10)
 - Rama de trabajo: `ccr-4d2f0b52-3ktfkq` (se sube siempre a `origin`).
 - Último APK entregado al usuario: v9 (enderezado con guías de texto, commit e92c03d).
-- En curso: integración v2 (las 4 áreas ya integradas y subidas en `ccr-4d2f0b52-3ktfkq`):
-  - Detección cb97d7e, hojas dobladas 3eaeb99, legibilidad (commit propio), robustez adbcf82.
-  - Pendiente: banco completo `integrado_v2` (en marcha), revisión de fotos del usuario, APK release, REPORT_v2.md, limpieza de worktrees.
+- Ronda v2 INTEGRADA en `ccr-4d2f0b52-3ktfkq` (detección, hojas dobladas, legibilidad, robustez + 3 correcciones de
+  integración: EdgeClean respeta los cantos, renglón fino != raya, cuadrícula tramada en el PDF B/N).
+  - Banco completo `integrado_v2` (1613 imágenes, con OCR): informe en `/tmp/claude-0/bench/REPORT_v2.md`,
+    hojas en `/tmp/claude-0/bench/final_sheets_v2/`.
+  - APK release compilado (app/build/outputs/apk/release/). Pendiente: enviarlo al usuario con el informe (v10).
+  - Worktrees de los agentes eliminados.
 
 ## Peticiones del usuario pendientes
-1. Pintar de blanco las manchas de los bordes que no son texto.
-2. Conservar la cuadrícula/renglones del cuaderno en el resultado (limpia, clara), con interruptor "Conservar cuadrícula / renglones" (por defecto activado).
+1. (HECHO en v2) Pintar de blanco las manchas de los bordes que no son texto.
+2. (HECHO en v2) Conservar la cuadrícula/renglones del cuaderno, con interruptor "Conservar cuadrícula / renglones" (por defecto activado).
 3. Enviar el APK nuevo + informe del banco al terminar la ronda.
 
 ## Banco de pruebas (fuera del repo, sobrevive a reinicios)

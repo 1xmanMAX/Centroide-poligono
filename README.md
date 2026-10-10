@@ -135,6 +135,20 @@ Todo en `imaging/` (OpenCV 4.10, sin red). Tiempos medidos con el harness Python
   DIBCO 2009-2019: F-measure B/N 43 -> 70. Estimaciones a <= 2000 px, render a resolución completa por
   franjas de 1 MP: 12 MP ~1.0-1.3 s y 20 MP ~1.5-1.7 s en PC monohilo. `TextRegions.detect(bitmap)` devuelve los
   recuadros (TEXT/IMAGE) para dibujarlos en la interfaz.
+- **Cuadrícula conservada** (`RulingGrid`, `PageEdits.keepRuling`, interruptor "Conservar cuadrícula / renglones" en
+  Limpieza, activado por defecto): la huella de las rectas de la rejilla se enlaza aunque las letras la corten, se
+  funden los duplicados, se interpolan las líneas que faltan bajo sombras y se prolonga por toda la zona de escritura;
+  se vuelve a dibujar fina y limpia por debajo de la tinta (tono de la propia cuadrícula en *Texto resaltado*, gris
+  claro en *Blanco y negro*), nunca sobre la espiral. En el PDF a 1 bit de B/N los grises claros aislados se traman
+  (`BinaryDither`) para que la cuadrícula no desaparezca.
+- **Bordes a blanco** (`EdgeClean`, *Texto resaltado* y *Blanco y negro*, cuadernos e impresos): lo que queda junto al
+  borde y no es contenido (franjas del canto, manchas macizas, cuñas de esquina, rayas del canto con fondo ajeno entre
+  ellas y el borde, restos rodeados de mesa, motas aisladas y, en cuadernos, lo que queda fuera de la cuadrícula) pasa
+  a blanco. Se conservan las letras cortadas por el borde, los renglones pegados a él (un renglón de letra fina se
+  distingue de una raya porque sus trazos verticales tienen la altura de la letra), los bloques con letras dentro
+  (bocadillos, botones) y, en los lados que son cantos de la hoja (`sheetSides`), todo salvo las franjas finas.
+- **Tinta de color desvaída en B/N** (`Cv.darkenColorStrokes`): los trazos finos rojos o verdes se oscurecen cuando la
+  tinta oscura es neutra y el papel también (sin motas en pósits de color).
 - **Hoja curvada** (`GridDewarp`, `PageEdits.autoDewarp`, tras la perspectiva y antes del filtro): supone que cada
   línea de la tabla/cuadrícula es recta y horizontal o vertical en la hoja real. A ≤ 1600 px: tinta relativa al fondo
   local en el canal mínimo (tinta negra y cuadrícula azul clara por igual), aperturas con segmentos largos a -12°/0°/12°,
