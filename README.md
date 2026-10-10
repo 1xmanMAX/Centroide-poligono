@@ -104,6 +104,17 @@ Todo en `imaging/` (OpenCV 4.10, sin red). Tiempos medidos con el harness Python
   adaptativo para tinta tenue. **Pizarras de tiza / modo oscuro** (`PrintPolarity`: trazos más claros que la mediana
   local frente a más oscuros, ≥ 2.6 en tiza, ≤ 1.2 en papel): se invierte la luminancia antes de procesar y la tiza
   sale como tinta oscura sobre blanco (`TextRegions` tiene además su propia comprobación de polaridad).
+- **Tipo de página y tono de impresos** (`PrintClassifier.pageType`, `PrintTone`, `PrintedPage`): cada página se
+  clasifica como cuaderno, manuscrito, formulario/tabla, recibo (tique alto y estrecho), con imágenes (fotos o tramas
+  interiores >= 6 %, sin contar rellenos negros macizos ni manchas pegadas al borde) o texto impreso. En *Blanco y
+  negro* el gris que se binariza es la **luminancia** en los trazos (la tinta azul, roja o naranja fina queda tan
+  oscura como se ve: recibos de tinta azul, tinta roja desvaída, texto de color de revistas) y la mezcla con el canal
+  máximo sólo en los **bloques** de color (más gruesos que ~0.45 alturas de letra), que siguen saliendo claros; en
+  páginas con imágenes las fotos interiores se conservan en gris. El punto negro se mide sin el **fondo ajeno** del
+  recorte (bandas finas de mesa y fondos oscuros lisos y profundos: un bloque oscuro con texto claro dentro es
+  contenido) y, si ese fondo ocupa > 15 %, el papel y su ruido se vuelven a medir sin él (libro sobre fondo negro sin
+  recorte: el texto ya no sale lavado). La tinta tenue se lleva hacia el negro también en B/N. Con **luz de color**
+  cuyo tono comparte la tinta, *Texto resaltado* apaga el color (la tinta salía verdosa o violeta).
 - **Segmentación de la escritura** (`TextRegions`, filtros *Texto resaltado* y *Blanco y negro* y los antiguos
   que se muestran como ellos): mapa de tinta a resolución completa sobre la imagen sin sombras (oscuridad del canal
   máximo + croma de tinta, que separa el bolígrafo azul de la cuadrícula azul clara); borrado de la rejilla clara

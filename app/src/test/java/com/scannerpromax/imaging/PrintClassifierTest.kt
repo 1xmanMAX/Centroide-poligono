@@ -80,4 +80,44 @@ class PrintClassifierTest {
         assertFalse(PrintPolarity.isInverted(bright = 0.007, dark = 0.002))   // casi vacía
         assertFalse(PrintPolarity.isInverted(bright = 0.02, dark = 0.2))      // papel
     }
+
+    /** Página de texto impreso normal (valores típicos de una carta de RVL-CDIP). */
+    private val page = PrintClassifier.PageFeatures(
+        notebook = false, table = false, denseText = true, linesH = 1, linesV = 0, textComps = 1500, boxes = 1400,
+        align = 0.7, letterRel = 0.008, inkFrac = 0.06, pictureFrac = 0.0, aspect = 1.3,
+    )
+
+    @Test
+    fun plainPrintedPageIsText() = assertEquals(PrintClassifier.PageType.TEXT, PrintClassifier.pageType(page))
+
+    @Test
+    fun notebookWins() = assertEquals(PrintClassifier.PageType.NOTEBOOK, PrintClassifier.pageType(page.copy(notebook = true)))
+
+    @Test
+    fun largeInteriorPictureMakesIllustratedPage() =
+        assertEquals(PrintClassifier.PageType.ILLUSTRATED, PrintClassifier.pageType(page.copy(pictureFrac = 0.2)))
+
+    @Test
+    fun scatteredUnalignedStrokesAreHandwriting() = assertEquals(
+        PrintClassifier.PageType.HANDWRITTEN,
+        PrintClassifier.pageType(page.copy(denseText = false, align = 0.15, boxes = 400)),
+    )
+
+    @Test
+    fun handwritingInsideATableIsForm() = assertEquals(
+        PrintClassifier.PageType.FORM,
+        PrintClassifier.pageType(page.copy(denseText = false, align = 0.15, boxes = 400, table = true)),
+    )
+
+    @Test
+    fun manyRulesMakeForm() {
+        assertEquals(PrintClassifier.PageType.FORM, PrintClassifier.pageType(page.copy(linesH = 8, linesV = 2)))
+        assertEquals(PrintClassifier.PageType.FORM, PrintClassifier.pageType(page.copy(linesH = 12, linesV = 0)))
+    }
+
+    @Test
+    fun tallNarrowPageIsReceiptButWideStripIsNot() {
+        assertEquals(PrintClassifier.PageType.RECEIPT, PrintClassifier.pageType(page.copy(aspect = 3.0)))
+        assertEquals(PrintClassifier.PageType.TEXT, PrintClassifier.pageType(page.copy(aspect = 1.0 / 3.0)))
+    }
 }

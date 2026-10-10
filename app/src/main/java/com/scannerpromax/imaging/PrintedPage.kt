@@ -61,9 +61,15 @@ internal object PrintedPage {
         val colorGrid: Boolean,
         val notebook: Boolean = !printed,
         val align: Double = 0.0,
+        /** Tipo de página ([PrintClassifier.pageType]). */
+        val type: PrintClassifier.PageType = if (printed) PrintClassifier.PageType.TEXT else PrintClassifier.PageType.NOTEBOOK,
+        /** Fracción de la página ocupada por fotos, tramas, rellenos oscuros o bloques de color. */
+        val pictureFrac: Double = 0.0,
+        /** Recuadros (x0, y0, x1, y1 relativos) de fotos / tramas interiores (en B/N se conservan en gris si [type] es ILLUSTRATED). */
+        val pictures: List<DoubleArray> = emptyList(),
     ) {
         /** Las mismas estadísticas para la imagen ampliada [k] veces (super-resolución previa al render). */
-        fun scaled(k: Double) = Stats(printed, linesH, linesV, textComps, letterHeight * k, colorGrid, notebook, align)
+        fun scaled(k: Double) = Stats(printed, linesH, linesV, textComps, letterHeight * k, colorGrid, notebook, align, type, pictureFrac, pictures)
     }
 
     /**
@@ -143,9 +149,131 @@ internal object PrintedPage {
             rulingThick = lowThick, align = align, table = table && !colorGrid, denseText = text,
         ))
         val printed = !notebook
-        log?.invoke("printed=$printed notebook=$notebook llh=$llh llv=$llv lowChroma=%.1f lowDark=%.1f lowThick=%.2f align=%.2f ".format(lowChroma, lowDark, lowThick, align) + "lines H=$lh V=$lv lineChroma=%.1f (papel %.1f) dark=%.0f comps=${hs.size} med=%.1f iqr=%.2f noise=%.1f table=$table text=$text".format(lineChroma, paperChroma, lineDark, med, iqr, noise))
-        Stats(printed, lh, lv, hs.size, med / s, colorGrid, notebook, align)
+        val inkFrac = Core.countNonZero(ink) / max(1.0, ink.total().toDouble())
+        val (rh, rv) = countRules(d, lineThr, side, bag)
+        val pics = pictureFraction(d, chroma, paperChroma, bag)
+        val picture = pics.inner
+        val pf = PrintClassifier.PageFeatures(
+            notebook = notebook, table = table && !colorGrid, denseText = text, linesH = rh, linesV = rv,
+            textComps = hs.size, boxes = nb, align = align, letterRel = med / side, inkFrac = inkFrac,
+            pictureFrac = picture, aspect = rgb.rows().toDouble() / max(1, rgb.cols()),
+        )
+        val type = PrintClassifier.pageType(pf)
+        log?.invoke("printed=$printed type=$type notebook=$notebook llh=$llh llv=$llv lowChroma=%.1f lowDark=%.1f lowThick=%.2f align=%.2f ".format(lowChroma, lowDark, lowThick, align) + "lines H=$lh V=$lv lineChroma=%.1f (papel %.1f) dark=%.0f comps=${hs.size} boxes=$nb med=%.1f iqr=%.2f noise=%.1f table=$table text=$text ink=%.4f pic=%.3f picAll=%.3f nPic=${pics.rects.size} aspect=%.2f rh=$rh rv=$rv".format(lineChroma, paperChroma, lineDark, med, iqr, noise, inkFrac, picture, pics.frac, pf.aspect))
+        Stats(printed, lh, lv, hs.size, med / s, colorGrid, notebook, align, type, picture, pics.rects)
     }
+
+    /**
+     * Fracción de la página ocupada por IMÁGENES (fotos, tramas de semitono, rellenos oscuros, bloques de color) a
+     * ~[PICTURE_SIDE] px: allí la oscuridad media en ventanas de ~2 % del lado es alta (el texto, aunque sea denso,
+     * deja mucho papel entre letras: 10-35 %) o el croma es alto en bloque. Sólo cuentan las zonas grandes
+     * (>= 0.4 % de la página), no los titulares ni los logos pequeños.
+     */
+    private fun pictureFraction(d: Mat, chroma: Mat, paperChroma: Double, bag: MatBag): Pictures {
+        val q = bag.mat(); Cv.downscale(d, q, PICTURE_SIDE)
+        val solid = bag.mat(); Core.compare(q, Scalar(PICTURE_SOLID), solid, Core.CMP_GT)   // casi negro macizo
+        val k = Cv.odd(max(3, (max(q.cols(), q.rows()) * 0.02).roundToInt()))
+        Imgproc.blur(q, q, Size(k.toDouble(), k.toDouble()))
+        val m = bag.mat(); Core.compare(q, Scalar(PICTURE_DARK), m, Core.CMP_GT)
+        val c = bag.mat(); Cv.downscale(chroma, c, PICTURE_SIDE)
+        Imgproc.blur(c, c, Size(k.toDouble(), k.toDouble()))
+        val cm = bag.mat(); Core.compare(c, Scalar(paperChroma + PICTURE_CHROMA), cm, Core.CMP_GT)
+        Core.bitwise_or(m, cm, m)
+        Imgproc.morphologyEx(m, m, Imgproc.MORPH_OPEN, Cv.kernel(Imgproc.MORPH_RECT, 3))
+        val labels = bag.mat(); val stats = bag.mat(); val cents = bag.mat()
+        val nc = Imgproc.connectedComponentsWithStats(m, labels, stats, cents, 8, CvType.CV_32S)
+        val st = IntArray(max(0, nc) * 5); if (nc > 0) stats.get(0, 0, st)
+        val total = max(1.0, m.total().toDouble())
+        val w = m.cols(); val h = m.rows()
+        var area = 0.0; var inner = 0.0
+        val rects = ArrayList<DoubleArray>()
+        for (i in 1 until nc) {
+            val a = st[i * 5 + 4]; if (a < 0.004 * total) continue
+            val x = st[i * 5]; val y = st[i * 5 + 1]; val bw = st[i * 5 + 2]; val bh = st[i * 5 + 3]
+            // Relleno negro macizo (tachón, banda, recuadro de un nombre censurado): no es una imagen
+            val lr = labels.submat(y, y + bh, x, x + bw); val cmk = bag.mat(); Core.compare(lr, Scalar(i.toDouble()), cmk, Core.CMP_EQ); lr.release()
+            val sr = solid.submat(y, y + bh, x, x + bw); val solidFrac = Core.mean(sr, cmk).`val`[0] / 255.0; sr.release(); cmk.release()
+            if (solidFrac > PrintTone.PICTURE_MAX_SOLID) continue
+            area += a
+            // Las que tocan el borde suelen ser mesa o fondo que el recorte dejó dentro (o una foto a sangre)
+            if (x <= 1 || y <= 1 || x + bw >= w - 1 || y + bh >= h - 1) continue
+            inner += a
+            if (a >= PrintTone.PICTURE_KEEP_MIN * total && a >= PrintTone.PICTURE_KEEP_FILL * bw * bh)
+                rects.add(doubleArrayOf(x.toDouble() / w, y.toDouble() / h, (x + bw).toDouble() / w, (y + bh).toDouble() / h))
+        }
+        return Pictures(area / total, inner / total, rects)
+    }
+
+    /**
+     * Página CON IMÁGENES (anuncio, revista): sus fotos y tramas interiores se conservan en gris en B/N (binarizadas
+     * quedaban como un moteado ilegible). Sólo en ese tipo de página: en un impreso normal no se toca nada.
+     */
+    private fun pictureBlocks(st: Stats, ow: Int, oh: Int): List<Rect> =
+        if (st.type != PrintClassifier.PageType.ILLUSTRATED) emptyList()
+        else st.pictures.map { r ->
+            Cv.clampRect(Rect((r[0] * ow).toInt(), (r[1] * oh).toInt(), ((r[2] - r[0]) * ow).roundToInt(), ((r[3] - r[1]) * oh).roundToInt()), ow, oh)
+        }.filter { it.width > 0 && it.height > 0 }
+
+    /**
+     * Dominante de color de la LUZ que también tiñe la tinta: (croma de la luz, coseno entre el tono de la luz y
+     * el tono medio de la tinta) en Lab. Luz = fondo estimado [bg]; tinta = píxeles oscuros de la imagen
+     * normalizada [smN] (bajo el [white] - 60). Bolígrafo azul sobre papel amarillo: tonos opuestos (coseno < 0).
+     */
+    private fun colorCast(bg: Mat, smN: Mat, white: Double, bag: MatBag): DoubleArray {
+        val bs = bag.mat(); Cv.downscale(bg, bs, 128)
+        val lab = bag.mat(); Imgproc.cvtColor(bs, lab, Imgproc.COLOR_RGB2Lab)
+        val lm = Core.mean(lab).`val`
+        val la = lm[1] - 128.0; val lb = lm[2] - 128.0
+        val lc = sqrt(la * la + lb * lb)
+        val g = bag.add(Cv.gray(smN))
+        val ink = bag.mat(); Core.compare(g, Scalar(white - 60.0), ink, Core.CMP_LT)
+        if (Core.countNonZero(ink) < 0.002 * ink.total()) return doubleArrayOf(lc, 0.0)
+        val nl = bag.mat(); Imgproc.cvtColor(smN, nl, Imgproc.COLOR_RGB2Lab)
+        val im = Core.mean(nl, ink).`val`
+        val ia = im[1] - 128.0; val ib = im[2] - 128.0
+        val ic = sqrt(ia * ia + ib * ib)
+        val cos = if (lc < 1e-6 || ic < 1e-6) 0.0 else (la * ia + lb * ib) / (lc * ic)
+        return doubleArrayOf(lc, cos)
+    }
+
+    /** Imágenes de la página: fracción total, fracción sin las que tocan el borde y recuadros (relativos) interiores. */
+    class Pictures(val frac: Double, val inner: Double, val rects: List<DoubleArray>)
+
+    /**
+     * Filetes y líneas de formulario (rectas impresas finas y largas, >= 1/8 del lado), horizontales y verticales,
+     * sobre la máscara de tinta SIN dilatar: un renglón de texto tiene huecos entre letras y palabras y no
+     * sobrevive a la apertura (en [countLines], pensado para cuadrículas tenues, sí puede contar). Grosor <= 4 px.
+     */
+    private fun countRules(d: Mat, thr: Double, side: Double, bag: MatBag): Pair<Int, Int> {
+        val m = bag.mat(); Core.compare(d, Scalar(thr), m, Core.CMP_GT)
+        val len = Cv.odd(max(25, (side / 8).roundToInt()))
+        val maxThick = max(4.0, side * 0.004)
+        val out = IntArray(2)
+        val acc = bag.mat(); val tmp = bag.mat()
+        val labels = bag.mat(); val stats = bag.mat(); val cents = bag.mat()
+        for ((i, vertical) in booleanArrayOf(false, true).withIndex()) {
+            acc.create(m.size(), CvType.CV_8UC1); acc.setTo(Scalar(0.0))
+            for (deg in intArrayOf(-1, 0, 1)) {
+                val k = lineKernel(len, deg + if (vertical) 90 else 0)
+                Imgproc.morphologyEx(m, tmp, Imgproc.MORPH_OPEN, k); k.release()
+                Core.bitwise_or(acc, tmp, acc)
+            }
+            val nc = Imgproc.connectedComponentsWithStats(acc, labels, stats, cents, 8, CvType.CV_32S)
+            val st = IntArray(max(0, nc) * 5); if (nc > 0) stats.get(0, 0, st)
+            var cnt = 0
+            for (c in 1 until nc) {
+                val ext = if (vertical) st[c * 5 + 3] else st[c * 5 + 2]
+                if (ext >= len && st[c * 5 + 4].toDouble() / max(1, ext) <= maxThick) cnt++
+            }
+            out[i] = cnt
+        }
+        return out[0] to out[1]
+    }
+
+    private const val PICTURE_SIDE = 300
+    private const val PICTURE_DARK = 90.0
+    private const val PICTURE_SOLID = 190.0
+    private const val PICTURE_CHROMA = 40.0
 
     /** Rectas largas (>= 1/12 del lado) y finas en [d] > [thr], horizontales y verticales (±4°). */
     private fun countLines(d: Mat, thr: Double, side: Double, bag: MatBag, accepted: Mat, extent: DoubleArray? = null): Pair<Int, Int> {
@@ -209,14 +337,26 @@ internal object PrintedPage {
         }
         val g0 = bag.add(Cv.gray(smN))
         val hist = Cv.histogram(g0)
-        val (noise, pm0) = Cv.paperStats(hist)
-        val pm = max(pm0, 1.0)
+        var (noise, pm0) = Cv.paperStats(hist)
+        var pm = max(pm0, 1.0)
+        // Fondo que el recorte dejó dentro (mesa, hueco oscuro entre hojas, en los bordes): manchas oscuras, gruesas
+        // y pegadas al borde de la imagen -> blanco (si no, en B/N quedan como manchas negras)
+        // (en los lados recortados por los cantos de la hoja no hay mesa: lo pegado a ellos es contenido)
+        var outside = if (sheetSides == 15) null else outsideMask(smN, pm, bag, sheetSides)
+        if (outside != null && Core.countNonZero(outside) > PrintTone.OUTSIDE_RESTAT_FRAC * outside.total()) {
+            // Mucho fondo ajeno (libro sobre una mesa negra sin recorte): el papel y su ruido se miden sin él (con
+            // él, la mitad oscura de la imagen pasaba por papel, el blanco quedaba bajo y el texto, lavado)
+            val (n2, p2) = Cv.paperStats(Cv.histogram(g0, notMask(outside, bag)))
+            if (p2 > pm) { noise = n2; pm = max(p2, 1.0); outside = outsideMask(smN, pm, bag, sheetSides) ?: outside }
+        }
         val white = (pm - 2.5 * noise).coerceIn(170.0, 250.0)
-        // Punto negro: lo más oscuro de la página (0.3 %)... salvo que TODA la tinta sea tenue (recibo térmico
-        // desvaído, lápiz, fotocopia clara): en COLOR el trazo típico se lleva casi a negro (ver [faintBlack]).
-        // En B/N no hace falta (la binarización local ya separa la tinta tenue) y empeoraba la lectura OCR.
-        val darkest = min(Cv.percentile(hist, 0.003), 100) * 0.85
-        val black = if (color) faintBlack(maxChannel(smN, bag), st.letterHeight * g0.cols() / w, white, darkest, noise, bag) else darkest
+        // Punto negro: lo más oscuro de la HOJA (0.3 %, sin el fondo ajeno del recorte, que fijaba el negro en la
+        // mesa y dejaba toda la tinta gris)... salvo que TODA la tinta sea tenue (recibo térmico desvaído, foto
+        // borrosa, lápiz, fotocopia clara): el trazo típico se lleva hacia el negro (ver [faintBlack]). En B/N
+        // también: sin ello la binarización local (umbral ~0.8 de la media local con poco contraste) partía o
+        // borraba los trazos grises.
+        val darkest = min(Cv.percentile(if (outside == null) hist else Cv.histogram(g0, notMask(outside, bag)), 0.003), 100) * 0.85
+        val black = faintBlack(maxChannel(smN, bag), st.letterHeight * g0.cols() / w, white, darkest, noise, bag, if (color) FAINT_TARGET_COLOR else FAINT_TARGET_BW, 0.9)
         // Ampliación para letra pequeña (sólo render final; dentro del límite de píxeles)
         var f = 1.0
         if (!fast && st.letterHeight > 0 && st.letterHeight < SMALL_LETTER) {
@@ -229,11 +369,7 @@ internal object PrintedPage {
         val oh = if (f > 1.0) (h * f).roundToInt() else h
         val lh = max(4.0, if (st.letterHeight > 0) st.letterHeight * f else oh / 250.0)
         // Bloques de imagen (logos, fotos: compactos y de color) -> en B/N se conservan en gris
-        val images = if (color) emptyList() else findImageBlocks(smN, ow, oh, bag)
-        // Fondo que el recorte dejó dentro (mesa, hueco oscuro entre hojas, en los bordes): manchas oscuras, gruesas
-        // y pegadas al borde de la imagen -> blanco (si no, en B/N quedan como manchas negras)
-        // (en los lados recortados por los cantos de la hoja no hay mesa: lo pegado a ellos es contenido)
-        val outside = if (sheetSides == 15) null else outsideMask(smN, pm, bag, sheetSides)
+        val images = if (color) emptyList() else findImageBlocks(smN, ow, oh, bag) + pictureBlocks(st, ow, oh)
         val outsideFull = if (outside == null) null else bag.mat().also { Imgproc.resize(outside, it, Size(ow.toDouble(), oh.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR) }
         // Sombras: la división por el fondo amplifica el ruido del papel (ganancia g) -> el punto blanco local baja
         // con el ruido local (σ·g^0.85) para que el papel en sombra quede igual de blanco que el iluminado. Se
@@ -256,7 +392,11 @@ internal object PrintedPage {
         val liftOn = Core.minMaxLoc(lift).maxVal > 1.005
         val out = Mat(oh, ow, if (color) CvType.CV_8UC3 else CvType.CV_8UC1, Scalar.all(255.0))
         val levels = Cv.levelsLut(black, white, if (color) 1.25 else 1.0)
-        val satLut = Cv.lut { v -> when { v < 18 -> v * 0.4; v < 40 -> { val t = (v - 18) / 22.0; v * (0.4 + t * (1.3 - 0.4)) }; else -> min(255.0, v * 1.3) } }
+        // Luz de color (lámpara cálida, pantalla, foto con dominante): la tinta toma el tono de la luz y el color
+        // reforzado la dejaba azulada o verdosa (y los textos claros sobre barras oscuras, invisibles) -> en COLOR
+        // se apaga el color si la tinta tiene el mismo tono que la luz
+        val satK = if (color) PrintTone.castSaturation(colorCast(bg, smN, white, bag)) else 1.0
+        val satLut = Cv.lut { v -> satK * when { v < 18 -> v * 0.4; v < 40 -> { val t = (v - 18) / 22.0; v * (0.4 + t * (1.3 - 0.4)) }; else -> min(255.0, v * 1.3) } }
         // Ventana de la binarización local: ~2.5 alturas de letra (impar)
         val win = Cv.odd((2.5 * lh).roundToInt().coerceIn(15, 151))
         val sharpSigma = max(0.7, lh * 0.06)
@@ -299,18 +439,11 @@ internal object PrintedPage {
                 work = big; oy = (sy0 * f).roundToInt()
             } else { work = nS; oy = sy0 }
             val a0 = (y0 - oy).coerceIn(0, work.rows()); val a1 = (y1 - oy).coerceIn(a0, work.rows())
-            val res = if (color) colorStrip(work, levels, satLut, sharpSigma, noise, bag) else bwStrip(work, levels, win, sharpSigma, noise, bag)
+            val res = if (color) colorStrip(work, levels, satLut, sharpSigma, noise, bag) else bwStrip(work, levels, win, sharpSigma, noise, lh, bag)
             val src = res.submat(a0, a1, 0, ow)
             val dst = out.submat(y0, y0 + (a1 - a0), 0, ow)
             src.copyTo(dst); src.release(); dst.release()
             // Bloques de imagen dentro de la franja: niveles en gris del normalizado (sin binarizar)
-            if (outsideFull != null && a1 > a0) {
-                val oRoi = outsideFull.submat(y0, y0 + (a1 - a0), 0, ow)
-                val dRoi = out.submat(y0, y0 + (a1 - a0), 0, ow)
-                val m = bag.mat(); Imgproc.threshold(oRoi, m, 127.0, 255.0, Imgproc.THRESH_BINARY)
-                dRoi.setTo(Scalar.all(255.0), m)
-                oRoi.release(); dRoi.release(); m.release()
-            }
             for (b in images) {
                 val iy0 = max(b.y, y0); val iy1 = min(b.y + b.height, y0 + (a1 - a0))
                 if (iy1 <= iy0) continue
@@ -319,12 +452,20 @@ internal object PrintedPage {
                 val o = out.submat(iy0, iy1, b.x, b.x + b.width)
                 Core.LUT(gg, levels, o); o.release()
             }
+            // Fondo ajeno -> blanco (después de los bloques de imagen: un relleno oscuro de la mesa no es un logo)
+            if (outsideFull != null && a1 > a0) {
+                val oRoi = outsideFull.submat(y0, y0 + (a1 - a0), 0, ow)
+                val dRoi = out.submat(y0, y0 + (a1 - a0), 0, ow)
+                val m = bag.mat(); Imgproc.threshold(oRoi, m, 127.0, 255.0, Imgproc.THRESH_BINARY)
+                dRoi.setTo(Scalar.all(255.0), m)
+                oRoi.release(); dRoi.release(); m.release()
+            }
             res.release()
             if (a1 <= a0) break
             y0 += (a1 - a0)
         }
         levels.release(); satLut.release(); tmp.release()
-        log?.invoke("render ${style} ${w}x$h -> ${ow}x$oh f=%.2f lh=%.1f win=$win black=%.0f white=%.0f noise=%.1f images=${images.size}".format(f, lh, black, white, noise))
+        log?.invoke("render ${style} ${w}x$h -> ${ow}x$oh f=%.2f lh=%.1f win=$win black=%.0f white=%.0f noise=%.1f images=${images.size} satK=%.2f".format(f, lh, black, white, noise, satK))
         out
     }
 
@@ -336,7 +477,7 @@ internal object PrintedPage {
      * cambian), el negro sube hasta que ese trazo típico quede al 15 % del blanco. En una página con tinta oscura
      * (aunque tenga transparencia del reverso o manchas tenues) el percentil 90 es alto y no cambia nada.
      */
-    private fun faintBlack(v: Mat, letter: Double, white: Double, black: Double, noise: Double, bag: MatBag): Double {
+    private fun faintBlack(v: Mat, letter: Double, white: Double, black: Double, noise: Double, bag: MatBag, target: Double, pct: Double): Double {
         val side = max(v.cols(), v.rows())
         val lhS = if (letter > 0) letter else side / 250.0
         val k = Cv.odd((2.5 * lhS).roundToInt().coerceIn(5, 61))
@@ -345,10 +486,19 @@ internal object PrintedPage {
         val hist = Cv.histogram(bh)
         val strokes = DoubleArray(256) { if (it >= minC) hist[it] else 0.0 }
         if (strokes.sum() < 0.002 * v.total()) return black
-        val c90 = Cv.percentile(strokes, 0.9).toDouble()
-        val faint = white - c90 / 0.85
-        return if (faint > black) min(faint, white - 60.0) else black
+        val c90 = Cv.percentile(strokes, pct).toDouble()
+        return PrintTone.faintBlack(c90, white, black, target)
     }
+
+    private fun notMask(m: Mat, bag: MatBag): Mat { val r = bag.mat(); Core.bitwise_not(m, r); return r }
+
+    /**
+     * Fracción del blanco a la que queda el trazo típico de una página tenue. En B/N menos agresivo (0.25): con
+     * 0.15 la transparencia del reverso de un manuscrito antiguo se oscurecía y se binarizaba como texto; con 0.4
+     * los recibos térmicos fotografiados perdían letras.
+     */
+    private const val FAINT_TARGET_COLOR = 0.15
+    private const val FAINT_TARGET_BW = 0.25
 
     /** Canal máximo (V) de un RGB: los fondos de color claros (sombreados azules, naranjas) apenas lo oscurecen. */
     private fun maxChannel(rgb: Mat, bag: MatBag): Mat {
@@ -381,15 +531,38 @@ internal object PrintedPage {
      * [win] px; salida = rampa suave de ±[RAMP] niveles alrededor de T (bordes anti-aliasing); muy oscuro -> negro,
      * casi papel -> blanco. Devuelve Mat 8UC1 nuevo.
      */
-    private fun bwStrip(n: Mat, levels: Mat, win: Int, sigma: Double, noise: Double, bag: MatBag): Mat {
-        // Gris = media de la luminancia y del canal máximo: los fondos de COLOR (barra naranja, columna azul) quedan
-        // claros y se separan bien del texto; la tinta de color (roja, azul) sigue oscura respecto del papel
+    private fun bwStrip(n: Mat, levels: Mat, win: Int, sigma: Double, noise: Double, lh: Double, bag: MatBag): Mat {
+        // Gris: la LUMINANCIA para los trazos (la tinta azul, roja o naranja fina queda tan oscura como se ve) y la
+        // media de luminancia y canal máximo sólo en los BLOQUES de color (barra naranja, columna azul sombreada,
+        // más gruesos que un trazo: sobreviven a una apertura de ~0.45 alturas de letra), que así quedan claros y
+        // se separan bien del texto. Con el canal máximo también en los trazos, el bolígrafo azul tenue y el texto
+        // de color de las revistas se partían o desaparecían en B/N.
         val g = bag.add(Cv.gray(n))
         val ch = ArrayList<Mat>(3); Core.split(n, ch)
         val v = bag.mat(); Core.max(ch[0], ch[1], v); Core.max(v, ch[2], v)
+        val mn = bag.mat(); Core.min(ch[0], ch[1], mn); Core.min(mn, ch[2], mn)
         for (c in ch) c.release()
-        Core.addWeighted(g, 0.5, v, 0.5, 0.0, g)
-        v.release()
+        val blk = bag.mat()
+        Core.subtract(v, mn, blk)                                    // croma (max - min)
+        Imgproc.threshold(blk, blk, PrintTone.BLOCK_CHROMA, 255.0, Imgproc.THRESH_BINARY)
+        val ok = Cv.odd(max(3, (lh * PrintTone.BLOCK_MIN_LH).roundToInt()))
+        // Rayado de color (renglones rojos o azules de una hoja que no se reconoció como cuaderno, cuadrícula):
+        // trazos de color FINOS pero rectos y LARGOS (>= ~4 alturas de letra) -> como los bloques, claros
+        val thin = bag.mat(); blk.copyTo(thin)
+        Imgproc.morphologyEx(blk, blk, Imgproc.MORPH_OPEN, Cv.kernel(Imgproc.MORPH_ELLIPSE, ok))
+        val rl = Cv.odd(max(15, (lh * PrintTone.RULE_MIN_LH).roundToInt()))
+        val rule = bag.mat()
+        Imgproc.morphologyEx(thin, rule, Imgproc.MORPH_OPEN, Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(rl.toDouble(), 1.0)))
+        Core.bitwise_or(blk, rule, blk)
+        Imgproc.morphologyEx(thin, rule, Imgproc.MORPH_OPEN, Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(1.0, rl.toDouble())))
+        Core.bitwise_or(blk, rule, blk)
+        thin.release(); rule.release()
+        val mix = bag.mat(); Core.addWeighted(g, 0.5, v, 0.5, 0.0, mix)
+        if (Core.countNonZero(blk) > 0) {
+            Imgproc.dilate(blk, blk, Cv.kernel(Imgproc.MORPH_ELLIPSE, 3))
+            mix.copyTo(g, blk)
+        }
+        v.release(); mn.release(); blk.release(); mix.release()
         Core.LUT(g, levels, g)
         // Ruido del sensor: suavizado leve antes de umbralizar (sin motas en los fondos sombreados)
         Imgproc.GaussianBlur(g, g, Size(0.0, 0.0), 0.6)
@@ -442,6 +615,24 @@ internal object PrintedPage {
         }
         if (!any) return null
         val lab = IntArray(w * h); labels.get(0, 0, lab)
+        // Profundidad de cada mancha de borde (mayor distancia al borde de la imagen): sólo bandas y cuñas finas
+        val depth = IntArray(nc)
+        for (yy in 0 until h) {
+            val dy = min(yy, h - 1 - yy); val row = yy * w
+            for (xx in 0 until w) {
+                val l = lab[row + xx]
+                if (l > 0 && keep[l]) { val dd = min(dy, min(xx, w - 1 - xx)); if (dd > depth[l]) depth[l] = dd }
+            }
+        }
+        any = false
+        for (c in 1 until nc) if (keep[c]) {
+            // Mancha profunda: fondo ajeno sólo si es lisa (mesa, tela, fondo negro de estudio). Un bloque oscuro de
+            // contenido (anuncio en negativo, foto a sangre) lleva texto claro o detalles dentro: muchos huecos pequeños
+            keep[c] = PrintTone.isOutsideBand(0, depth[c], w, h) ||
+                PrintTone.isPlainBackground(smallHoleFraction(labels, c, st, w, h, bag))
+            any = any || keep[c]
+        }
+        if (!any) return null
         val b = ByteArray(w * h)
         for (i in lab.indices) if (keep[lab[i]] && lab[i] > 0) b[i] = -1
         val out = bag.mat(); out.create(h, w, CvType.CV_8UC1); out.put(0, 0, b)
@@ -453,6 +644,28 @@ internal object PrintedPage {
         // margen
         Imgproc.dilate(out, out, Cv.kernel(Imgproc.MORPH_ELLIPSE, Cv.odd(max(3, (side * 0.004).roundToInt()))))
         return out
+    }
+
+    /**
+     * Huecos PEQUEÑOS (< 1 % de la imagen: letras claras, detalles) de la componente [c] de [labels], en fracción
+     * del área de la componente. Los huecos grandes (la hoja rodeada por la mesa) no cuentan.
+     */
+    private fun smallHoleFraction(labels: Mat, c: Int, st: IntArray, w: Int, h: Int, bag: MatBag): Double {
+        val x = st[c * 5]; val y = st[c * 5 + 1]; val bw = st[c * 5 + 2]; val bh = st[c * 5 + 3]; val area = st[c * 5 + 4]
+        val roi = labels.submat(y, y + bh, x, x + bw)
+        val cm = bag.mat(); Core.compare(roi, Scalar(c.toDouble()), cm, Core.CMP_NE); roi.release()   // no-componente
+        val pad = bag.mat(); Core.copyMakeBorder(cm, pad, 1, 1, 1, 1, Core.BORDER_CONSTANT, Scalar(255.0))
+        val l2 = bag.mat(); val s2 = bag.mat(); val c2 = bag.mat()
+        val n2 = Imgproc.connectedComponentsWithStats(pad, l2, s2, c2, 4, CvType.CV_32S)
+        val ss = IntArray(max(0, n2) * 5); if (n2 > 0) s2.get(0, 0, ss)
+        val maxHole = 0.01 * w * h
+        var holes = 0.0
+        for (i in 1 until n2) {
+            val hx = ss[i * 5]; val hy = ss[i * 5 + 1]; val hw = ss[i * 5 + 2]; val hh = ss[i * 5 + 3]; val ha = ss[i * 5 + 4]
+            if (hx == 0 || hy == 0 || hx + hw >= pad.cols() || hy + hh >= pad.rows()) continue   // exterior
+            if (ha < maxHole) holes += ha
+        }
+        return holes / max(1, area)
     }
 
     private const val SAUVOLA_K = 0.22

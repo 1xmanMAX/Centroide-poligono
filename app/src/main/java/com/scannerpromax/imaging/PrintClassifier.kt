@@ -60,6 +60,61 @@ internal object PrintClassifier {
         return light && f.rulingThick <= RULING_MAX_THICK && f.align < MAX_ALIGN
     }
 
+    /** Tipo de página (decide detalles del render y se muestra como clase del contenido). */
+    enum class PageType(val label: String) {
+        NOTEBOOK("Cuaderno"),
+        HANDWRITTEN("Manuscrito"),
+        FORM("Formulario o tabla"),
+        RECEIPT("Recibo o factura"),
+        ILLUSTRATED("Con imágenes"),
+        TEXT("Texto impreso"),
+    }
+
+    data class PageFeatures(
+        val notebook: Boolean,      // [isNotebook]
+        val table: Boolean,         // rectas oscuras largas en ambas direcciones
+        val denseText: Boolean,     // mucho texto pequeño y regular
+        val linesH: Int,            // rectas oscuras largas horizontales
+        val linesV: Int,            // ... verticales
+        val textComps: Int,         // componentes del tamaño de una letra
+        val boxes: Int,             // componentes para la alineación de líneas base
+        val align: Double,          // [baselineAlignment]
+        val letterRel: Double,      // altura de letra típica / lado largo
+        val inkFrac: Double,        // fracción de tinta oscura
+        val pictureFrac: Double,    // fracción de fotos / tramas / rellenos / bloques de color
+        val aspect: Double,         // alto / ancho (un tique es alto y estrecho; una tira apaisada no)
+    )
+
+    const val PICTURE_MIN = 0.06
+    const val HW_MAX_ALIGN = 0.30
+    const val HW_MIN_ALIGN = 0.03
+    const val HW_MIN_BOXES = 100
+    const val HW_MAX_RULES_V = 3
+    const val FORM_MIN_H = 6
+    const val FORM_MIN_H_ALONE = 10
+    const val RECEIPT_MIN_ASPECT = 2.0
+
+    /**
+     * Tipo de página (puro). En la duda, TEXT (render de impresos sin ajustes especiales). Orden:
+     *  - cuaderno con rayado claro ([isNotebook]);
+     *  - con imágenes: fotos, tramas o rellenos grandes (>= [PICTURE_MIN] de la página);
+     *  - manuscrito: muchas componentes sin la alineación de líneas base de la letra impresa, sin texto impreso
+     *    denso y sin filetes verticales de tabla (los renglones de una carta rayada sí se admiten);
+     *  - formulario o tabla: rectas oscuras largas en ambas direcciones, o filetes horizontales con alguno
+     *    vertical, o muchos filetes horizontales (líneas para rellenar);
+     *  - recibo: tique alto y estrecho (alto >= [RECEIPT_MIN_ASPECT] x ancho);
+     *  - texto impreso.
+     */
+    fun pageType(f: PageFeatures): PageType = when {
+        f.notebook -> PageType.NOTEBOOK
+        f.pictureFrac >= PICTURE_MIN -> PageType.ILLUSTRATED
+        !f.denseText && f.boxes >= HW_MIN_BOXES && f.align < HW_MAX_ALIGN && f.align >= HW_MIN_ALIGN &&
+            f.linesV <= HW_MAX_RULES_V && !f.table -> PageType.HANDWRITTEN
+        f.table || (f.linesH >= FORM_MIN_H && f.linesV >= 1) || f.linesH >= FORM_MIN_H_ALONE -> PageType.FORM
+        f.aspect >= RECEIPT_MIN_ASPECT -> PageType.RECEIPT
+        else -> PageType.TEXT
+    }
+
     /**
      * Alineación de líneas base: fracción de componentes (x, y, w, h por fila en [boxes], 4 enteros cada una) que
      * tienen a su derecha, a menos de ~1 altura de letra [letter], otra de tamaño parecido cuyo borde inferior
