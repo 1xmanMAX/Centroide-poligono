@@ -5,7 +5,7 @@ Actualízalo en cada paso importante (y haz commit + push).
 
 ## Estado actual (2026-10-10)
 - Rama de trabajo: `ccr-4d2f0b52-3ktfkq` (se sube siempre a `origin`).
-- Último APK entregado al usuario: v10 (ronda v2 integrada, commit df776c4). Sin tareas en curso; pendiente el feedback del usuario con la v10.
+- Último APK entregado al usuario: v10 (ronda v2 integrada, commit df776c4). En curso (2026-10-11): ronda v3 — (1) sombras tratadas por zona, (2) zonas alejadas borrosas/desenfoque por movimiento. Fotos de prueba: fotos-usuario/colores_sombra1..3.jpg (tintas de colores + sombra de mano). Workflow "escaner-sombras-desenfoque"; notas en /tmp/claude-0/bench/notes_sombras.md y notes_desenfoque.md.
 - Ronda v2 INTEGRADA en `ccr-4d2f0b52-3ktfkq` (detección, hojas dobladas, legibilidad, robustez + 3 correcciones de
   integración: EdgeClean respeta los cantos, renglón fino != raya, cuadrícula tramada en el PDF B/N).
   - Banco completo `integrado_v2` (1613 imágenes, con OCR): informe en `/tmp/claude-0/bench/REPORT_v2.md`,
