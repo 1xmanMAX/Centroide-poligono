@@ -6,7 +6,7 @@ Actualízalo en cada paso importante (y haz commit + push).
 ## Estado actual (2026-10-10)
 - Rama de trabajo: `ccr-4d2f0b52-3ktfkq` (se sube siempre a `origin`).
 - Último APK entregado al usuario: v10 (ronda v2 integrada, commit df776c4). En curso (2026-10-11): ronda v3 — (1) sombras tratadas por zona, (2) zonas alejadas borrosas/desenfoque por movimiento. Fotos de prueba: fotos-usuario/colores_sombra1..3.jpg (tintas de colores + sombra de mano). Workflow "escaner-sombras-desenfoque"; notas en /tmp/claude-0/bench/notes_sombras.md y notes_desenfoque.md.
-  Además: agente buscando más datasets (sombras, desenfoque, pantallas, libros, pizarras, español, negativos) → /tmp/claude-0/bench/manifest_v3.csv; notas en notes_datasets_v3.md. Siguiente ronda: medir y mejorar con manifest_v3.
+  Además: agente buscando más datasets (sombras, desenfoque, pantallas, libros, pizarras, español, negativos) → /tmp/claude-0/bench/manifest_v3.csv; notas en notes_datasets_v3.md. HECHO: manifest_v3.csv = 2275 imágenes (+662: sombras con referencia Jung/OSR/RDD/RealDAE, desenfoque Hradiš/SmartDoc-QA, muaré, DocReal, UDIR, español, pizarras, WildReceipt, BID, negativos COCO/Openverse, tinta de color). Hallazgo: falsos documentos en 87,5 % de negativos COCO v3. Siguiente ronda (tras integrar v3): línea base con manifest_v3 y mejoras (falsos documentos primero).
 - Ronda v2 INTEGRADA en `ccr-4d2f0b52-3ktfkq` (detección, hojas dobladas, legibilidad, robustez + 3 correcciones de
   integración: EdgeClean respeta los cantos, renglón fino != raya, cuadrícula tramada en el PDF B/N).
   - Banco completo `integrado_v2` (1613 imágenes, con OCR): informe en `/tmp/claude-0/bench/REPORT_v2.md`,
