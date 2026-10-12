@@ -16,6 +16,7 @@ Actualízalo en cada paso importante (y haz commit + push).
   - Worktrees de los agentes eliminados.
 
 ## Peticiones del usuario pendientes
+0. (2026-10-12, en curso) Quitar el HALO/aura alrededor de las letras y reconstruir la CUADRÍCULA como red regular (separación constante, sin líneas inventadas a media distancia, sin duplicados de la original, líneas completas). Capturas: fotos-usuario/v11_captura_halo_cuadricula1..4.jpg. Notas: /tmp/claude-0/bench/notes_halo_cuadricula.md.
 1. (HECHO en v2) Pintar de blanco las manchas de los bordes que no son texto.
 2. (HECHO en v2) Conservar la cuadrícula/renglones del cuaderno, con interruptor "Conservar cuadrícula / renglones" (por defecto activado).
 3. Enviar el APK nuevo + informe del banco al terminar la ronda (v11 lista para enviar).
