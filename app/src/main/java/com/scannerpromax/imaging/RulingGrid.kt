@@ -468,7 +468,17 @@ internal object RulingGrid {
             }
             // (las rectas sin ningún pico, entre dos observadas, también: la red se completa)
             if (al.size < 2) continue
-            out.add(Line(al.toDoubleArray(), cr.toDoubleArray(), nObs))
+            // Sin temblor: el residuo respecto del modelo (la curvatura real que el modelo no recoge) se suaviza a lo
+            // largo (1-2-3-2-1); el pico de cada franja tiene ±1 px de ruido y la recta dibujada ondulaba
+            val n = al.size
+            val res = DoubleArray(n) { cr[it] - model.at(K, al[it]) }
+            val wts = doubleArrayOf(1.0, 2.0, 3.0, 2.0, 1.0)
+            val crs = DoubleArray(n) { i ->
+                var sw = 0.0; var sr = 0.0
+                for (d in -2..2) { val j = i + d; if (j in 0 until n) { sw += wts[d + 2]; sr += wts[d + 2] * res[j] } }
+                model.at(K, al[i]) + sr / sw
+            }
+            out.add(Line(al.toDoubleArray(), crs, nObs))
         }
         return out
     }

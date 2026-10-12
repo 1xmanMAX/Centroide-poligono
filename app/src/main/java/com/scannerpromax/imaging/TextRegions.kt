@@ -700,7 +700,7 @@ object TextRegions {
         // Dos tintas (transparencia del reverso, manchas): fuerza de cada componente aceptada = su oscuridad máxima
         val twoInk = run {
             val cs = keepComps.filter { it.label in finalLabels && max(it.w, it.h) >= 0.5 * lh }
-            HwStats.twoInk(cs.map { it.maxRaw.toDouble() }, cs.map { it.area.toDouble() })
+            HwStats.twoInk(cs.map { it.maxRaw.toDouble() }, cs.map { it.area.toDouble() }, if (p.gridErased) HwStats.FAINT_MED_GRID else HwStats.FAINT_MED)
         }
         log?.invoke("twoInk $twoInk")
         // Con dos tintas, la tinta débil (transparencia del reverso, manchas) no se toma por trazo firme allí donde
@@ -1115,6 +1115,13 @@ object TextRegions {
         return out
     }
 
+    /**
+     * Longitud (en pasos de la red) de la apertura que reconoce un resto de rejilla a lo largo de una recta: un paso
+     * entero (con 0.6 el palo de una "p" o un "1" escrito justo encima de una recta, igual de claro que ella, se
+     * borraba). Los tramos más cortos que quedan los quita la regla de manchas dentro de la banda.
+     */
+    private const val REMNANT_OPEN = 1.0
+
     /** Oscuridad máxima (0..255, canal más absorbido) de la cuadrícula conservada en "Texto resaltado" y en B/N. */
     private const val RULING_TONE_COLOR = 70.0
     private const val RULING_TONE_BW = 60.0
@@ -1299,7 +1306,7 @@ object TextRegions {
             }
             log?.invoke("límites de recta ${if (hor) "H" else "V"}: " + caps.sorted().joinToString(" ") { "%.0f".format(it) })
             Core.bitwise_or(bandAll, band, bandAll); Core.max(capAll, capM, capAll)
-            val len = Cv.odd(max(9, (0.6 * per).roundToInt()))
+            val len = Cv.odd(max(9, (REMNANT_OPEN * per).roundToInt()))
             val k = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, if (hor) Size(len.toDouble(), 1.0) else Size(1.0, len.toDouble()))
             Imgproc.morphologyEx(p.dark, o, Imgproc.MORPH_OPEN, k); k.release()
             Core.compare(o, capM, t, Core.CMP_LE); Core.bitwise_and(band, t, band)

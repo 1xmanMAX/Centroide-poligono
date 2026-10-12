@@ -648,9 +648,11 @@ internal object PrintedPage {
         }
         v.release(); mn.release(); blk.release(); mix.release()
         Core.LUT(g, levels, g)
-        // Ruido del sensor: suavizado leve antes de umbralizar (sin motas en los fondos sombreados)
+        // Ruido del sensor: suavizado leve antes de umbralizar (sin motas en los fondos sombreados) y des-ruido que respeta
+        // los bordes (el borde del trazo queda liso, sin pelos ni motas pegadas); realce sin sobreimpulsos
         Imgproc.GaussianBlur(g, g, Size(0.0, 0.0), 0.6)
-        sharpen(g, sigma, 0.6, max(4.0, 3.0 * noise), bag)
+        run { val gd = bag.mat(); Imgproc.bilateralFilter(g, gd, 5, max(10.0, 4.0 * noise), 1.2); gd.copyTo(g); gd.release() }
+        sharpen(g, sigma, 0.6, max(4.0, 3.0 * noise), bag, clamp = true)
         val gf = bag.mat(); g.convertTo(gf, CvType.CV_32F)
         val m = bag.mat(); val m2 = bag.mat(); val sq = bag.mat()
         val ks = Size(win.toDouble(), win.toDouble())

@@ -25,17 +25,23 @@ internal object HwStats {
      * componentes con fuerza < [FAINT_REL] de ella. Se detecta si la débil ocupa >= 20 % del área y su mediana es
      * <= [FAINT_MED] de la principal (dos poblaciones claramente separadas, no un degradado continuo).
      */
-    fun twoInk(strength: List<Double>, area: List<Double>): TwoInk {
+    fun twoInk(strength: List<Double>, area: List<Double>, faintMed: Double = FAINT_MED): TwoInk {
         val front = weightedPercentile(strength, area, 0.7) ?: return TwoInk(0.0, 0.0, 0.0, false)
         val fi = strength.indices.filter { strength[it] < FAINT_REL * front }
         val tot = area.sum()
         val ff = if (tot > 0) fi.sumOf { area[it] } / tot else 0.0
         val fm = weightedPercentile(fi.map { strength[it] }, fi.map { area[it] }, 0.5) ?: 0.0
-        return TwoInk(front, ff, fm / max(1.0, front), front >= 40 && ff >= 0.2 && fm <= FAINT_MED * front)
+        return TwoInk(front, ff, fm / max(1.0, front), front >= 40 && ff >= 0.2 && fm <= faintMed * front)
     }
 
     const val FAINT_REL = 0.4
     const val FAINT_MED = 0.25
+
+    /**
+     * [FAINT_MED] en un cuaderno cuya rejilla ya se borró: sin los cientos de restos claros de la rejilla la tinta
+     * principal sale más oscura y la escritura a lápiz o bolígrafo claro de la propia página pasaba por transparencia.
+     */
+    const val FAINT_MED_GRID = 0.18
 
     /**
      * ¿Escritura clara sobre fondo oscuro (pizarra, pantalla en modo oscuro)? [bright] / [dark] = fracción de píxeles
