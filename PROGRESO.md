@@ -16,6 +16,8 @@ Actualízalo en cada paso importante (y haz commit + push).
   - Worktrees de los agentes eliminados.
 
 ## Peticiones del usuario pendientes
+0b. (2026-10-12, en curso) Sombras que a veces NO se procesan aparte: mancha azul en la zona de sombra o, peor, zona de sombra BORRADA (hueco blanco con borde negro que se come el texto); franjas de madera/manchas naranjas en bordes. Capturas: fotos-usuario/v11_captura_sombra_vista1..3.jpg. (Añadido al agente de halo/cuadrícula.)
+0c. (2026-10-12, en curso) Vista previa ≠ vista al abrir ≠ exportado; al abrir una hoja se reprocesa (5–10 s). Debe mostrarse directamente la imagen procesada final (la misma que se exporta) y reprocesar solo al editar. Agente aparte (UI/datos). Notas: /tmp/claude-0/bench/notes_vista_export.md.
 0. (2026-10-12, en curso) Quitar el HALO/aura alrededor de las letras y reconstruir la CUADRÍCULA como red regular (separación constante, sin líneas inventadas a media distancia, sin duplicados de la original, líneas completas). Capturas: fotos-usuario/v11_captura_halo_cuadricula1..4.jpg. Notas: /tmp/claude-0/bench/notes_halo_cuadricula.md.
 1. (HECHO en v2) Pintar de blanco las manchas de los bordes que no son texto.
 2. (HECHO en v2) Conservar la cuadrícula/renglones del cuaderno, con interruptor "Conservar cuadrícula / renglones" (por defecto activado).
