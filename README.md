@@ -110,6 +110,16 @@ Todo en `imaging/` (OpenCV 4.10, sin red). Tiempos medidos con el harness Python
   RDD MAGIC FM 76.7 -> 79.4, PSNR 13.3 -> 13.9, SSIM 0.733 -> 0.750. Sintético con sombra conocida (penumbra σ=14 px, tinte 0.45/0.50/0.62): error de
   la normalización en la penumbra 6.3 -> 3.8 niveles (núcleo 6.1 -> 4.2, suelo de ruido ~4); papel de *Texto
   resaltado* en la penumbra 1.4 -> 0.4.
+- **Zonas alejadas borrosas e imagen doble por movimiento** (`Deblur.kt`/`DeblurMath.kt`, `Deghost.kt`/`DeghostMath.kt`;
+  `PageProcessor.restoreSharpness`, sólo en el render final con recorte y fuera de la gama baja): tras rectificar, la
+  parte alejada de la hoja queda ampliada y desenfocada. (1) **Fantasma/estela** (pulso de la mano): núcleo NO
+  paramétrico estimado por zonas de 640 px con predicción bitonal (papel + tinta) y mínimos cuadrados, rechazado si
+  toca el borde del soporte o los gradientes no tienen diversidad de orientación (fotos), y ecualización RELATIVA a
+  las zonas más nítidas de la propia página; (2) **desenfoque** por zonas: escala local de la homografía + medida
+  autocalibrada (desenfocando las teselas más nítidas), Wiener por franjas y clases, anti-halo. La clasificación
+  impreso/cuaderno usa la página previa a la restauración. Banco (sin regresiones): pérdida de trazo MAGIC
+  2.41 -> 2.32 %, B/N 2.68 -> 2.59 %; sintéticos con fantasma 23.1 -> 24.3 dB. `MultiFrameFusion.refineLocal`:
+  alineación local por teselas tras la homografía (ráfaga sin fantasmas, +1.2 dB).
 - **Detección de bordes** (`DocumentDetector`, `DetLines`): la confianza sale de la calidad del borde (apoyo global,
   peor lado, ángulos, tramos sobre el marco) y no del tamaño del documento, con una comprobación de papel (el interior
   no puede ser más oscuro que su entorno). Un cuadrilátero con papel a ambos lados y tinta fuera es un **marco o tabla
