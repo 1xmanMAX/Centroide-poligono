@@ -97,6 +97,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
+import com.scannerpromax.data.VersionedFile
 import coil.request.ImageRequest
 import coil.size.Precision
 import com.scannerpromax.di.AppContainer
@@ -445,18 +446,16 @@ fun ExportScreen(
                             // Archivo resuelto en IO (nada de File.exists() en el hilo principal en cada recomposición).
                             // Falso positivo de lint: el valor sí se asigna (tras withContext).
                             @SuppressLint("ProduceStateDoesNotAssignValue")
-                            val model by produceState<File?>(initialValue = null, p.id, p.thumbFile, p.processedFile) {
-                                val f = withContext(Dispatchers.IO) {
-                                    container.documents.thumbFile(docId, p)
-                                        ?: p.processedFile?.let { File(container.documents.docDir(docId), it) }?.takeIf { it.exists() }
-                                        ?: container.documents.originalFile(docId, p)
-                                }
+                            // Miniatura del procesado ACTUAL (lo mismo que se exporta), con su versión en la clave de caché.
+                            val model by produceState<VersionedFile?>(initialValue = null, p.id, p.thumbFile, p.processedFile, p.edits) {
+                                val f = withContext(Dispatchers.IO) { container.documents.displayThumb(docId, p) }
                                 value = f
                             }
-                            // Decodificación acotada al tamaño de celda aunque el modelo sea el original de 8-12 MP.
-                            val request = remember(model, perf.thumbPx) {
+                            // Decodificación acotada al tamaño de celda.
+                            val request = remember(model?.cacheKey, perf.thumbPx) {
                                 model?.let {
-                                    ImageRequest.Builder(context).data(it).size(perf.thumbPx).precision(Precision.INEXACT).build()
+                                    ImageRequest.Builder(context).data(it.file).memoryCacheKey(it.cacheKey)
+                                        .size(perf.thumbPx).precision(Precision.INEXACT).build()
                                 }
                             }
                             Box(
@@ -470,7 +469,7 @@ fun ExportScreen(
                                     AsyncImage(
                                         model = request,
                                         contentDescription = "Página ${i + 1}",
-                                        contentScale = ContentScale.Crop,
+                                        contentScale = ContentScale.Fit,
                                         modifier = Modifier.fillMaxSize(),
                                     )
                                 }
