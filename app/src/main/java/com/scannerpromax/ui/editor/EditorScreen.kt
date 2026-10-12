@@ -355,6 +355,9 @@ fun EditorScreen(
             ) {
                 val src = session.sourceImage
                 when {
+                    // Mientras se abre la imagen de trabajo ya se ve el procesado guardado (resultado final, al instante).
+                    (session.loading || src == null) && session.preview != null && tool != EditorTool.CROP ->
+                        PreviewImage(session, showOriginal = false)
                     session.loading || src == null -> CircularProgressIndicator(color = primary)
                     tool == EditorTool.CROP -> CropTool(
                         image = src,
@@ -501,7 +504,7 @@ fun EditorScreen(
 
         LoadingOverlay(
             visible = session.saving && bulkProgress == null,
-            message = "Aplicando mejoras en alta calidad…",
+            message = if (session.previewFinal && session.previewEdits == session.edits) "Guardando…" else "Procesando la página en alta calidad…",
             modifier = Modifier.fillMaxSize(),
         )
         LoadingOverlay(
@@ -539,8 +542,8 @@ fun EditorScreen(
  */
 @Composable
 private fun PreviewImage(session: EditorSession, showOriginal: Boolean) {
-    val src = session.sourceImage ?: return
-    val shown = if (showOriginal) src else (session.preview ?: src)
+    val src = session.sourceImage
+    val shown = (if (showOriginal) src else null) ?: session.preview ?: src ?: return
     val zoom = remember { com.scannerpromax.ui.review.ZoomState(maxScale = 5f) }
     LaunchedEffect(zoom.scale) {
         delay(250)
@@ -579,11 +582,23 @@ private fun PreviewImage(session: EditorSession, showOriginal: Boolean) {
     }
 }
 
+/**
+ * Estado de lo que se ve: "Procesando" (vista previa en curso), "Calculando resultado final" (render final real en
+ * segundo plano), "Resultado final" (lo mostrado ES el procesado que se guarda/exporta) o "Vista previa" (aproximada:
+ * el resultado final se calcula al guardar).
+ */
 @Composable
 private fun ProcessingBadge(session: EditorSession, hidden: Boolean, modifier: Modifier = Modifier) {
+    val busy = session.previewBusy || session.finalizing
+    val text = when {
+        session.previewBusy -> "Procesando"
+        session.finalizing -> "Calculando resultado final"
+        session.previewFinal -> "Resultado final"
+        else -> if (session.backgroundFinal) "Vista previa" else "Vista previa · el resultado final se calcula al guardar"
+    }
     // Nombre completo: evita el AnimatedVisibility de ColumnScope.
     androidx.compose.animation.AnimatedVisibility(
-        visible = session.previewBusy && !hidden,
+        visible = !hidden && session.preview != null,
         enter = fadeIn(), exit = fadeOut(),
         modifier = modifier,
     ) {
@@ -592,9 +607,14 @@ private fun ProcessingBadge(session: EditorSession, hidden: Boolean, modifier: M
                 .padding(horizontal = 10.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            CircularProgressIndicator(Modifier.size(14.dp), color = Color.White, strokeWidth = 2.dp)
-            Spacer(Modifier.width(6.dp))
-            Text("Procesando", color = Color.White, fontSize = 12.sp)
+            if (busy) {
+                CircularProgressIndicator(Modifier.size(14.dp), color = Color.White, strokeWidth = 2.dp)
+                Spacer(Modifier.width(6.dp))
+            } else if (session.previewFinal) {
+                Icon(Icons.Filled.Check, null, tint = Color.White, modifier = Modifier.size(14.dp))
+                Spacer(Modifier.width(6.dp))
+            }
+            Text(text, color = Color.White, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }

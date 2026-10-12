@@ -229,7 +229,7 @@ fun ExportScreen(
         // Sin updatedAt: guardar el OCR que faltaba actualiza el documento y obligaba a regenerar el PDF
         // al pulsar "Compartir" después de "Guardar". Las ediciones de cada página y el texto corregido sí invalidan.
         listOf(
-            d.pages.joinToString { it.id + it.edits.hashCode() + "/" + it.ocrEditedText.hashCode() },
+            d.pages.joinToString { it.id + it.edits.hashCode() + "/" + it.processedFile + "/" + it.ocrEditedText.hashCode() },
             pageSize, quality, textMode, textPlacement, usePassword, password.hashCode(), fileName,
         ).joinToString("|")
 

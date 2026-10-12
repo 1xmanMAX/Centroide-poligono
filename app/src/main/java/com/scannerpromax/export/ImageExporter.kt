@@ -21,7 +21,6 @@ import java.io.File
 import java.io.IOException
 import java.io.OutputStream
 import kotlin.coroutines.resume
-import kotlin.math.max
 
 class ImageExporter(private val context: Context) {
 
@@ -117,12 +116,7 @@ class ImageExporter(private val context: Context) {
     private fun encode(file: File, format: ImageFormat, quality: ExportQuality, out: OutputStream) {
         val (w, h) = ImageCodec.bounds(file)
         if (w <= 0 || h <= 0) throw IOException("Imagen ilegible: ${file.name}")
-        val fits = quality.isFullResolution || max(w, h) <= quality.maxLongSide
-        val passthrough = fits && when (format) {
-            ImageFormat.JPEG -> (quality.isFullResolution || quality.jpegQuality >= 90) && ImageCodec.isJpeg(file)
-            ImageFormat.PNG -> ImageCodec.isPng(file)
-            ImageFormat.WEBP -> false
-        }
+        val passthrough = ExportPlan.imagePassthrough(w, h, quality, format, ImageCodec.isJpeg(file), ImageCodec.isPng(file))
         if (passthrough) {
             file.inputStream().use { it.copyTo(out, BUFFER) }
             return

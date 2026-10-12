@@ -78,6 +78,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -133,7 +134,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
+import com.scannerpromax.data.VersionedFile
 
 /** Ámbito de proceso para borrados diferidos (Deshacer): el borrado se completa aunque se salga de la pantalla. */
 private val reviewAppScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -180,6 +181,11 @@ fun ReviewScreen(
     val order = remember { mutableStateListOf<Page>() }
     /** Página abierta en el visor a pantalla completa (índice en [order]), o null. */
     var viewerIndex by remember { mutableStateOf<Int?>(null) }
+    /**
+     * Página desde cuyo visor se abrió el editor: al volver se reabre el visor en ella y se ve el NUEVO procesado
+     * (rememberSaveable: sobrevive a que la pantalla salga de la composición mientras el editor está abierto).
+     */
+    var reopenViewerPageId by rememberSaveable { mutableStateOf<String?>(null) }
     // Páginas eliminadas a la espera de "Deshacer" (no se muestran aunque el repositorio aún las tenga).
     val pendingDeletes = remember { mutableStateListOf<String>() }
     val gridState = rememberLazyGridState()
@@ -498,8 +504,10 @@ fun ReviewScreen(
                             total = order.size,
                             dragging = dragging,
                             modifier = itemModifier,
-                            onClick = { onEditPage(page.id) },
-                            onView = { viewerIndex = index },
+                            // Tocar una hoja abre el visor con la imagen YA PROCESADA (la misma que se exporta), al instante
+                            // y sin reprocesar; desde allí "Editar" lleva al editor.
+                            onClick = { viewerIndex = index },
+                            onEdit = { onEditPage(page.id) },
                             onOcr = { onOcr(page.id) },
                             onMoveLeft = { move(page, -1) },
                             onMoveRight = { move(page, +1) },
@@ -566,8 +574,16 @@ fun ReviewScreen(
                 pages = order.toList(),
                 startIndex = start,
                 onDismiss = { viewerIndex = null },
-                onEdit = { p -> viewerIndex = null; onEditPage(p.id) },
+                onEdit = { p -> viewerIndex = null; reopenViewerPageId = p.id; onEditPage(p.id) },
             )
+        }
+        // Vuelta del editor: se reabre el visor en la página editada (ya con su procesado nuevo).
+        LaunchedEffect(reopenViewerPageId, order.size) {
+            val id = reopenViewerPageId ?: return@LaunchedEffect
+            if (order.isEmpty()) return@LaunchedEffect
+            val i = order.indexOfFirst { it.id == id }
+            reopenViewerPageId = null
+            if (i >= 0) viewerIndex = i
         }
 
         SnackbarHost(
@@ -795,7 +811,7 @@ private fun PageCard(
     dragging: Boolean,
     modifier: Modifier,
     onClick: () -> Unit,
-    onView: () -> Unit,
+    onEdit: () -> Unit,
     onOcr: () -> Unit,
     onMoveLeft: () -> Unit,
     onMoveRight: () -> Unit,
@@ -809,31 +825,28 @@ private fun PageCard(
 
     val context = LocalContext.current
     val perf = LocalPerf.current
-    // Miniatura: se elige el archivo en segundo plano (antes se hacían File.exists() en el hilo principal en
-    // cada recomposición de cada celda: jank al desplazar en almacenamiento lento). Si falta (p. ej. tras cambiar
-    // ediciones) se regenera en segundo plano y el Flow del documento trae la nueva.
-    val model by produceState<File?>(initialValue = null, page.id, page.thumbFile, page.processedFile, page.edits) {
-        value = withContext(Dispatchers.IO) {
-            repo.thumbFile(docId, page)
-                ?: page.processedFile?.let { File(repo.docDir(docId), it) }?.takeIf { it.exists() }
-                ?: repo.originalFile(docId, page)
-        }
+    // Miniatura = reducción del procesado ACTUAL (misma imagen que el visor y la exportación). Se elige en segundo
+    // plano; si falta o es de otra versión de las ediciones, se regenera desde el procesado (nunca se muestra el
+    // original sin procesar mientras tanto, salvo que el procesado no se pueda generar).
+    val model by produceState<VersionedFile?>(initialValue = null, page.id, page.thumbFile, page.processedFile, page.edits) {
+        value = withContext(Dispatchers.IO) { repo.displayThumb(docId, page) }
         if (withContext(Dispatchers.IO) { repo.thumbFile(docId, page) } == null) {
-            runCatching { repo.processedFile(docId, page) }
+            val ok = runCatching { repo.processedFile(docId, page) }.isSuccess
+            value = withContext(Dispatchers.IO) {
+                repo.displayThumb(docId, page) ?: if (!ok) VersionedFile.of(repo.originalFile(docId, page)) else null
+            }
         } else if (runCatching { repo.upgradeSmallThumb(docId, page) }.getOrDefault(false)) {
-            // Miniatura antigua (480 px) regenerada en el mismo archivo: se recarga (Coil incluye la fecha de
-            // modificación en la clave de caché del archivo).
-            value = null
-            value = withContext(Dispatchers.IO) { repo.thumbFile(docId, page) }
+            // Miniatura antigua (480 px) regenerada en el mismo archivo: nueva versión -> nueva clave de caché.
+            value = withContext(Dispatchers.IO) { repo.displayThumb(docId, page) }
         }
     }
     // Miniatura nítida: Coil decodifica al tamaño REAL de la celda en píxeles (celda × densidad, p. ej. ~630x875
-    // px en un QHD+), tomado de las restricciones del AsyncImage; nunca más que eso aunque el modelo sea el
-    // original de 12 MP. Las miniaturas en disco miden 960 px de lado largo.
-    val request = remember(model) {
+    // px en un QHD+), tomado de las restricciones del AsyncImage. Clave de caché con la versión del archivo.
+    val request = remember(model?.cacheKey) {
         model?.let {
             ImageRequest.Builder(context)
-                .data(it)
+                .data(it.file)
+                .memoryCacheKey(it.cacheKey)
                 .precision(Precision.INEXACT)
                 .build()
         }
@@ -865,20 +878,20 @@ private fun PageCard(
                 filterQuality = FilterQuality.High,
                 modifier = Modifier.fillMaxSize(),
             )
-            // Ver la página a pantalla completa con zoom (la página procesada a resolución completa).
+            // Editar (recortar, filtros...) directamente; tocar la hoja la abre en el visor.
             Box(
                 Modifier
                     .align(Alignment.TopStart)
                     .size(48.dp)
                     .clip(CircleShape)
-                    .clickable(role = Role.Button, onClickLabel = "Ver a pantalla completa", onClick = onView),
+                    .clickable(role = Role.Button, onClickLabel = "Editar página", onClick = onEdit),
                 contentAlignment = Alignment.Center,
             ) {
                 Box(
                     Modifier.size(32.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.45f)),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Icon(Icons.Filled.ZoomIn, "Ver a pantalla completa", tint = Color.White, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Filled.Edit, "Editar página", tint = Color.White, modifier = Modifier.size(18.dp))
                 }
             }
             Box(
@@ -923,12 +936,12 @@ private fun PageCard(
                     DropdownMenuItem(
                         text = { Text("Ver a pantalla completa") },
                         leadingIcon = { Icon(Icons.Filled.ZoomIn, null) },
-                        onClick = { menu = false; onView() },
+                        onClick = { menu = false; onClick() },
                     )
                     DropdownMenuItem(
                         text = { Text("Editar y mejorar") },
                         leadingIcon = { Icon(Icons.Filled.AutoFixHigh, null) },
-                        onClick = { menu = false; onClick() },
+                        onClick = { menu = false; onEdit() },
                     )
                     DropdownMenuItem(
                         text = { Text("Reconocer texto (OCR)") },

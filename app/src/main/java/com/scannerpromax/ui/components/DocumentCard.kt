@@ -48,7 +48,7 @@ import com.scannerpromax.domain.ScanMode
 import com.scannerpromax.ui.theme.LocalPerf
 import com.scannerpromax.ui.theme.PillShape
 import com.scannerpromax.ui.theme.brand
-import java.io.File
+import com.scannerpromax.data.VersionedFile
 
 /** Degradado inferior de las tarjetas: constante (no se crea un Brush por tarjeta y recomposición). */
 private val BottomScrim = Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.45f)))
@@ -70,7 +70,7 @@ fun DocumentCard(
     title: String,
     pageCount: Int,
     updatedAt: Long,
-    thumbnail: File?,
+    thumbnail: VersionedFile?,
     mode: ScanMode,
     onClick: () -> Unit,
     actions: DocumentActions,
@@ -132,7 +132,7 @@ fun DocumentListItem(
     title: String,
     pageCount: Int,
     updatedAt: Long,
-    thumbnail: File?,
+    thumbnail: VersionedFile?,
     mode: ScanMode,
     onClick: () -> Unit,
     actions: DocumentActions,
@@ -184,18 +184,22 @@ fun DocumentListItem(
  * rejilla). Ahora el marcador se dibuja DEBAJO y un AsyncImage normal encima: sin subcomposición y sin
  * recomponer al terminar de cargar. Tamaño de decodificación según el tier ([LocalPerf]) y precisión INEXACT
  * (solo submuestreo potencia de 2, sin un reescalado extra en CPU).
+ *
+ * La página se muestra ENTERA (ContentScale.Fit): lo que se ve es lo que se exporta, sin recortar. La clave de
+ * caché lleva la versión del archivo ([VersionedFile.cacheKey]): si la miniatura se regenera, no se ve la vieja.
  */
 @Composable
-fun Thumbnail(file: File?, mode: ScanMode, modifier: Modifier = Modifier, sizePx: Int = 0) {
+fun Thumbnail(file: VersionedFile?, mode: ScanMode, modifier: Modifier = Modifier, sizePx: Int = 0) {
     val context = LocalContext.current
     val perf = LocalPerf.current
     val side = if (sizePx > 0) sizePx else perf.thumbPx
     Box(modifier.background(MaterialTheme.colorScheme.surfaceContainerHighest), contentAlignment = Alignment.Center) {
         Icon(mode.icon, null, Modifier.size(32.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
         if (file != null) {
-            val request = remember(file.path, side, perf.reduceMotion) {
+            val request = remember(file.cacheKey, side, perf.reduceMotion) {
                 ImageRequest.Builder(context)
-                    .data(file)
+                    .data(file.file)
+                    .memoryCacheKey(file.cacheKey)
                     .size(side)
                     .precision(Precision.INEXACT)
                     .crossfade(if (perf.reduceMotion) 0 else perf.duration(160))
@@ -204,7 +208,7 @@ fun Thumbnail(file: File?, mode: ScanMode, modifier: Modifier = Modifier, sizePx
             AsyncImage(
                 model = request,
                 contentDescription = null,
-                contentScale = ContentScale.Crop,
+                contentScale = ContentScale.Fit,
                 modifier = Modifier.fillMaxSize(),
             )
         }

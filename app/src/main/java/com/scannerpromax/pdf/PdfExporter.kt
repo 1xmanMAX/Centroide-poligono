@@ -11,6 +11,7 @@ import com.scannerpromax.domain.PageSize
 import com.scannerpromax.domain.PdfOptions
 import com.scannerpromax.domain.PdfTextMode
 import com.scannerpromax.domain.TextPlacement
+import com.scannerpromax.export.ExportPlan
 import com.scannerpromax.export.ImageCodec
 import com.scannerpromax.imaging.ProgressCallback
 import com.scannerpromax.ocr.OcrText
@@ -222,7 +223,11 @@ class PdfExporter(private val context: Context) {
         return abs(a - b) / a < 0.03f
     }
 
-    /** Crea el XObject de imagen con la codificación más eficiente para su contenido. */
+    /**
+     * Crea el XObject de imagen a partir del procesado (única fuente de verdad: lo mismo que muestran el visor y las
+     * miniaturas). Plan en [ExportPlan.pdfImage]: passthrough/sin pérdida en "Máxima", reducción con la misma
+     * proporción en el resto; nunca se recorta ni se vuelve a procesar.
+     */
     private fun createImage(
         doc: PDDocument,
         file: File,
@@ -231,76 +236,46 @@ class PdfExporter(private val context: Context) {
         options: PdfOptions,
         binaryHint: Boolean?,
     ): PDImageXObject {
-        val maxLong = options.quality.maxLongSide
-        val needsResize = max(srcW, srcH) > maxLong
-
+        val isJpeg = ImageCodec.isJpeg(file)
         // El filtro conocido evita una decodificación extra + recorrido de píxeles por página (y falsos positivos).
-        val binary = binaryHint ?: ImageCodec.isNearlyBinary(file)
-        if (binary) {
-            // A 1 bit reducir apenas ahorra espacio pero deja el texto dentado: se conserva hasta ~300 ppp en A4.
-            val binaryLong = min(max(srcW, srcH), max(maxLong, BINARY_MIN_LONG_SIDE))
-            val bmp = ImageCodec.decodeScaled(file, binaryLong)
-            try {
-                return PdfSupport.binaryImage(doc, bmp)
-            } finally {
-                bmp.recycle()
+        // En "Máxima" no hace falta saberlo (el JPEG va tal cual y el PNG sin pérdida).
+        val binary = if (options.quality.isFullResolution) binaryHint ?: false else binaryHint ?: ImageCodec.isNearlyBinary(file)
+        return when (val plan = ExportPlan.pdfImage(srcW, srcH, options.quality, binary, isJpeg)) {
+            ExportPlan.PdfImage.PassthroughJpeg -> JPEGFactory.createFromByteArray(doc, file.readBytes())
+            ExportPlan.PdfImage.Lossless -> {
+                val bmp = ImageCodec.decodeScaled(file, Int.MAX_VALUE)
+                try {
+                    PdfSupport.losslessImage(doc, bmp)
+                } finally {
+                    bmp.recycle()
+                }
             }
-        }
-
-        // Incrustación directa (passthrough) del JPEG procesado (guardado una sola vez a calidad 95) cuando no hace
-        // falta reducirlo: "Máxima (HD)" siempre, y "Alta" si el escaneo ya mide <= 3508 px. Sin recomprimir.
-        if (!needsResize && (options.quality.isFullResolution || options.quality.jpegQuality >= 90) && ImageCodec.isJpeg(file)) {
-            return JPEGFactory.createFromByteArray(doc, file.readBytes())
-        }
-
-        val bmp = ImageCodec.decodeScaled(file, maxLong)
-        try {
-            return PdfSupport.jpegImage(doc, bmp, options.quality.jpegQuality)
-        } finally {
-            bmp.recycle()
+            is ExportPlan.PdfImage.Bilevel -> {
+                val bmp = ImageCodec.decodeScaled(file, max(plan.width, plan.height))
+                try {
+                    PdfSupport.binaryImage(doc, bmp)
+                } finally {
+                    bmp.recycle()
+                }
+            }
+            is ExportPlan.PdfImage.Jpeg -> {
+                val bmp = ImageCodec.decodeScaled(file, max(plan.width, plan.height))
+                try {
+                    PdfSupport.jpegImage(doc, bmp, plan.quality)
+                } finally {
+                    bmp.recycle()
+                }
+            }
         }
     }
 
     /**
-     * Calcula el tamaño de página (puntos) y el rectángulo donde va la imagen (origen PDF abajo-izquierda;
-     * en el RectF devuelto top = y inferior para simplificar).
+     * Tamaño de página (puntos) y rectángulo de la imagen ([PageFit]: sin recortar nunca, misma proporción).
+     * En el RectF devuelto top = y inferior (origen PDF abajo-izquierda).
      */
     private fun layout(imgW: Float, imgH: Float, options: PdfOptions): Pair<PDRectangle, RectF> {
-        val margin = options.marginPt.coerceAtLeast(0f)
-        val aspect = imgW / imgH
-        val landscape = imgW > imgH
-
-        val (pw, ph) = when (options.pageSize) {
-            PageSize.AUTO -> autoSize(aspect).let { (w, h) -> (w + 2 * margin) to (h + 2 * margin) }
-            else -> {
-                val a = options.pageSize.widthPt
-                val b = options.pageSize.heightPt
-                if (landscape) b to a else a to b
-            }
-        }
-        val availW = (pw - 2 * margin).coerceAtLeast(1f)
-        val availH = (ph - 2 * margin).coerceAtLeast(1f)
-        val scale = min(availW / imgW, availH / imgH)
-        val dw = imgW * scale
-        val dh = imgH * scale
-        val x = (pw - dw) / 2f
-        val y = (ph - dh) / 2f
-        return PDRectangle(pw, ph) to RectF(x, y, x + dw, y + dh)
-    }
-
-    /** AUTO: si la proporción coincide con A4/Carta/Oficio se usa ese tamaño; si no, lado largo = A4. */
-    private fun autoSize(aspect: Float): Pair<Float, Float> {
-        val portrait = aspect <= 1f
-        val a = if (portrait) aspect else 1f / aspect
-        val standard = listOf(PageSize.A4, PageSize.LETTER, PageSize.LEGAL)
-            .firstOrNull { abs(it.widthPt / it.heightPt - a) / a < 0.03f }
-        val (w, h) = if (standard != null) {
-            standard.widthPt to standard.heightPt
-        } else {
-            val long = PageSize.A4.heightPt
-            (long * a) to long
-        }
-        return if (portrait) w to h else h to w
+        val r = PageFit.layout(imgW, imgH, options.pageSize, options.marginPt)
+        return PDRectangle(r.pageW, r.pageH) to RectF(r.x, r.y, r.x + r.w, r.y + r.h)
     }
 
     /**
@@ -411,8 +386,6 @@ class PdfExporter(private val context: Context) {
         const val LIBERATION_SANS = "com/tom_roush/pdfbox/resources/ttf/LiberationSans-Regular.ttf"
         /** Ancho mínimo (pt) para reutilizar el tamaño de la imagen en las páginas de texto. */
         const val MIN_TEXT_PAGE_WIDTH = 420f
-        /** Lado largo mínimo de las imágenes de 1 bit (A4 a 300 ppp). */
-        const val BINARY_MIN_LONG_SIDE = 3508
     }
 }
 
@@ -504,6 +477,55 @@ internal object PdfSupport {
         return PDImageXObject(
             doc, ByteArrayInputStream(bos.toByteArray()), COSName.FLATE_DECODE,
             bmp.width, bmp.height, 1, PDDeviceGray.INSTANCE,
+        )
+    }
+
+    /**
+     * Imagen SIN PÉRDIDA con los mismos píxeles que [bmp]: 8 bits de gris + Flate si es gris (PNG de B/N con la
+     * cuadrícula clara y los bordes suavizados), RGB sin pérdida si tiene color.
+     */
+    fun losslessImage(doc: PDDocument, bmp: Bitmap): PDImageXObject {
+        val w = bmp.width
+        val h = bmp.height
+        val row = IntArray(w)
+        var gray = true
+        for (y in 0 until h) {
+            bmp.getPixels(row, 0, w, 0, y, w, 1)
+            for (c in row) {
+                val r = (c shr 16) and 0xFF; val g = (c shr 8) and 0xFF; val b = c and 0xFF
+                if (abs(r - g) > 2 || abs(g - b) > 2) { gray = false; break }
+            }
+            if (!gray) break
+        }
+        if (!gray) {
+            val flat = ImageCodec.flattenOnWhite(bmp)
+            try {
+                return com.tom_roush.pdfbox.pdmodel.graphics.image.LosslessFactory.createFromImage(doc, flat)
+            } finally {
+                if (flat !== bmp) flat.recycle()
+            }
+        }
+        val bos = ByteArrayOutputStream(w * h / 8)
+        val deflater = Deflater(Deflater.DEFAULT_COMPRESSION)
+        try {
+            DeflaterOutputStream(bos, deflater, 64 * 1024).use { out ->
+                val line = ByteArray(w)
+                for (y in 0 until h) {
+                    bmp.getPixels(row, 0, w, 0, y, w, 1)
+                    for (x in 0 until w) {
+                        val c = row[x]
+                        // Mismo gris del PNG (r = g = b salvo redondeos)
+                        line[x] = ((((c shr 16) and 0xFF) + ((c shr 8) and 0xFF) + (c and 0xFF)) / 3).toByte()
+                    }
+                    out.write(line)
+                }
+            }
+        } finally {
+            deflater.end()
+        }
+        return PDImageXObject(
+            doc, ByteArrayInputStream(bos.toByteArray()), COSName.FLATE_DECODE,
+            w, h, 8, PDDeviceGray.INSTANCE,
         )
     }
 

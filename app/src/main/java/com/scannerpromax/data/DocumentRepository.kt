@@ -18,6 +18,7 @@ import com.scannerpromax.imaging.DeviceProfiler
 import com.scannerpromax.imaging.DeviceTier
 import com.scannerpromax.imaging.PageProcessor
 import com.scannerpromax.imaging.PerspectiveCorrector
+import com.scannerpromax.imaging.ProgressCallback
 import com.scannerpromax.ocr.OcrEngine
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -441,7 +442,12 @@ class DocumentRepository(
                 return@withLock current
             }
 
-            val (processedName, thumbName) = heavyWork {
+            // Render final ya hecho en segundo plano por el editor para ESTAS ediciones ([renderDraft]): es exactamente
+            // el mismo render (mismo original, presupuesto y tubería), así que se reutiliza sin volver a procesar.
+            val draftThumb = thumbName(pageId, edits)
+            val (processedName, thumbName) = if (File(dir, newProcessed).exists() && File(dir, draftThumb).exists()) {
+                newProcessed to draftThumb
+            } else heavyWork {
                 withContext(Dispatchers.Default) {
                     renderFromOriginal(docId, pageId, File(dir, current.originalFile), edits, current.width, current.height)
                 }
@@ -473,6 +479,40 @@ class DocumentRepository(
             }
             if (result.ocrFile == null) enqueueOcr(docId, pageId)
             result
+        }
+    }
+
+    /**
+     * Render FINAL (el mismo de [updateEdits]: PageProcessor.render a resolución completa) de [edits] sin guardarlas
+     * todavía: el editor lo muestra como "resultado final" y, si el usuario guarda esas mismas ediciones,
+     * [updateEdits] lo reutiliza sin volver a procesar. Devuelve el procesado. Cancelable entre fases del render.
+     * Los borradores no guardados se borran con [discardDrafts] (o en el siguiente guardado).
+     */
+    suspend fun renderDraft(docId: String, pageId: String, edits: PageEdits): File {
+        loaded.await()
+        val current = findPage(docId, pageId) ?: throw IOException("Página no encontrada")
+        val dir = docDir(docId)
+        val pName = processedName(pageId, edits)
+        val tName = thumbName(pageId, edits)
+        if (File(dir, pName).exists() && File(dir, tName).exists()) return File(dir, pName)
+        val job = currentCoroutineContext()[Job]
+        val cancelCheck: ProgressCallback = { job?.ensureActive() }
+        val (processed, _) = heavyWork {
+            withContext(Dispatchers.Default) {
+                renderFromOriginal(docId, pageId, File(dir, current.originalFile), edits, current.width, current.height, progress = cancelCheck)
+            }
+        }
+        return File(dir, processed)
+    }
+
+    /** Borra los borradores de [renderDraft] que no se guardaron (conserva el procesado y la miniatura actuales). */
+    suspend fun discardDrafts(docId: String, pageId: String) {
+        loaded.await()
+        pageLock("$docId/$pageId").withLock {
+            val p = findPage(docId, pageId) ?: return@withLock
+            withContext(Dispatchers.IO) {
+                cleanupStale(docDir(docId), p, keepProcessed = processedName(p.id, p.edits), keepThumb = thumbName(p.id, p.edits))
+            }
         }
     }
 
@@ -589,8 +629,9 @@ class DocumentRepository(
                     }
                 }
                 // Regenera la miniatura si se perdió (barato a partir del procesado).
+                // (también si la que figura es de otra versión de las ediciones: la miniatura sale SIEMPRE de este procesado)
                 val thumb = current.thumbFile
-                if (thumb == null || !File(dir, thumb).exists()) {
+                if (!PageFiles.thumbMatches(thumb, current.id, current.edits) || !File(dir, thumb!!).exists()) {
                     regenerateThumb(docId, current, expectedFile)
                 }
                 return@withLock expectedFile
@@ -653,11 +694,30 @@ class DocumentRepository(
         }
     }
 
+    /**
+     * Miniatura de la página SOLO si corresponde a su procesado actual (mismo hash de ediciones): una miniatura de
+     * otra versión nunca se muestra (null -> [processedFile] la regenera desde el procesado).
+     */
     fun thumbFile(docId: String, page: Page): File? {
         val name = page.thumbFile ?: return null
+        if (!PageFiles.thumbMatches(name, page.id, page.edits)) return null
         val f = File(docDir(docId), name)
         return if (f.exists()) f else null
     }
+
+    /** Procesado ACTUAL de la página si ya existe en disco (sin renderizar nunca; null si falta). */
+    fun processedFileIfReady(docId: String, page: Page): File? {
+        val f = File(docDir(docId), processedName(page.id, page.edits))
+        return if (f.exists()) f else null
+    }
+
+    /**
+     * Imagen para miniaturas/listas (llamar fuera del hilo principal): la miniatura del procesado actual o, si aún
+     * no existe, el propio procesado. Nunca el original sin procesar ni una versión anterior. Con versión (fecha y
+     * tamaño) para la clave de caché de Coil.
+     */
+    fun displayThumb(docId: String, page: Page): VersionedFile? =
+        VersionedFile.of(thumbFile(docId, page)) ?: VersionedFile.of(processedFileIfReady(docId, page))
 
     /** Archivo temporal para capturas de cámara. */
     fun newCaptureFile(): File {
@@ -762,6 +822,7 @@ class DocumentRepository(
         pageW: Int,
         pageH: Int,
         budget: Int = tier.maxWorkingPixels,
+        progress: ProgressCallback? = null,
     ): Pair<String, String> {
         var px = budget
         while (true) {
@@ -769,7 +830,7 @@ class DocumentRepository(
             try {
                 val original = BitmapIO.decode(originalFile.absolutePath, px)
                 try {
-                    return renderAndSave(docId, pageId, original, edits, pageW, pageH)
+                    return renderAndSave(docId, pageId, original, edits, pageW, pageH, progress)
                 } finally {
                     original.recycle()
                 }
@@ -795,12 +856,13 @@ class DocumentRepository(
         edits: PageEdits,
         pageW: Int,
         pageH: Int,
+        progress: ProgressCallback? = null,
     ): Pair<String, String> {
         val dir = docDir(docId)
         val processedName = processedName(pageId, edits)
         val thumbName = thumbName(pageId, edits)
         val workEdits = edits.quad?.let { q -> edits.copy(quad = toSpace(q, pageW, pageH, original.width, original.height)) } ?: edits
-        val rendered = processor.render(original, workEdits)
+        val rendered = processor.render(original, workEdits, progress)
         try {
             currentCoroutineContext().ensureActive()
             val thumb = BitmapIO.thumbnail(rendered, THUMB_SIDE)
@@ -1346,7 +1408,7 @@ class DocumentRepository(
         private val AGED_CACHE_DIRS = listOf("exports", "share", "compress_out")
         private val WIPED_CACHE_DIRS = listOf("compress", "pdfbox")
 
-        private fun isBinaryFilter(f: FilterType) = f == FilterType.BLACK_WHITE || f == FilterType.ECO_INK
+        private fun isBinaryFilter(f: FilterType) = PageFiles.isBinaryFilter(f)
 
         /** OutOfMemoryError de Java o fallo de reserva de memoria nativa de OpenCV ("Insufficient memory"). */
         private fun isOutOfMemory(t: Throwable): Boolean {
@@ -1370,15 +1432,10 @@ class DocumentRepository(
 
         private fun newId(): String = UUID.randomUUID().toString().replace("-", "").take(16)
 
-        /** Hash estable (entre ejecuciones) de las ediciones: se usa en el nombre de archivo para cachear. */
-        private fun editsHash(edits: PageEdits): String =
-            Integer.toHexString(json.encodeToString(PageEdits.serializer(), edits).hashCode())
-
-        private fun processedName(pageId: String, edits: PageEdits) =
-            "$PROCESSED_DIR/${pageId}_${editsHash(edits)}.${if (isBinaryFilter(edits.filter)) "png" else "jpg"}"
-        private fun thumbName(pageId: String, edits: PageEdits) = "$THUMB_DIR/${pageId}_${editsHash(edits)}.jpg"
+        private fun processedName(pageId: String, edits: PageEdits) = PageFiles.processedName(pageId, edits)
+        private fun thumbName(pageId: String, edits: PageEdits) = PageFiles.thumbName(pageId, edits)
         /** OCR con el hash de las ediciones en el nombre: un OCR de otra versión de la imagen se invalida por nombre. */
-        private fun ocrName(pageId: String, edits: PageEdits) = "$OCR_DIR/${pageId}_${editsHash(edits)}.json"
+        private fun ocrName(pageId: String, edits: PageEdits) = PageFiles.ocrName(pageId, edits)
 
         /** Título por defecto en español, p. ej. "Escaneo 06-10-2026 14:32" o "DNI 06-10-2026 14:32". */
         fun defaultTitle(mode: ScanMode, time: Long = System.currentTimeMillis()): String {

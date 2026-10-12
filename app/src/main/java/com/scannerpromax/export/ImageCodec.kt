@@ -7,7 +7,6 @@ import com.scannerpromax.domain.ImageFormat
 import java.io.File
 import java.io.OutputStream
 import kotlin.math.max
-import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
@@ -60,12 +59,12 @@ internal object ImageCodec {
 
     /** Tamaño objetivo: lado largo <= [maxLongSide] y píxeles <= presupuesto. */
     fun targetSize(w: Int, h: Int, maxLongSide: Int, maxPixels: Int = safePixelBudget()): Pair<Int, Int> {
-        var s = 1f
-        val long = max(w, h)
-        if (long > maxLongSide) s = maxLongSide.toFloat() / long
-        val px = w.toDouble() * h * s * s
-        if (px > maxPixels) s *= sqrt(maxPixels / px).toFloat()
-        return (w * s).roundToInt().coerceAtLeast(1) to (h * s).roundToInt().coerceAtLeast(1)
+        // Misma proporción que el procesado (lado largo fijado, el corto derivado): ver [ExportPlan.scaledSize].
+        val first = ExportPlan.scaledSize(w, h, maxLongSide)
+        val px = first.first.toDouble() * first.second
+        if (px <= maxPixels) return first
+        val long = (max(first.first, first.second) * sqrt(maxPixels / px)).toInt().coerceAtLeast(1)
+        return ExportPlan.scaledSize(w, h, long)
     }
 
     /**

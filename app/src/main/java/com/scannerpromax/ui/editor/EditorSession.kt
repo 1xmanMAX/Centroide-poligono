@@ -38,6 +38,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.io.IOException
 import kotlin.math.min
 
@@ -54,6 +55,12 @@ import kotlin.math.min
  *   usuario deja de mover el control, se refina con la tubería completa a [previewSide].
  * - Las miniaturas de filtros se generan de una en una en un hilo de prioridad baja y ceden el paso a la
  *   vista previa (lo que el usuario está mirando).
+ * - ÚNICA FUENTE DE VERDAD: al abrir se muestra al instante el PROCESADO guardado (el mismo archivo que la
+ *   miniatura, el visor y la exportación), sin reprocesar; las vistas previas (aproximadas: tubería a resolución de
+ *   pantalla) solo se calculan cuando el usuario cambia algo. Si las ediciones vuelven a las guardadas se muestra
+ *   otra vez el procesado. En equipos con memoria, tras unos instantes sin tocar nada se calcula en segundo plano el
+ *   RENDER FINAL real ([com.scannerpromax.data.DocumentRepository.renderDraft]) y se muestra en lugar de la
+ *   aproximación ([previewFinal]); al guardar esas mismas ediciones se reutiliza sin volver a procesar.
  */
 @Stable
 internal class EditorSession(
@@ -85,6 +92,14 @@ internal class EditorSession(
         private set
     var previewBusy by mutableStateOf(false)
         private set
+    /** true = [preview] es el resultado FINAL real (procesado guardado o render final en segundo plano). */
+    var previewFinal by mutableStateOf(false)
+        private set
+    /** Calculando el render final de las ediciones actuales en segundo plano. */
+    var finalizing by mutableStateOf(false)
+        private set
+    /** ¿Se calcula el render final en segundo plano? (no en gama baja: memoria y CPU; allí se hace al guardar). */
+    val backgroundFinal: Boolean = !tier.isLowRam && tier.cores > 4
     var saving by mutableStateOf(false)
         private set
     var detecting by mutableStateOf(false)
@@ -126,6 +141,10 @@ internal class EditorSession(
     private val editsFlow = MutableStateFlow<PageEdits?>(null)
     /** Pausa antes de refinar: si llega otro cambio antes, el refinado (caro) se cancela sin haber empezado. */
     private val refineDelayMs: Long = if (tier.isLowRam) 220L else 120L
+    /** Render final ya disponible por ediciones (procesado guardado + borradores). Solo se usa en Main. */
+    private val finalFiles = HashMap<PageEdits, File>()
+    private var draftJob: Job? = null
+    private var draftEdits: PageEdits? = null
     private var thumbsJob: Job? = null
     private var thumbsKey: Any? = null
     private var disposed = false
@@ -141,6 +160,26 @@ internal class EditorSession(
                 page = p
                 edits = p.edits
                 savedEdits = p.edits
+                // 1) Lo primero que se ve: el procesado guardado (resultado final real), decodificado a la resolución
+                //    de pantalla en ~100-300 ms. Nada de reprocesar al abrir.
+                val processed = withContext(Dispatchers.IO) { container.documents.processedFileIfReady(docId, p) }
+                if (processed != null) {
+                    finalFiles[p.edits] = processed
+                    val shown = withContext(Dispatchers.IO) {
+                        runCatching { decodeFinal(processed, previewSide) }.onFailure { Log.w(TAG, "No se pudo abrir el procesado", it) }.getOrNull()
+                    }
+                    if (disposed) {
+                        shown?.first?.recycle()
+                        return@launch
+                    }
+                    if (shown != null) {
+                        preview = shown.first.asImageBitmap()
+                        previewEdits = p.edits
+                        previewFinal = true
+                        renderedSide = shown.second
+                    }
+                }
+                // 2) Imagen de trabajo (recorte, vistas previas al editar), en segundo plano mientras ya se ve la hoja.
                 val file = container.documents.originalFile(docId, p)
                 // Imagen de trabajo del editor (recorte con lupa, vista previa y zoom): en gama alta la foto completa
                 // (hasta 12.6 MP), en gama media 8 MP y en gama baja ~3 MP (vista previa de <= 1280 px). Lado largo
@@ -169,6 +208,7 @@ internal class EditorSession(
                 sourceImage = bmp.asImageBitmap()
                 loading = false
                 startPreviewPipeline()
+                // Con el procesado ya en pantalla esto no calcula nada (mismas ediciones = resultado final).
                 requestPreview()
                 regenerateThumbs()
             } catch (c: CancellationException) {
@@ -347,8 +387,37 @@ internal class EditorSession(
     private fun startPreviewPipeline() {
         scope.launch {
             combine(editsFlow.filterNotNull(), sideFlow) { e, side -> e to side }.collectLatest { (e, side) ->
+                // Render final en curso de OTRAS ediciones: ya no sirve.
+                if (draftEdits != null && draftEdits != e) cancelDraft()
+                // a) Resultado final ya disponible (procesado guardado o borrador): se muestra TAL CUAL.
+                val final = finalFiles[e]?.takeIf { it.exists() }
+                if (final != null) {
+                    if (previewFinal && e == previewEdits && side <= renderedSide) {
+                        previewPending = false
+                        return@collectLatest
+                    }
+                    previewBusy = true
+                    try {
+                        val shown = withContext(Dispatchers.IO) { runCatching { decodeFinal(final, side) }.getOrNull() }
+                        if (shown != null) {
+                            preview = shown.first.asImageBitmap()
+                            previewEdits = e
+                            previewFinal = true
+                            renderedSide = shown.second
+                            previewPending = false
+                            return@collectLatest
+                        }
+                        finalFiles.remove(e)
+                    } finally {
+                        previewBusy = false
+                    }
+                }
+                // b) Vista previa aproximada (rápida + refinada) y, después, el render final en segundo plano.
                 // Solo cambió el zoom y la vista previa actual ya tiene resolución suficiente: nada que hacer.
-                if (e == previewEdits && side <= renderedSide) return@collectLatest
+                if (e == previewEdits && side <= renderedSide) {
+                    previewPending = false
+                    return@collectLatest
+                }
                 delay(PREVIEW_DEBOUNCE_MS)
                 val src = source ?: return@collectLatest
                 previewBusy = true
@@ -360,7 +429,10 @@ internal class EditorSession(
                         val fast = withContext(Dispatchers.Default) {
                             work.withLock { if (src.isRecycled) null else fastPreview(src, e) }
                         }
-                        if (fast != null) preview = fast.asImageBitmap()
+                        if (fast != null) {
+                            preview = fast.asImageBitmap()
+                            previewFinal = false
+                        }
                         // Si el usuario sigue moviendo el control, collectLatest cancela aquí y nunca se paga
                         // la vista previa completa de un valor intermedio.
                         delay(refineDelayMs)
@@ -374,6 +446,7 @@ internal class EditorSession(
                         bmp.setHasMipMap(true)
                         preview = bmp.asImageBitmap()
                         previewEdits = e
+                        previewFinal = false
                         renderedSide = side
                     }
                     previewPending = false
@@ -385,8 +458,67 @@ internal class EditorSession(
                 } finally {
                     previewBusy = false
                 }
+                startDraft(e)
             }
         }
+    }
+
+    /**
+     * Render FINAL de [e] en segundo plano tras [DRAFT_IDLE_MS] sin cambios (trabajo propio, fuera de collectLatest
+     * para no bloquear la siguiente vista previa). Al terminar sustituye a la vista previa aproximada si las ediciones
+     * siguen siendo esas.
+     */
+    private fun startDraft(e: PageEdits) {
+        if (!backgroundFinal || disposed) return
+        if (draftEdits == e && draftJob?.isActive == true) return
+        cancelDraft()
+        draftEdits = e
+        draftJob = scope.launch {
+            delay(DRAFT_IDLE_MS)
+            finalizing = true
+            try {
+                val f = container.documents.renderDraft(docId, pageId, e)
+                finalFiles[e] = f
+                if (edits == e && !disposed) {
+                    val side = sideFlow.value
+                    val shown = withContext(Dispatchers.IO) { runCatching { decodeFinal(f, side) }.getOrNull() }
+                    if (shown != null && edits == e) {
+                        preview = shown.first.asImageBitmap()
+                        previewEdits = e
+                        previewFinal = true
+                        renderedSide = shown.second
+                    }
+                }
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                Log.w(TAG, "No se pudo calcular el resultado final", t)
+            } finally {
+                if (draftEdits == e) {
+                    finalizing = false
+                    draftEdits = null
+                }
+            }
+        }
+    }
+
+    private fun cancelDraft() {
+        draftJob?.cancel()
+        draftJob = null
+        draftEdits = null
+        finalizing = false
+    }
+
+    /**
+     * Decodifica un render final a lado largo <= [side] (mipmaps para el zoom). Devuelve el bitmap y el lado
+     * "cubierto" (si el archivo cabe entero en [side], ya está a resolución completa: no hace falta rehacerlo).
+     */
+    private fun decodeFinal(file: File, side: Int): Pair<Bitmap, Int> {
+        val bmp = BitmapIO.decodeThumbnail(file.absolutePath, side.coerceAtMost(MAX_TEXTURE_SIDE))
+        bmp.setHasMipMap(true)
+        val (w, h) = BitmapIO.decodeBounds(file.absolutePath)
+        val covered = if (maxOf(bmp.width, bmp.height) >= maxOf(w, h)) Int.MAX_VALUE else side
+        return bmp to covered
     }
 
     /** Vista previa rápida: filtro sobre [fastGeo] (se rehace solo si cambia la geometría). Llamar bajo [work]. */
@@ -466,10 +598,15 @@ internal class EditorSession(
         if (saving) return false
         saving = true
         try {
+            // Un render final en curso de ESTAS ediciones se espera (updateEdits lo reutiliza: guardar es instantáneo);
+            // uno de otras ediciones se cancela.
+            if (draftEdits == edits) draftJob?.join() else cancelDraft()
             // Libera la caché de vista previa antes del render completo (menos memoria en gama baja).
             withContext(Dispatchers.Default) { work.withLock { processor.clearPreviewCache() } }
-            container.documents.updateEdits(docId, pageId, edits)
+            val saved = container.documents.updateEdits(docId, pageId, edits)
             savedEdits = edits
+            page = saved
+            withContext(Dispatchers.IO) { container.documents.processedFileIfReady(docId, saved) }?.let { finalFiles[edits] = it }
             return true
         } catch (c: CancellationException) {
             throw c
@@ -485,6 +622,11 @@ internal class EditorSession(
         if (disposed) return
         disposed = true
         scope.cancel()
+        // Borradores del render final que no se guardaron (los del procesado actual se conservan).
+        if (finalFiles.size > 1 || draftEdits != null) {
+            val repo = container.documents
+            CoroutineScope(Dispatchers.IO).launch { runCatching { repo.discardDrafts(docId, pageId) } }
+        }
         val src = source
         val ts = thumbSource
         val fs = fastSource
@@ -509,6 +651,8 @@ internal class EditorSession(
         private const val TAG = "EditorSession"
         /** Debounce corto: el primer paso es barato, así que se puede reaccionar casi al instante. */
         private const val PREVIEW_DEBOUNCE_MS = 40L
+        /** Sin cambios durante este tiempo -> se calcula el render final en segundo plano. */
+        private const val DRAFT_IDLE_MS = 900L
         private const val THUMB_SOURCE_SIDE = 280
         private const val THUMB_YIELD_MS = 60L
         private const val FAST_SIDE_LOW = 480

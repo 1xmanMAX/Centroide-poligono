@@ -69,6 +69,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
+import com.scannerpromax.data.VersionedFile
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -322,8 +324,10 @@ fun HomeScreen(
                         }
                         filtered.isEmpty() -> fullItem("noResults") { NoResults(query) }
                         else -> items(filtered, key = { it.id }, contentType = { if (gridMode) "card" else "row" }) { doc ->
-                            val thumb = remember(doc.id, doc.pages.firstOrNull()?.thumbFile) {
-                                doc.pages.firstOrNull()?.thumbFile?.let { File(container.documents.docDir(doc.id), it) }
+                            // Miniatura del procesado ACTUAL de la primera página (con su versión para la caché), en IO.
+                            val first = doc.pages.firstOrNull()
+                            val thumb by produceState<VersionedFile?>(null, doc.id, first?.id, first?.thumbFile, first?.processedFile, first?.edits) {
+                                value = first?.let { p -> withContext(Dispatchers.IO) { container.documents.displayThumb(doc.id, p) } }
                             }
                             // Misma instancia mientras el documento no cambie: la tarjeta se salta la recomposición.
                             val actions = remember(doc) { actionsFor(doc) }

@@ -14,6 +14,8 @@ import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -165,18 +167,36 @@ internal fun PageViewerDialog(
                 return@Box
             }
             val repo = container.documents
+            // El procesado ACTUAL tal cual (la misma imagen que la miniatura y que se exporta): sin reprocesar. Solo si
+            // aún no existe (página recién capturada en cola, o archivo perdido) se genera, con aviso.
+            var rendering by remember(page.id) { mutableStateOf(false) }
             val file by produceState<File?>(null, page.id, page.processedFile, page.edits) {
+                val ready = withContext(Dispatchers.IO) { repo.processedFileIfReady(docId, page) }
+                if (ready != null) {
+                    value = ready
+                    return@produceState
+                }
                 value = null
-                value = withContext(Dispatchers.IO) {
-                    runCatching { repo.processedFile(docId, page) }.getOrNull()
-                        ?: repo.originalFile(docId, page).takeIf { it.exists() }
+                rendering = true
+                try {
+                    value = runCatching { repo.processedFile(docId, page) }.getOrNull()
+                        ?: withContext(Dispatchers.IO) { repo.originalFile(docId, page).takeIf { it.exists() } }
+                } finally {
+                    rendering = false
                 }
             }
             val f = file
             if (f == null) {
-                CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White)
+                Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(color = Color.White)
+                    if (rendering) {
+                        Spacer(Modifier.height(12.dp))
+                        Text("Procesando la página…", color = Color.White)
+                    }
+                }
             } else {
-                ZoomableFileImage(f, Modifier.fillMaxSize())
+                // key: al cambiar el archivo (página editada) se rehace el estado de zoom y la decodificación.
+                androidx.compose.runtime.key(f.path) { ZoomableFileImage(f, Modifier.fillMaxSize()) }
             }
 
             Row(
