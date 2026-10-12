@@ -577,10 +577,12 @@ fun ReviewScreen(
                 onEdit = { p -> viewerIndex = null; reopenViewerPageId = p.id; onEditPage(p.id) },
             )
         }
-        // Vuelta del editor: se reabre el visor en la página editada (ya con su procesado nuevo).
-        LaunchedEffect(reopenViewerPageId, order.size) {
-            val id = reopenViewerPageId ?: return@LaunchedEffect
-            if (order.isEmpty()) return@LaunchedEffect
+        // Vuelta del editor: se reabre el visor en la página editada (ya con su procesado nuevo). Solo en la composición
+        // NUEVA de esta pantalla (la que se crea al volver, con el valor restaurado), nunca en la que abrió el editor.
+        val reopenAtEntry = remember { reopenViewerPageId }
+        LaunchedEffect(reopenAtEntry, order.size) {
+            val id = reopenAtEntry ?: return@LaunchedEffect
+            if (reopenViewerPageId != id || order.isEmpty()) return@LaunchedEffect
             val i = order.indexOfFirst { it.id == id }
             reopenViewerPageId = null
             if (i >= 0) viewerIndex = i
