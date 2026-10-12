@@ -88,6 +88,28 @@ Todo en `imaging/` (OpenCV 4.10, sin red). Tiempos medidos con el harness Python
   pizarra, poca luz y foto de pantalla; cada una con su procesamiento (recibo: contraste local fuerte con CLAHE;
   pantalla: anti-muaré antes del filtro). `recommendFilter` devuelve el filtro concreto equivalente (data/ puede usarlo
   para el filtro inicial; asignar `AUTO` directamente es preferible).
+- **Sombras tratadas por zona** (`ShadowMap.kt`: `Shadows`, `ShadowMath`): modelo multiplicativo (la sombra de la mano,
+  del celular o de un pliegue multiplica la luz por un factor por canal, más azulado, suave dentro y con penumbra
+  estrecha). La sombra se detecta **en el fondo estimado** (papel sin tinta), como la zona cuya luz cae por debajo
+  de la envolvente de luz plena del entorno (fuerza 0..1 con margen para la penumbra; la tinta y los objetos no
+  cuentan). Sólo en esa zona: (1) **re-iluminación** a ~640 px y por canal sobre la imagen ya normalizada (cierre
+  morfológico que quita la tinta sin mover el borde de la sombra + media del papel sin sesgo; bloques oscuros o de
+  color se rellenan con el entorno) -> sin escalón ni halo en la penumbra y sin tinte azul; (2) **umbrales por el
+  ruido medido** en la zona (`TextRegions`: no por la ganancia, que lo sobrestimaba y partía los trazos tenues);
+  (3) **des-ruido** de la zona (filtro guiado con el σ medido; `PrintedPage`) y (4) **color de la tinta cálida**
+  (amarillo, naranja, marrón: la luz de la sombra y el ISP la apagan) reforzado según la luz (x luz^-0.8, máx. x1.6).
+  Fuera de la sombra nada cambia. **Sombras profundas** (móvil o mano a pleno sol, papel al 15-40 % de la luz, que
+  el fondo de baja resolución no llega a seguir): en el núcleo de una sombra que entra desde el borde de la imagen,
+  lejos de bordes nítidos (el canto de una figura o foto impresa es un escalón de 1-2 px; la penumbra, una rampa), con
+  texto dentro y en una zona extensa, el residuo puede bajar hasta 0.15 y el umbral de papel sigue al grano medido ->
+  el texto de la sombra se lee como el de la zona iluminada (antes la zona salía en blanco o en gris oscuro). Las
+  fotos en color (fracción alta de píxeles saturados), los bloques oscuros y los dibujos grises dentro de una sombra
+  suave no se re-iluminan; el tinte del residuo se acota (±5 %) fuera de la penumbra y el refuerzo del color cálido no
+  satura ningún canal (el rojo no gira a naranja). El fondo ajeno (mesa) se busca con el fondo ya re-iluminado: una
+  sombra profunda en el borde no se toma por mesa. Banco v3 (RDD, Jung, OSR, RealDAE con referencia sin sombra):
+  RDD MAGIC FM 76.7 -> 79.4, PSNR 13.3 -> 13.9, SSIM 0.733 -> 0.750. Sintético con sombra conocida (penumbra σ=14 px, tinte 0.45/0.50/0.62): error de
+  la normalización en la penumbra 6.3 -> 3.8 niveles (núcleo 6.1 -> 4.2, suelo de ruido ~4); papel de *Texto
+  resaltado* en la penumbra 1.4 -> 0.4.
 - **Detección de bordes** (`DocumentDetector`, `DetLines`): la confianza sale de la calidad del borde (apoyo global,
   peor lado, ángulos, tramos sobre el marco) y no del tamaño del documento, con una comprobación de papel (el interior
   no puede ser más oscuro que su entorno). Un cuadrilátero con papel a ambos lados y tinta fuera es un **marco o tabla

@@ -112,7 +112,7 @@ object TextRegions {
         fun release() { n.release(); dark.release(); gain.release(); ruling.release(); rulingH.release(); rulingV.release() }
     }
 
-    internal fun prepare(rgb0: Mat, bgSide: Int = 384, refineSide: Int = 512): Prepared = MatBag().use { bag ->
+    internal fun prepare(rgb0: Mat, bgSide: Int = 384, refineSide: Int = 512, shadowColor: Boolean = true): Prepared = MatBag().use { bag ->
         // Pizarra / pantalla en modo oscuro: escritura CLARA sobre fondo oscuro -> se invierte (tiza -> tinta oscura
         // sobre blanco) y el resto de la tubería no cambia
         val rgb = if (lightOnDark(rgb0, bag)) bag.mat().also { Core.bitwise_not(rgb0, it); log?.invoke("polaridad invertida") } else rgb0
@@ -122,6 +122,11 @@ object TextRegions {
         // Ganancia local (sombras: el ruido del papel normalizado crece con ella)
         val bgs = bag.mat(); Cv.downscale(bg, bgs, 256)
         bg.release()
+        // Sombras (mano, celular): la tinta cálida de la zona recupera su color ([Shadows.treatZone]; el color de los
+        // trazos y su oscuridad cromática salen de [n])
+        if (shadowColor && rgb === rgb0) Shadows.analyze(bgs)?.let { m ->
+            try { ShadowDebug.time("treatZoneTR") { Shadows.treatZone(n, m, denoise = false) } } finally { m.release() }
+        }
         val bgl = bag.add(Cv.gray(bgs))
         val gain = Mat(); bgl.convertTo(gain, CvType.CV_32F)
         Core.max(gain, Scalar(4.0), gain)
@@ -136,6 +141,9 @@ object TextRegions {
         // las rampas relativas a él darían 0/0)
         val (noise, pm0) = Cv.paperStats(Cv.histogram(v))
         val pm = max(pm0, 1.0)
+        // Sombras: los umbrales de la zona siguen al ruido MEDIDO en ella (no a la ganancia, que lo sobrestima y
+        // partía los trazos tenues en la sombra de la mano) -> [Shadows.effectiveGain]
+        run { val eg = ShadowDebug.time("effGain") { Shadows.effectiveGain(n, gain, pm, NOISE_GAIN_EXP) }; eg.copyTo(gain); eg.release() }
         val dark = Mat()
         Core.bitwise_not(v, dark)
         Core.subtract(dark, Scalar(255.0 - pm), dark)
@@ -1002,7 +1010,7 @@ object TextRegions {
      * color reforzado sobre blanco puro); BLACK_WHITE: 8UC1 (tinta negra con bordes suaves sobre blanco puro).
      */
     internal fun render(rgb: Mat, style: Style, fast: Boolean = false, keepRuling: Boolean = true): Mat = MatBag().use { bag ->
-        val p = prepare(rgb, bgSide = if (fast) 256 else 384, refineSide = if (fast) 320 else 512)
+        val p = prepare(rgb, bgSide = if (fast) 256 else 384, refineSide = if (fast) 320 else 512, shadowColor = style == Style.COLOR)
         try {
             val lay = layout(p)
             try {

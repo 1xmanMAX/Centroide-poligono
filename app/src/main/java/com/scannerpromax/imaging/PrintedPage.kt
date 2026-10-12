@@ -333,14 +333,25 @@ internal object PrintedPage {
         val w = rgb.cols(); val h = rgb.rows()
         val color = style == TextRegions.Style.COLOR
         // Fondo (papel + iluminación) a baja resolución
-        val bg = bag.add(Cv.estimateBackground(rgb, if (fast) 256 else 384, refine = true, refineSide = if (fast) 320 else 1024))
-        // Estadística global (papel, ruido, tinta) sobre la imagen normalizada reducida: igual en todas las franjas
+        val bgPre = bag.mat()
+        val bg = bag.add(ShadowDebug.time("bgPP") { Cv.estimateBackground(rgb, if (fast) 256 else 384, refine = true, refineSide = if (fast) 320 else 1024, preShadow = bgPre) })
+        // Estadística global (papel, ruido, tinta), fondo ajeno y bloques de imagen sobre la imagen normalizada reducida:
+        // igual en todas las franjas. Con el fondo ANTERIOR a la re-iluminación de las sombras: las decisiones globales
+        // (punto negro y blanco, ruido) no cambian por ella; la sombra sólo se trata en su zona, al renderizar las franjas.
+        // El fondo ajeno y los bloques de imagen, en cambio, con el fondo re-iluminado ([smNz]): el papel de una sombra
+        // profunda que el fondo de baja resolución no siguió del todo quedaba oscuro y se tomaba por mesa (-> blanco,
+        // con el texto de la sombra dentro) o por foto.
         val smN = bag.mat()
+        val smNz: Mat
         run {
             val sm = bag.mat(); val sb = bag.mat()
             val k = Cv.downscale(rgb, sm, 1200)
-            Imgproc.resize(bg, sb, sm.size(), 0.0, 0.0, Imgproc.INTER_AREA)
+            Imgproc.resize(if (bgPre.empty()) bg else bgPre, sb, sm.size(), 0.0, 0.0, Imgproc.INTER_AREA)
             Cv.divideByBackground(sm, sb, smN)
+            smNz = if (bgPre.empty()) smN else bag.mat().also { z ->
+                Imgproc.resize(bg, sb, sm.size(), 0.0, 0.0, Imgproc.INTER_AREA)
+                Cv.divideByBackground(sm, sb, z)
+            }
         }
         val g0 = bag.add(Cv.gray(smN))
         val hist = Cv.histogram(g0)
@@ -349,14 +360,20 @@ internal object PrintedPage {
         // Fondo que el recorte dejó dentro (mesa, hueco oscuro entre hojas, en los bordes): manchas oscuras, gruesas
         // y pegadas al borde de la imagen -> blanco (si no, en B/N quedan como manchas negras)
         // (en los lados recortados por los cantos de la hoja no hay mesa: lo pegado a ellos es contenido)
-        var outside = if (sheetSides == 15) null else outsideMask(smN, pm, bag, sheetSides)
+        var outside = if (sheetSides == 15) null else outsideMask(smNz, pm, bag, sheetSides)
         if (outside != null && Core.countNonZero(outside) > PrintTone.OUTSIDE_RESTAT_FRAC * outside.total()) {
             // Mucho fondo ajeno (libro sobre una mesa negra sin recorte): el papel y su ruido se miden sin él (con
             // él, la mitad oscura de la imagen pasaba por papel, el blanco quedaba bajo y el texto, lavado)
             val (n2, p2) = Cv.paperStats(Cv.histogram(g0, notMask(outside, bag)))
-            if (p2 > pm) { noise = n2; pm = max(p2, 1.0); outside = outsideMask(smN, pm, bag, sheetSides) ?: outside }
+            if (p2 > pm) { noise = n2; pm = max(p2, 1.0); outside = outsideMask(smNz, pm, bag, sheetSides) ?: outside }
         }
         val white = (pm - 2.5 * noise).coerceIn(170.0, 250.0)
+        // Sombras (mano, celular): mapa de la zona; al renderizar cada franja se des-ruida y la tinta cálida recupera el color ([Shadows])
+        val shadow = ShadowDebug.time("shPP") {
+            val bs = bag.mat(); Imgproc.resize(bg, bs, Size(384.0 * bg.cols() / max(bg.cols(), bg.rows()), 384.0 * bg.rows() / max(bg.cols(), bg.rows())), 0.0, 0.0, Imgproc.INTER_LINEAR)
+            Shadows.analyze(bs)?.also { bag.add(it.strength); bag.add(it.light) }
+        }
+        val shadowSigma = DoubleArray(1)
         // Punto negro: lo más oscuro de la HOJA (0.3 %, sin el fondo ajeno del recorte, que fijaba el negro en la
         // mesa y dejaba toda la tinta gris)... salvo que TODA la tinta sea tenue (recibo térmico desvaído, foto
         // borrosa, lápiz, fotocopia clara): el trazo típico se lleva hacia el negro (ver [faintBlack]). En B/N
@@ -376,7 +393,7 @@ internal object PrintedPage {
         val oh = if (f > 1.0) (h * f).roundToInt() else h
         val lh = max(4.0, if (st.letterHeight > 0) st.letterHeight * f else oh / 250.0)
         // Bloques de imagen (logos, fotos: compactos y de color) -> en B/N se conservan en gris
-        val images = if (color) emptyList() else findImageBlocks(smN, ow, oh, bag) + pictureBlocks(st, ow, oh)
+        val images = if (color) emptyList() else findImageBlocks(smNz, ow, oh, bag) + pictureBlocks(st, ow, oh)
         val outsideFull = if (outside == null) null else bag.mat().also { Imgproc.resize(outside, it, Size(ow.toDouble(), oh.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR) }
         // Sombras: la división por el fondo amplifica el ruido del papel (ganancia g) -> el punto blanco local baja
         // con el ruido local (σ·g^0.85) para que el papel en sombra quede igual de blanco que el iluminado. Se
@@ -436,6 +453,10 @@ internal object PrintedPage {
                     part.release(); l3.release()
                 }
                 lf.release()
+            }
+            // Sombra: des-ruido de la zona (el grano amplificado por la división) y croma de la tinta ([Shadows])
+            if (shadow != null) {
+                ShadowDebug.time("treatZone") { Shadows.treatZone(nS, shadow, sy0, h, sigmaMemo = shadowSigma) }
             }
             // Ampliación de calidad de la franja (bicúbica; el realce posterior recupera el borde)
             val work: Mat

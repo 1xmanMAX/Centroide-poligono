@@ -210,10 +210,12 @@ internal object Cv {
      * normalizan en vez de rellenarse con el nivel del papel iluminado (antes quedaban como una mancha gris),
      * 3) relleno de zonas no-papel (fotos, bloques de color, regiones oscuras) por convolución
      * normalizada multiescala, 4) suavizado, 5) con [refine]: afinado con filtro guiado a resolución media
-     * (guía = imagen sin tinta) para que el borde de las sombras quede nítido y sin halo, 6) re-escalado.
+     * (guía = imagen sin tinta) para que el borde de las sombras quede nítido y sin halo, 6) con [refine]: re-iluminación
+     * por zona de las sombras ([Shadows.relight]); en [preShadow] (si se pasa) queda el fondo ANTES de ella, a resolución
+     * media (vacío si no había sombra), 7) re-escalado.
      * Funciona con 8UC1 u 8UC3 (RGB). Devuelve un Mat del mismo tamaño/tipo que [img], sin ceros.
      */
-    fun estimateBackground(img: Mat, workSide: Int = 256, refine: Boolean = false, refineSide: Int = 512): Mat = MatBag().use { bag ->
+    fun estimateBackground(img: Mat, workSide: Int = 256, refine: Boolean = false, refineSide: Int = 512, preShadow: Mat? = null): Mat = MatBag().use { bag ->
         val color = img.channels() >= 3
         val sm = bag.mat()
         downscale(img, sm, workSide)
@@ -291,7 +293,16 @@ internal object Cv {
         // 1..10 y img/fondo·230 convertía ±3 de ruido en ±140 niveles (gris moteado). Suelo = max(16, 25 % del
         // percentil 90 del fondo) -> ganancia máxima ~x14 en el peor caso y ~x4 respecto al papel iluminado.
         Core.max(out8, Scalar.all(backgroundFloor(out8)), out8)
-        val src8 = if (refine && min(img.cols(), img.rows()) >= 64) bag.add(refineBackground(img, out8, refineSide)) else out8
+        var src8 = if (refine && min(img.cols(), img.rows()) >= 64) bag.add(refineBackground(img, out8, refineSide)) else out8
+        // Sombras (mano, celular, pliegue, viñeteo): re-iluminación POR ZONA a resolución media ([Shadows]); fuera de
+        // la sombra el fondo no cambia
+        if (refine && min(img.cols(), img.rows()) >= 64) {
+            val map = ShadowDebug.time("analyze") { Shadows.analyze(out8) }
+            if (map != null) {
+                preShadow?.let { src8.copyTo(it) }
+                try { src8 = bag.add(ShadowDebug.time("relight") { Shadows.relight(img, src8, map, if (refineSide <= 320) 512 else 640) }) } finally { map.release() }
+            }
+        }
         val full = Mat()
         Imgproc.resize(src8, full, img.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
         full
@@ -323,7 +334,7 @@ internal object Cv {
      * (cientos de taps a sigma = side/4) a una fracción del coste: la estimación de fondo pasa de ~17 a ~9 ms
      * a 256 px en un PC (más en un A53).
      */
-    private fun blurLarge(src: Mat, dst: Mat, sigma: Double) {
+    internal fun blurLarge(src: Mat, dst: Mat, sigma: Double) {
         if (sigma <= 6.0) { Imgproc.GaussianBlur(src, dst, Size(0.0, 0.0), sigma); return }
         val f = sigma / 3.0
         val sw = max(4, (src.cols() / f).roundToInt()); val sh = max(4, (src.rows() / f).roundToInt())
