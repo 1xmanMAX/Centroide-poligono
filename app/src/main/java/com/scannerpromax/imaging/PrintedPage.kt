@@ -586,8 +586,8 @@ internal object PrintedPage {
         d.convertTo(df, CvType.CV_32F); m.convertTo(mf, CvType.CV_32F); b.convertTo(bf, CvType.CV_32F)
         Core.subtract(df, bf, df); Core.subtract(mf, bf, mf); Core.max(mf, Scalar(30.0), mf)
         Core.divide(df, mf, df)                                   // r
-        val f = bag.mat(); df.convertTo(f, CvType.CV_8U, 255.0 / 0.3, -255.0 * 0.2 / 0.3)
-        Core.LUT(f, smoothLut, f)                                 // f = smoothstep((r - 0.2) / 0.3)
+        val f = bag.mat(); df.convertTo(f, CvType.CV_8U, 255.0 / TAIL_W, -255.0 * TAIL_LO / TAIL_W)
+        Core.LUT(f, smoothLut, f)                                 // f = smoothstep((r - lo) / w)
         // motas tenues sueltas: m < ~18 -> fuera (rampa 18..38)
         val g = bag.mat(); m.convertTo(g, CvType.CV_8U, 255.0 / 20.0, -255.0 * 18.0 / 20.0); Core.LUT(g, smoothLut, g)
         Core.multiply(f, g, f, 1.0 / 255.0)
@@ -603,6 +603,8 @@ internal object PrintedPage {
         for (x in listOf(d, m, b, df, mf, bf, f, g, wp, inv, f3)) x.release()
     }
 
+    private const val TAIL_LO = 0.3
+    private const val TAIL_W = 0.3
     private val smoothLut: Mat by lazy { Cv.lut { i -> val x = i / 255.0; x * x * (3 - 2 * x) * 255.0 } }
 
     /**

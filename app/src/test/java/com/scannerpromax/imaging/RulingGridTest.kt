@@ -128,4 +128,86 @@ class RulingGridTest {
         val photo = blob.copy(area = (0.4 * page.total).toInt(), along = 900, across = 700)
         assertFalse(EdgeClean.decide(photo, page))
     }
+
+    // ---------------------------------------------------------------------------------
+    // Red regular (cuadrícula: misma separación entre rectas vecinas)
+    // ---------------------------------------------------------------------------------
+
+    @Test
+    fun stripLatticeRejectsHalfStepAndSpuriousPeaks() {
+        // Red de paso 30 (k = 0..12) con rectas que faltan (k = 4, 5), una espuria a medio paso y dos sueltas
+        val real = (0..12).filter { it != 4 && it != 5 }.map { 20.0 + 30.0 * it }
+        val peaks = (real + listOf(20.0 + 30.0 * 7 + 15.0, 150.0, 330.0 + 11.0)).sorted().toDoubleArray()
+        val segs = RulingGrid.stripSegments(peaks, 30.0)
+        assertEquals(1, segs.size)
+        val sg = segs[0]
+        // numeración entera: k relativo = (pos - 20) / 30
+        for (i in sg.k.indices) assertEquals(sg.k[i] * 30.0 + sg.a, sg.pos[i], 0.01)
+        assertEquals(30.0, sg.b, 0.05)
+        assertFalse("la media recta no entra", sg.pos.any { abs(it - 245.0) < 1 })
+        assertFalse("la suelta no entra", sg.pos.any { abs(it - 341.0) < 1 })
+        // las rectas que faltan se interpolan en su sitio
+        assertEquals(140.0, sg.at(4), 0.01)
+        assertEquals(170.0, sg.at(5), 0.01)
+    }
+
+    @Test
+    fun twoPagesWithDifferentPhaseGiveTwoSegments() {
+        val a = (0..8).map { 10.0 + 30.0 * it }
+        val b = (0..8).map { 325.0 + 30.0 * it }
+        val segs = RulingGrid.stripSegments((a + b).toDoubleArray(), 30.0)
+        assertEquals(2, segs.size)
+        assertTrue(segs.any { abs(it.lo - 10.0) < 0.5 && abs(it.hi - 250.0) < 0.5 })
+        assertTrue(segs.any { abs(it.lo - 325.0) < 0.5 })
+    }
+
+    /** Máscara de una red de rectas horizontales y = y0 + k·paso(x) + curva(x) de grosor 2 (paso variable suave). */
+    private fun latticeMask(y0: Double, step: (Int) -> Double, n: Int, skip: Set<Int> = emptySet(), extraY: List<Int> = emptyList()): ByteArray {
+        val m = ByteArray(w * h)
+        for (x in 10 until w - 10) {
+            for (k in 0 until n) {
+                if (k in skip) continue
+                val y = (y0 + k * step(x) + 3.0 * kotlin.math.sin(x / 150.0)).toInt()
+                if (y in 0 until h - 1) { m[y * w + x] = 1; m[(y + 1) * w + x] = 1 }
+            }
+            for (y in extraY) m[y * w + x] = 1
+        }
+        return m
+    }
+
+    @Test
+    fun latticeKeepsConstantSpacingAndCompletesMissingLines() {
+        // Paso 24 que crece suavemente a 26 de izquierda a derecha (perspectiva), 2 rectas que faltan en toda la
+        // página y una recta inventada a medio paso (renglón de otra cosa)
+        val step = { x: Int -> 24.0 + 2.0 * x / w }
+        val f = RulingGrid.lattice(latticeMask(30.0, step, 14, skip = setOf(6, 7), extraY = listOf((30 + 3 * 24 + 12))), w, h, true)
+        val ls = f.lines.sortedBy { it.meanCross() }
+        assertEquals(14, ls.size)
+        for (i in 1 until ls.size) {
+            val x = 300.0
+            val d = ls[i].at(x) - ls[i - 1].at(x)
+            assertEquals("separación entre la recta ${i - 1} y $i", step(300), d, 1.5)
+        }
+        assertTrue(f.period in 23.5..26.5)
+    }
+
+    @Test
+    fun latticeFollowsLineNumberingAcrossTheWidth() {
+        // Cada recta debe ser UNA sola recta continua de borde a borde (sin saltar a la vecina a mitad de camino)
+        val f = RulingGrid.lattice(latticeMask(20.0, { 25.0 }, 15), w, h, true)
+        assertEquals(15, f.lines.size)
+        for (l in f.lines) {
+            assertTrue(l.start <= 40 && l.end >= w - 40)
+            for (q in 1 until l.size) assertTrue(abs(l.cross[q] - l.cross[q - 1]) < 4.0)
+        }
+    }
+
+    @Test
+    fun irregularRulingGivesNoLattice() {
+        // Rectas a separaciones sin paso común: mejor sin cuadrícula
+        val m = ByteArray(w * h)
+        for (y in listOf(20, 47, 61, 118, 135, 201, 260, 283, 349)) for (x in 10 until w - 10) m[y * w + x] = 1
+        val f = RulingGrid.lattice(m, w, h, true)
+        assertTrue(f.lines.size <= 3)
+    }
 }

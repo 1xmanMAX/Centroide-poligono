@@ -87,17 +87,390 @@ internal object RulingGrid {
             Line(a.toDoubleArray(), c.toDoubleArray(), l.observed)
         }
 
-    fun extractGrid(maskH: ByteArray?, maskV: ByteArray?, w: Int, h: Int): Grid {
-        val fh = if (maskH != null) family(maskH, w, h, true) else Family.EMPTY
-        val fv = if (maskV != null) family(maskV, w, h, false) else Family.EMPTY
+    /**
+     * Cuadrícula como RED REGULAR ([lattice]): en cada familia las rectas están a un paso casi constante; sólo se aceptan
+     * las rectas en posiciones de la red (las candidatas a medio paso, duplicadas o trazos de escritura alineados se
+     * descartan) y se completan las que faltan. Las rectas cortas se prolongan por donde las cruza la otra familia.
+     * Una familia sin red fiable queda vacía (mejor sin cuadrícula que con una red errónea).
+     */
+    fun extractGrid(maskH: ByteArray?, maskV: ByteArray?, w: Int, h: Int, dark: ByteArray? = null, level: Double = 0.0): Grid {
+        val fh = if (maskH != null) lattice(maskH, w, h, true, dark, level) else Family.EMPTY
+        val fv = if (maskV != null) lattice(maskV, w, h, false, dark, level) else Family.EMPTY
         var hs = fh.lines; var vs = fv.lines
-        repeat(2) {
-            hs = fillRegular(hs, fh.period); vs = fillRegular(vs, fv.period)
+        if (hs.isNotEmpty() && vs.isNotEmpty()) {
             val h2 = crossExtend(hs, vs, fh.slope, w.toDouble()); val v2 = crossExtend(vs, hs, fv.slope, h.toDouble())
             hs = h2; vs = v2
         }
-        hs = dedupe(fillRegular(hs, fh.period), fh.period); vs = dedupe(fillRegular(vs, fv.period), fv.period)
+        hs = dedupe(hs, fh.period); vs = dedupe(vs, fv.period)
         return Grid(hs.map { smooth(it) }, vs.map { smooth(it) }, fh.period, fv.period, fh.slope, fv.slope)
+    }
+
+    // =====================================================================================
+    // Red regular
+    // =====================================================================================
+
+    /**
+     * Tramo de red en una franja: picos observados [k] -> [pos] (k entero relativo) y ajuste pos ≈ [a] + [b]·k.
+     * [lo]..[hi]: extensión perpendicular cubierta (de la primera a la última recta observada).
+     */
+    class Seg(val strip: Int, val k: IntArray, val pos: DoubleArray, val a: Double, val b: Double) {
+        val kMin: Int get() = k.first()
+        val kMax: Int get() = k.last()
+        val lo: Double get() = pos.first()
+        val hi: Double get() = pos.last()
+
+        /** Posición de la recta k: la observada si la hay; si no, interpolada entre las observadas vecinas (sigue la
+         *  perspectiva local) o extrapolada con el paso. */
+        fun at(kk: Int): Double {
+            val i = k.binarySearch(kk)
+            if (i >= 0) return pos[i]
+            val ins = -i - 1
+            return when {
+                ins == 0 -> pos[0] - b * (k[0] - kk)
+                ins >= k.size -> pos[k.size - 1] + b * (kk - k[k.size - 1])
+                else -> { val f = (kk - k[ins - 1]).toDouble() / (k[ins] - k[ins - 1]); pos[ins - 1] + f * (pos[ins] - pos[ins - 1]) }
+            }
+        }
+
+        fun observed(kk: Int) = k.binarySearch(kk) >= 0
+    }
+
+    /** Tolerancia (fracción del paso) para aceptar un pico como recta de la red. */
+    const val LATTICE_TOL = 0.2
+
+    /** Máximo de rectas seguidas sin pico dentro de un tramo de red de una franja. */
+    const val LATTICE_MAX_MISSING = 2
+
+    /**
+     * Tramos de red de los picos [peaks] (ordenados) de una franja con paso aproximado [p0]: hasta 3 redes (dos páginas,
+     * cada una con su fase). Para cada una se busca el paso (±8 %) y la fase con más picos a <= [LATTICE_TOL]·paso de
+     * fase + k·paso (un pico por k), se ajusta por mínimos cuadrados y se parte donde faltan más de
+     * [LATTICE_MAX_MISSING] rectas seguidas. Los picos fuera de la red dentro de un tramo (medias rectas inventadas,
+     * escritura) se descartan.
+     */
+    fun stripSegments(peaks: DoubleArray, p0: Double, strip: Int = 0): List<Seg> {
+        val out = ArrayList<Seg>()
+        var rem = peaks.sorted()
+        repeat(3) {
+            if (rem.size < 3) return out
+            var bestScore = 0.0; var bestP = 0.0; var bestPh = 0.0
+            var pp = 0.92 * p0
+            while (pp <= 1.0801 * p0) {
+                for (anchor in rem) {
+                    val byK = HashMap<Int, Double>()
+                    for (x in rem) {
+                        val kk = Math.round((x - anchor) / pp).toInt()
+                        val r = abs(x - anchor - kk * pp) / pp
+                        if (r <= LATTICE_TOL) { val o = byK[kk]; if (o == null || r < o) byK[kk] = r }
+                    }
+                    var sc = 0.0
+                    for (r in byK.values) sc += 1.0 - 1.5 * r
+                    if (sc > bestScore) { bestScore = sc; bestP = pp; bestPh = anchor }
+                }
+                pp += 0.01 * p0
+            }
+            if (bestScore < 2.5) return out
+            // Crecimiento desde el ancla: cada recta siguiente se predice con el paso LOCAL (media móvil de las
+            // separaciones observadas): sigue un paso que varía suavemente y se detiene donde faltan más de
+            // LATTICE_MAX_MISSING rectas seguidas (fin de la página o de la cuadrícula)
+            val obsK = java.util.TreeMap<Int, Double>()
+            obsK[0] = bestPh
+            for (dir in intArrayOf(1, -1)) {
+                var bl = bestP; var lastK = 0; var lastX = bestPh; var miss = 0; var kk = dir; var nObs = 1
+                while (miss <= LATTICE_MAX_MISSING) {
+                    val pred = lastX + bl * (kk - lastK)
+                    // (con el paso ya medido, la tolerancia se estrecha: entre rectas vecinas el paso casi no cambia)
+                    var best = Double.NaN; var bd = (if (nObs >= 2) 0.12 else LATTICE_TOL) * bl
+                    for (x in rem) { val d = abs(x - pred); if (d <= bd) { bd = d; best = x } }
+                    if (!best.isNaN()) {
+                        val sp = (best - lastX) / (kk - lastK)
+                        bl = (0.6 * bl + 0.4 * sp).coerceIn(0.95 * bl, 1.05 * bl).coerceIn(0.85 * p0, 1.15 * p0)
+                        obsK[kk] = best; lastK = kk; lastX = best; miss = 0; nObs++
+                    } else miss++
+                    kk += dir
+                }
+            }
+            val ks0 = obsK.keys.toIntArray()
+            if (ks0.size < 3) {
+                rem = rem.filter { abs(it - bestPh) > 0.5 * bestP }
+                return@repeat
+            }
+            val k0 = ks0[0]
+            val sk = IntArray(ks0.size) { ks0[it] - k0 }
+            val sx = DoubleArray(ks0.size) { obsK[ks0[it]]!! }
+            val mk = sk.average(); val mx = sx.average()
+            var skk = 0.0; var skx = 0.0
+            for (i in sk.indices) { skk += (sk[i] - mk) * (sk[i] - mk); skx += (sk[i] - mk) * (sx[i] - mx) }
+            val bb = if (skk > 0) (skx / skk).coerceIn(0.85 * p0, 1.15 * p0) else bestP
+            out.add(Seg(strip, sk, sx, mx - bb * mk, bb))
+            val lo = sx.first() - 0.5 * bb; val hi = sx.last() + 0.5 * bb
+            rem = rem.filter { x -> x < lo || x > hi }
+        }
+        return out
+    }
+
+    /**
+     * Familia como red regular: franjas a lo largo (~1/32 del lado), tramos de red por franja ([stripSegments]),
+     * enlace de los tramos de franjas vecinas con la misma fase (índice k común: posición ≈ fase + k·paso, con paso y
+     * fase que varían suavemente) en ZONAS (una por página / bloque de cuadrícula) y, en cada zona, una recta por cada k
+     * entre la primera y la última observada: la posición observada donde hay pico y la interpolada de las vecinas
+     * donde no. Zonas con paso incoherente (dispersión > 8 %) o poco apoyo se descartan.
+     */
+    fun lattice(mask: ByteArray, w: Int, h: Int, horizontal: Boolean, dark: ByteArray? = null, level: Double = 0.0): Family {
+        val alongLen = if (horizontal) w else h
+        val crossLen = if (horizontal) h else w
+        if (alongLen < 32 || crossLen < 16) return Family.EMPTY
+        val stripW = max(10, alongLen / 32)
+        val nStrips = ceil(alongLen.toDouble() / stripW).toInt()
+        fun on(a: Int, c: Int) = mask[if (horizontal) c * w + a else a * w + c].toInt() != 0
+        val centers = DoubleArray(nStrips)
+        val peaks = ArrayList<DoubleArray>(nStrips)
+        val prof = DoubleArray(crossLen)
+        for (s in 0 until nStrips) {
+            val a0 = s * stripW; val a1 = min(alongLen, a0 + stripW)
+            centers[s] = (a0 + a1 - 1) / 2.0
+            java.util.Arrays.fill(prof, 0.0)
+            if (horizontal) {
+                for (c in 0 until crossLen) { var n = 0; val row = c * w; for (a in a0 until a1) if (mask[row + a].toInt() != 0) n++; prof[c] = n.toDouble() }
+            } else {
+                for (a in a0 until a1) { val row = a * w; for (c in 0 until crossLen) if (mask[row + c].toInt() != 0) prof[c] += 1.0 }
+            }
+            val len = (a1 - a0).toDouble()
+            for (c in 0 until crossLen) prof[c] /= len
+            peaks.add(profilePeaks(prof))
+        }
+        val gaps = ArrayList<Double>()
+        for (p in peaks) for (i in 1 until p.size) gaps.add(p[i] - p[i - 1])
+        val p0 = regularPeriod(gaps) ?: return Family.EMPTY
+        // Con la oscuridad completa: picos de su perfil por franja (las rectas que la huella no recogió -sombras,
+        // tramos tenues- también), unidos a los de la huella
+        if (dark != null && level > 0) {
+            val cap = (3.0 * level + 10.0).toInt()
+            val r = max(2, (0.35 * p0).roundToInt())
+            for (s in 0 until nStrips) {
+                val a0 = s * stripW; val a1 = min(alongLen, a0 + stripW)
+                java.util.Arrays.fill(prof, 0.0)
+                if (horizontal) {
+                    for (c in 0 until crossLen) { var sum = 0; val row = c * w; for (a in a0 until a1) sum += min(cap, dark[row + a].toInt() and 0xff); prof[c] = sum.toDouble() }
+                } else {
+                    for (a in a0 until a1) { val row = a * w; for (c in 0 until crossLen) prof[c] += min(cap, dark[row + c].toInt() and 0xff).toDouble() }
+                }
+                val len = (a1 - a0).toDouble()
+                for (c in 0 until crossLen) prof[c] /= len
+                val dp = darkPeaks(prof, r, max(1.5, 0.15 * level))
+                peaks[s] = mergePeaks(peaks[s], dp)
+            }
+        }
+        val segs = ArrayList<Seg>()
+        for (s in 0 until nStrips) segs.addAll(stripSegments(peaks[s], p0, s))
+        if (segs.isEmpty()) return Family.EMPTY
+        val zones = linkSegments(segs, centers, p0, maxSkip = max(2, (0.25 * alongLen / stripW).toInt()))
+        val lines = ArrayList<Line>()
+        val periods = ArrayList<Double>()
+        for (z in zones) {
+            val zl = zoneLines(z, centers, p0) ?: continue
+            for (sg in z.keys) periods.add(sg.b)
+            lines.addAll(zl.map { l -> refineEnds(l, stripW) { a, c -> a in 0 until alongLen && c in 0 until crossLen && on(a, c) } })
+        }
+        if (lines.size < 2) return Family.EMPTY
+        val period = periods.sorted()[periods.size / 2]
+        val slope = familySlope(lines, alongLen.toDouble())
+        return Family(lines, slope, period)
+    }
+
+    /**
+     * Agrupa los tramos en zonas de red continua: el tramo B (franja posterior, hasta [maxSkip] franjas sin tramo entre
+     * medias) continúa al A si se solapan en perpendicular, tienen paso parecido (±10 %) y una recta de A cae a
+     * <= 0.25 pasos de una de B; el desfase de índices queda fijado por esa coincidencia. Devuelve, por zona, el
+     * desplazamiento de índice de cada tramo (k global = k local + desplazamiento).
+     */
+    fun linkSegments(segs: List<Seg>, centers: DoubleArray, p0: Double, maxSkip: Int = 2): List<Map<Seg, Int>> {
+        val n = segs.size
+        val parent = IntArray(n) { it }; val off = IntArray(n)   // off: índice relativo al padre
+        fun find(i: Int): Int {
+            val p = parent[i]
+            if (p == i) return i
+            val r = find(p)
+            off[i] += off[p]; parent[i] = r
+            return r
+        }
+        fun offOf(i: Int): Int { find(i); return if (parent[i] == i) 0 else off[i] }
+        val byStrip = segs.indices.groupBy { segs[it].strip }
+        val strips = byStrip.keys.sorted()
+        // candidatos (A, B, dk = kB_global - kA_global relación) ordenados por calidad
+        class Cand(val i: Int, val j: Int, val dk: Int, val q: Double)
+        val cands = ArrayList<Cand>()
+        for (sa in strips) {
+            for (i in byStrip[sa]!!) {
+                val A = segs[i]
+                for (sb in strips) {
+                    if (sb <= sa || sb - sa > maxSkip + 1) continue
+                    for (j in byStrip[sb]!!) {
+                        val B = segs[j]
+                        if (abs(A.b - B.b) > 0.1 * p0) continue
+                        val lo = max(A.lo, B.lo); val hi = min(A.hi, B.hi)
+                        if (hi - lo < 1.5 * p0) continue
+                        val c = (lo + hi) / 2
+                        val ka = Math.round((c - A.a) / A.b).toInt()
+                        val xa = A.at(ka)
+                        val kbf = (xa - B.a) / B.b
+                        val kb = Math.round(kbf).toInt()
+                        val d = abs(xa - B.at(kb))
+                        // tolerancia: 0.25 pasos (algo más si hay franjas sin tramo entre medias: la recta se inclina)
+                        val tol = (0.18 + 0.01 * (sb - sa - 1)).coerceAtMost(0.25) * p0
+                        if (d > tol) continue
+                        cands.add(Cand(i, j, ka - kb, d / p0 + 0.05 * (sb - sa - 1)))
+                    }
+                }
+            }
+        }
+        cands.sortBy { it.q }
+        for (cd in cands) {
+            val ri = find(cd.i); val rj = find(cd.j)
+            val oi = offOf(cd.i); val oj = offOf(cd.j)
+            // k_glob(i) = k + oi (relativo a ri); queremos k_glob(j, ka-dk... ) : kB + dk ≡ kA  -> offset_j = offset_i + dk
+            if (ri == rj) continue   // ya enlazados (si el desfase no coincide, se ignora)
+            // unir rj bajo ri: off[rj] tal que oj + off[rj] = oi + dk
+            parent[rj] = ri; off[rj] = oi + cd.dk - oj
+        }
+        val zones = HashMap<Int, HashMap<Seg, Int>>()
+        for (i in 0 until n) { val r = find(i); zones.getOrPut(r) { HashMap() }[segs[i]] = offOf(i) }
+        return zones.values.toList()
+    }
+
+    /**
+     * Modelo suave de la red de una zona: pos(k, t) = a0 + a1·u + a2·u² + k·(b0 + b1·u + b2·u²) + c·k² (u = t
+     * normalizado a -1..1): fase y paso que varían suavemente a lo largo (curvatura, perspectiva residual) y paso que
+     * cambia poco entre la primera y la última recta.
+     */
+    class ZoneModel(private val coef: DoubleArray, private val t0: Double, private val ts: Double) {
+        fun at(k: Int, t: Double): Double {
+            val u = (t - t0) / ts
+            return coef[0] + coef[1] * u + coef[2] * u * u + k * (coef[3] + coef[4] * u + coef[5] * u * u) + coef[6] * k * k
+        }
+        fun period(t: Double): Double { val u = (t - t0) / ts; return coef[3] + coef[4] * u + coef[5] * u * u }
+    }
+
+    private fun fitModel(obs: List<DoubleArray>, w: BooleanArray, t0: Double, ts: Double): ZoneModel? {
+        val n = 7
+        val a = Array(n) { DoubleArray(n + 1) }
+        var cnt = 0
+        for ((i, o) in obs.withIndex()) {
+            if (!w[i]) continue
+            cnt++
+            val k = o[0]; val u = (o[1] - t0) / ts
+            val f = doubleArrayOf(1.0, u, u * u, k, k * u, k * u * u, k * k)
+            for (r in 0 until n) { for (q in 0 until n) a[r][q] += f[r] * f[q]; a[r][n] += f[r] * o[2] }
+        }
+        if (cnt < 8) return null
+        // regularización leve (los términos de orden alto no se disparan con pocas franjas)
+        for (r in intArrayOf(2, 5, 6)) a[r][r] += 1e-3 * cnt
+        for (col in 0 until n) {
+            var piv = col
+            for (r in col + 1 until n) if (abs(a[r][col]) > abs(a[piv][col])) piv = r
+            val tmp = a[col]; a[col] = a[piv]; a[piv] = tmp
+            if (abs(a[col][col]) < 1e-12) return null
+            for (r in 0 until n) {
+                if (r == col) continue
+                val f = a[r][col] / a[col][col]
+                for (q in col..n) a[r][q] -= f * a[col][q]
+            }
+        }
+        return ZoneModel(DoubleArray(n) { a[it][n] / a[it][it] }, t0, ts)
+    }
+
+    /**
+     * Ajuste robusto del modelo de la zona y corrección de los enlaces: el tramo cuya numeración no encaja (mediana del
+     * residuo > 0.15 pasos) se renumera ±1 si así encaja, o se descarta (picos de otra cosa: borde de una sombra,
+     * escritura). Devuelve el modelo y los desplazamientos corregidos, o null.
+     */
+    fun fitZone(z0: Map<Seg, Int>, centers: DoubleArray, p0: Double): Pair<ZoneModel, Map<Seg, Int>>? {
+        val z = HashMap(z0)
+        val ts0 = z.keys.minOf { centers[it.strip] }; val ts1 = z.keys.maxOf { centers[it.strip] }
+        val t0 = (ts0 + ts1) / 2; val ts = max(1.0, (ts1 - ts0) / 2)
+        var model: ZoneModel? = null
+        repeat(3) { iter ->
+            val keys = z.keys.toList()
+            val obs = ArrayList<DoubleArray>()
+            for (sg in keys) { val o = z[sg]!!; for (i in sg.k.indices) obs.add(doubleArrayOf((sg.k[i] + o).toDouble(), centers[sg.strip], sg.pos[i])) }
+            var w = BooleanArray(obs.size) { true }
+            var m: ZoneModel? = null
+            repeat(3) {
+                m = fitModel(obs, w, t0, ts) ?: return null
+                val r = DoubleArray(obs.size) { abs(obs[it][2] - m!!.at(obs[it][0].toInt(), obs[it][1])) }
+                val med = r.sorted()[r.size / 2]
+                val lim = max(0.12 * p0, 3.0 * med)
+                w = BooleanArray(obs.size) { r[it] <= lim }
+            }
+            model = m
+            if (iter == 2) return@repeat
+            var changed = false
+            for (sg in keys) {
+                val o = z[sg]!!
+                fun medRes(d: Int): Double {
+                    val r = DoubleArray(sg.k.size) { abs(sg.pos[it] - m!!.at(sg.k[it] + o + d, centers[sg.strip])) }
+                    r.sort(); return r[r.size / 2]
+                }
+                val r0 = medRes(0)
+                if (r0 <= 0.15 * p0) continue
+                val rm = medRes(-1); val rp = medRes(1)
+                val (best, d) = listOf(rm to -1, rp to 1).minByOrNull { it.first }!!
+                if (best <= 0.15 * p0) z[sg] = o + d else z.remove(sg)
+                changed = true
+            }
+            if (z.keys.map { it.strip }.toSet().size < 3) return null
+            if (!changed) return model!! to z
+        }
+        return model?.let { it to z }
+    }
+
+    /**
+     * Rectas de una zona: una por k global entre el mínimo y el máximo observados. En cada franja de la zona en la que
+     * la recta k cae dentro de un tramo (±1 recta) toma la posición observada si el pico encaja con el modelo
+     * (<= 0.2 pasos) y, si no, la del modelo corregida con el residuo de las rectas observadas vecinas; entre franjas,
+     * la recta es continua. null si la zona no es fiable (pocas franjas o rectas, paso incoherente).
+     */
+    fun zoneLines(z0: Map<Seg, Int>, centers: DoubleArray, p0: Double): List<Line>? {
+        if (z0.keys.map { it.strip }.toSet().size < 3) return null
+        val (model, z) = fitZone(z0, centers, p0) ?: return null
+        val bs = z.keys.map { it.b }.sorted()
+        val med = bs[bs.size / 2]
+        val dev = bs.map { abs(it - med) }.sorted()[bs.size / 2]
+        if (dev > 0.08 * med) return null
+        var kLo = Int.MAX_VALUE; var kHi = Int.MIN_VALUE; var obs = 0
+        for ((sg, o) in z) { kLo = min(kLo, sg.kMin + o); kHi = max(kHi, sg.kMax + o); obs += sg.k.size }
+        if (kHi - kLo < 2 || obs < 8) return null
+        // por franja, los tramos de la zona (puede haber dos: rectas tapadas por la escritura entre medias)
+        val byStrip = java.util.TreeMap<Int, MutableList<Pair<Seg, Int>>>()
+        for ((sg, o) in z) byStrip.getOrPut(sg.strip) { ArrayList() }.add(sg to o)
+        val out = ArrayList<Line>()
+        for (K in kLo..kHi) {
+            val al = ArrayList<Double>(); val cr = ArrayList<Double>(); var nObs = 0
+            for ((s, list) in byStrip) {
+                val t = centers[s]
+                var cover: Pair<Seg, Int>? = null
+                for ((sg, o) in list) { val kk = K - o; if (kk >= sg.kMin - 1 && kk <= sg.kMax + 1) { cover = sg to o; if (sg.observed(kk)) break } }
+                val (sg, o) = cover ?: continue
+                val kk = K - o
+                val mv = model.at(K, t)
+                val i = sg.k.binarySearch(kk)
+                val v = if (i >= 0 && abs(sg.pos[i] - mv) <= 0.2 * p0) { nObs++; sg.pos[i] } else {
+                    // residuo de las observadas vecinas (hasta 2 por cada lado) del mismo tramo
+                    var sr = 0.0; var nr = 0
+                    for (j in sg.k.indices) {
+                        if (abs(sg.k[j] - kk) > 2) continue
+                        val r = sg.pos[j] - model.at(sg.k[j] + o, t)
+                        if (abs(r) <= 0.2 * p0) { sr += r; nr++ }
+                    }
+                    mv + if (nr > 0) sr / nr else 0.0
+                }
+                al.add(t); cr.add(v)
+            }
+            // (las rectas sin ningún pico, entre dos observadas, también: la red se completa)
+            if (al.size < 2) continue
+            out.add(Line(al.toDoubleArray(), cr.toDoubleArray(), nObs))
+        }
+        return out
     }
 
     /**
@@ -163,6 +536,42 @@ internal object RulingGrid {
         // (paso: el de los picos de cada franja, robusto con dos páginas cuyas rectas se intercalan)
         val period = if (p0 > 0) p0 else regularPeriod(neighbourSpacings(lines)) ?: 0.0
         return Family(dedupe(lines, period), slope, period)
+    }
+
+    /**
+     * Picos de un perfil de OSCURIDAD media por fila: realce sobre el fondo local (mínimo en ±[r]) >= [thr], máximo local
+     * en ±2, posición por centroide del realce. Las rectas finas dan picos estrechos; la escritura, bultos anchos que la
+     * red descarta después.
+     */
+    fun darkPeaks(prof: DoubleArray, r: Int, thr: Double): DoubleArray {
+        val n = prof.size
+        val e = DoubleArray(n)
+        // mínimo local (ventana deslizante simple: perfiles de <= ~2000 valores)
+        for (c in 0 until n) { var m = Double.MAX_VALUE; for (j in max(0, c - r)..min(n - 1, c + r)) if (prof[j] < m) m = prof[j]; e[c] = prof[c] - m }
+        val out = ArrayList<Double>()
+        var c = 0
+        while (c < n) {
+            val v = e[c]
+            var isMax = v >= thr
+            if (isMax) for (d in -2..2) { val j = c + d; if (d != 0 && j in 0 until n && (e[j] > v || (d < 0 && e[j] == v))) { isMax = false; break } }
+            if (isMax) {
+                var sw = 0.0; var sp = 0.0
+                for (d in -2..2) { val j = c + d; if (j in 0 until n) { val ww = max(0.0, e[j] - 0.3 * v); sw += ww; sp += ww * j } }
+                out.add(if (sw > 0) sp / sw else c.toDouble())
+                c += 3; continue
+            }
+            c++
+        }
+        return out.toDoubleArray()
+    }
+
+    /** Unión de dos listas de picos ordenadas: los de [b] a menos de 2.5 px de uno de [a] se descartan (manda [a]). */
+    fun mergePeaks(a: DoubleArray, b: DoubleArray): DoubleArray {
+        val out = ArrayList<Double>(a.size + b.size)
+        for (x in a) out.add(x)
+        for (x in b) if (a.none { abs(it - x) < 2.5 }) out.add(x)
+        out.sort()
+        return out.toDoubleArray()
     }
 
     /** Picos (posición sub-píxel) de un perfil de cobertura: máximos locales de la suma en 3 filas >= [MIN_COVER]. */
