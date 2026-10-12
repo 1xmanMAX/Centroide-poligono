@@ -296,7 +296,7 @@ internal object Cv {
         var src8 = if (refine && min(img.cols(), img.rows()) >= 64) bag.add(refineBackground(img, out8, refineSide)) else out8
         // Sombras (mano, celular, pliegue, viñeteo): re-iluminación POR ZONA a resolución media ([Shadows]); fuera de
         // la sombra el fondo no cambia
-        if (refine && min(img.cols(), img.rows()) >= 64) {
+        if (refine && ShadowMath.pageAllowsShadows(img.cols(), img.rows())) {
             val map = ShadowDebug.time("analyze") { Shadows.analyze(out8) }
             if (map != null) {
                 preShadow?.let { src8.copyTo(it) }

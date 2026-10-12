@@ -124,7 +124,8 @@ object TextRegions {
         bg.release()
         // Sombras (mano, celular): la tinta cálida de la zona recupera su color ([Shadows.treatZone]; el color de los
         // trazos y su oscuridad cromática salen de [n])
-        if (shadowColor && rgb === rgb0) Shadows.analyze(bgs)?.let { m ->
+        val shadowsOk = ShadowMath.pageAllowsShadows(rgb0.cols(), rgb0.rows())
+        if (shadowsOk && shadowColor && rgb === rgb0) Shadows.analyze(bgs)?.let { m ->
             try { ShadowDebug.time("treatZoneTR") { Shadows.treatZone(n, m, denoise = false) } } finally { m.release() }
         }
         val bgl = bag.add(Cv.gray(bgs))
@@ -143,7 +144,7 @@ object TextRegions {
         val pm = max(pm0, 1.0)
         // Sombras: los umbrales de la zona siguen al ruido MEDIDO en ella (no a la ganancia, que lo sobrestima y
         // partía los trazos tenues en la sombra de la mano) -> [Shadows.effectiveGain]
-        run { val eg = ShadowDebug.time("effGain") { Shadows.effectiveGain(n, gain, pm, NOISE_GAIN_EXP) }; eg.copyTo(gain); eg.release() }
+        if (shadowsOk) run { val eg = ShadowDebug.time("effGain") { Shadows.effectiveGain(n, gain, pm, NOISE_GAIN_EXP) }; eg.copyTo(gain); eg.release() }
         val dark = Mat()
         Core.bitwise_not(v, dark)
         Core.subtract(dark, Scalar(255.0 - pm), dark)

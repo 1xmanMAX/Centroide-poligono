@@ -72,6 +72,15 @@ internal object ShadowMath {
     const val INK1 = 0.06
     /** Gradiente de log(envolvente clara) por píxel a 640 px: más = borde nítido impreso (figura, foto), menos = penumbra. */
     const val SHARP_GRAD = 0.33
+    /**
+     * Lado corto mínimo (px) de la página (ya ampliada x2 si la fuente era pequeña) para tratar sombras: en recortes
+     * diminutos (texto muy borroso de 200 px) el fondo de baja resolución sigue a los renglones emborronados y la
+     * "sombra" detectada es el propio texto.
+     */
+    const val MIN_PAGE_SIDE = 480
+
+    fun pageAllowsShadows(w: Int, h: Int): Boolean = min(w, h) >= MIN_PAGE_SIDE
+
     /** Área mínima (fracción de la imagen) de una zona profunda (residuo < [RES_MIN] en el núcleo) para tratarla como papel en sombra. */
     const val DEEP_AREA = 0.03
 

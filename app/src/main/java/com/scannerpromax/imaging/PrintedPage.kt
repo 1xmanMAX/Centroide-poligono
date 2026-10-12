@@ -369,7 +369,7 @@ internal object PrintedPage {
         }
         val white = (pm - 2.5 * noise).coerceIn(170.0, 250.0)
         // Sombras (mano, celular): mapa de la zona; al renderizar cada franja se des-ruida y la tinta cálida recupera el color ([Shadows])
-        val shadow = ShadowDebug.time("shPP") {
+        val shadow = if (!ShadowMath.pageAllowsShadows(w, h)) null else ShadowDebug.time("shPP") {
             val bs = bag.mat(); Imgproc.resize(bg, bs, Size(384.0 * bg.cols() / max(bg.cols(), bg.rows()), 384.0 * bg.rows() / max(bg.cols(), bg.rows())), 0.0, 0.0, Imgproc.INTER_LINEAR)
             Shadows.analyze(bs)?.also { bag.add(it.strength); bag.add(it.light) }
         }
