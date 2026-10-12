@@ -59,6 +59,19 @@ class HwLogicTest {
         assertTrue(HwBinding.isRingRow(al2, ac2, ext2, 1500.0, strict = true))
     }
 
+    @Test
+    fun fusedRingsDoNotBreakTheStrictSpacing() {
+        // Espiral de un cuaderno (foto real): dos pares de aros fundidos (manchas del doble de largo)
+        val al = listOf(568.0, 670.0, 747.0, 871.0, 996.0, 1077.0, 1162.0, 1244.0)
+        val ac = listOf(123.0, 130.0, 134.0, 143.0, 144.0, 150.0, 154.0, 158.0)
+        val ext = listOf(123.0, 81.0, 88.0, 167.0, 83.0, 83.0, 87.0, 85.0)
+        assertTrue(HwBinding.isRingRow(al, ac, ext, 2000.0, strict = true))
+        assertEquals(9, HwBinding.splitFused(al, ext).size)
+        // Sin fundidas no cambia nada
+        val (al2, _, ext2) = rings(10)
+        assertEquals(al2, HwBinding.splitFused(al2, ext2))
+    }
+
     // ----------------------------------------------------------------------------------------------- HwStats
 
     @Test
