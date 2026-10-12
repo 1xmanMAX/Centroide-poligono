@@ -167,12 +167,26 @@ Todo en `imaging/` (OpenCV 4.10, sin red). Tiempos medidos con el harness Python
   DIBCO 2009-2019: F-measure B/N 43 -> 70. Estimaciones a <= 2000 px, render a resolución completa por
   franjas de 1 MP: 12 MP ~1.0-1.3 s y 20 MP ~1.5-1.7 s en PC monohilo. `TextRegions.detect(bitmap)` devuelve los
   recuadros (TEXT/IMAGE) para dibujarlos en la interfaz.
-- **Cuadrícula conservada** (`RulingGrid`, `PageEdits.keepRuling`, interruptor "Conservar cuadrícula / renglones" en
-  Limpieza, activado por defecto): la huella de las rectas de la rejilla se enlaza aunque las letras la corten, se
-  funden los duplicados, se interpolan las líneas que faltan bajo sombras y se prolonga por toda la zona de escritura;
-  se vuelve a dibujar fina y limpia por debajo de la tinta (tono de la propia cuadrícula en *Texto resaltado*, gris
+- **Cuadrícula conservada como RED REGULAR** (`RulingGrid.lattice`, `PageEdits.keepRuling`, interruptor "Conservar
+  cuadrícula / renglones" en Limpieza, activado por defecto; v12): en franjas a lo largo de cada familia (H y V) se
+  buscan los picos de la huella y del perfil de oscuridad completa (también las rectas en sombra), se ajusta el PASO y la
+  FASE (crecimiento desde un ancla con el paso local: entre rectas vecinas casi no cambia) y cada recta recibe un índice
+  entero k; las franjas con la misma fase se enlazan en zonas (una por página) con un modelo suave
+  pos(k, t) = fase(t) + k·paso(t) + c·k² (renumeración ±1 de los tramos que no encajan). Sólo se aceptan rectas en
+  posiciones de la red: las candidatas a medio paso (rayas inventadas), los duplicados y los trazos alineados se
+  descartan; las que faltan se completan; si el paso es incoherente no se dibuja rejilla. Los restos de la rejilla
+  original que la supresión no reconoció (tramos en sombra, entrecortados, rectas impresas más marcadas) se borran del
+  mapa de tinta a lo largo de la red (límite por recta, tono de la rejilla, apertura de un paso; manchas enteras dentro
+  de la banda). La rejilla se dibuja sólo en la zona de escritura, fina y limpia por debajo de la tinta (tono de la propia cuadrícula en *Texto resaltado*, gris
   claro en *Blanco y negro*), nunca sobre la espiral. En el PDF a 1 bit de B/N los grises claros aislados se traman
   (`BinaryDither`) para que la cuadrícula no desaparezca.
+- **Borde de tinta limpio, sin halo** (v12): en *Texto resaltado* de páginas tipo impreso (`PrintedPage`) des-ruido
+  bilateral de la luminancia y suavizado del color antes del realce, realce sin sobreimpulsos (acotado al entorno 3x3) y
+  la cola del desenfoque de cada trazo sobre papel (< 30 % del máximo local) llevada a blanco con una rampa de 1-2 px; en
+  B/N, des-ruido bilateral y realce acotado antes del umbral. En cuadernos (`TextRegions`) el borde de un trazo firme
+  usa el mismo color que su centro (peso del modelo uniforme a escala de trazo), el alfa se suaviza y re-afila, los
+  restos tenues no se refuerzan y la oscuridad por canal se acota sin cambiar el matiz. Métrica de halo (banco local):
+  suciedad a 2.5-4.5 px del trazo, motas pegadas al borde y desvío de color del borde.
 - **Bordes a blanco** (`EdgeClean`, *Texto resaltado* y *Blanco y negro*, cuadernos e impresos): lo que queda junto al
   borde y no es contenido (franjas del canto, manchas macizas, cuñas de esquina, rayas del canto con fondo ajeno entre
   ellas y el borde, restos rodeados de mesa, motas aisladas y, en cuadernos, lo que queda fuera de la cuadrícula) pasa
