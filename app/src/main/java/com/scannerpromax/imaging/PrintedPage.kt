@@ -467,7 +467,7 @@ internal object PrintedPage {
                 work = big; oy = (sy0 * f).roundToInt()
             } else { work = nS; oy = sy0 }
             val a0 = (y0 - oy).coerceIn(0, work.rows()); val a1 = (y1 - oy).coerceIn(a0, work.rows())
-            val res = if (color) colorStrip(work, levels, satLut, sharpSigma, noise, bag) else bwStrip(work, levels, win, sharpSigma, noise, lh, bag)
+            val res = if (color) colorStrip(work, levels, satLut, sharpSigma, noise, lh, bag) else bwStrip(work, levels, win, sharpSigma, noise, lh, bag)
             val src = res.submat(a0, a1, 0, ow)
             val dst = out.submat(y0, y0 + (a1 - a0), 0, ow)
             src.copyTo(dst); src.release(); dst.release()
@@ -537,7 +537,7 @@ internal object PrintedPage {
     }
 
     /** COLOR: niveles (papel -> blanco), saturación del color real y realce de la luminancia. Devuelve Mat nuevo. */
-    private fun colorStrip(n: Mat, levels: Mat, satLut: Mat, sigma: Double, noise: Double, bag: MatBag): Mat {
+    private fun colorStrip(n: Mat, levels: Mat, satLut: Mat, sigma: Double, noise: Double, lh: Double, bag: MatBag): Mat {
         val o = Mat()
         Core.LUT(n, levels, o)
         val hsv = bag.mat(); Imgproc.cvtColor(o, hsv, Imgproc.COLOR_RGB2HSV)
@@ -547,12 +547,63 @@ internal object PrintedPage {
         // Realce SÓLO de la luminancia (sin halos de color) y con umbral (el grano del papel no se refuerza)
         val ycc = bag.mat(); Imgproc.cvtColor(o, ycc, Imgproc.COLOR_RGB2YCrCb)
         val y = bag.mat(); Core.extractChannel(ycc, y, 0)
-        sharpen(y, sigma, 0.9, max(4.0, 3.0 * noise), bag)
+        // Grano dentro y alrededor de los trazos (ruido del sensor amplificado por la división y los niveles, bloques
+        // del JPEG en el color): des-ruido que respeta los bordes en la luminancia y suavizado leve del color, ANTES
+        // del realce (que si no lo multiplicaba x1.9 en todo píxel junto a un borde: borde sucio, granulado)
+        val yd = bag.mat(); Imgproc.bilateralFilter(y, yd, 5, max(10.0, 4.0 * noise), 1.2)
+        yd.copyTo(y); yd.release()
+        val cc = bag.mat()
+        for (c in 1..2) { Core.extractChannel(ycc, cc, c); Imgproc.GaussianBlur(cc, cc, Size(0.0, 0.0), 1.0); Core.insertChannel(cc, ycc, c) }
+        cc.release()
+        sharpen(y, sigma, 0.9, max(4.0, 3.0 * noise), bag, clamp = true)
         Core.insertChannel(y, ycc, 0)
         Imgproc.cvtColor(ycc, o, Imgproc.COLOR_YCrCb2RGB)
         hsv.release(); s.release(); ycc.release(); y.release()
+        cleanTails(o, lh, bag)
         return o
     }
+
+    /**
+     * Borde limpio de los trazos sobre papel (in-place, RGB 8UC3 ya con niveles): la cola del desenfoque alrededor de
+     * cada trazo (oscuridad < ~35 % de la del trazo vecino) quedaba como una banda clara, granulada y de color
+     * (saturación reforzada, ruido realzado): el "halo" alrededor de las letras. Oscuridad d = 255 - mín. canal,
+     * suavizada; m = máximo local a escala de trazo; b = mínimo local a ~0.4 letras (papel ≈ 0). Donde el fondo es
+     * papel, el píxel se lleva hacia el blanco según r = (d - b) / (m - b): r <= 0.2 -> blanco, r >= 0.5 -> intacto
+     * (rampa suave: antialias de 1-2 px). Las motas sueltas tenues (m bajo) también. Sobre fondos de color
+     * (resaltador, bloques, fotos: b alto) no cambia nada.
+     */
+    private fun cleanTails(o: Mat, lh: Double, bag: MatBag) {
+        val ch = ArrayList<Mat>(3); Core.split(o, ch)
+        val d = bag.mat(); Core.min(ch[0], ch[1], d); Core.min(d, ch[2], d)
+        for (c in ch) c.release()
+        Core.bitwise_not(d, d)
+        Imgproc.GaussianBlur(d, d, Size(0.0, 0.0), 0.8)
+        val rs = (0.15 * lh).roundToInt().coerceIn(2, 8)
+        val rb = (0.4 * lh).roundToInt().coerceIn(4, 24)
+        val m = bag.mat(); Imgproc.dilate(d, m, Cv.kernel(Imgproc.MORPH_ELLIPSE, 2 * rs + 1))
+        val b = bag.mat(); Imgproc.erode(d, b, Cv.kernel(Imgproc.MORPH_RECT, 2 * rb + 1))
+        val df = bag.mat(); val mf = bag.mat(); val bf = bag.mat()
+        d.convertTo(df, CvType.CV_32F); m.convertTo(mf, CvType.CV_32F); b.convertTo(bf, CvType.CV_32F)
+        Core.subtract(df, bf, df); Core.subtract(mf, bf, mf); Core.max(mf, Scalar(30.0), mf)
+        Core.divide(df, mf, df)                                   // r
+        val f = bag.mat(); df.convertTo(f, CvType.CV_8U, 255.0 / 0.3, -255.0 * 0.2 / 0.3)
+        Core.LUT(f, smoothLut, f)                                 // f = smoothstep((r - 0.2) / 0.3)
+        // motas tenues sueltas: m < ~18 -> fuera (rampa 18..38)
+        val g = bag.mat(); m.convertTo(g, CvType.CV_8U, 255.0 / 20.0, -255.0 * 18.0 / 20.0); Core.LUT(g, smoothLut, g)
+        Core.multiply(f, g, f, 1.0 / 255.0)
+        // sólo sobre papel: b <= ~10 -> 1, b >= 25 -> 0
+        val wp = bag.mat(); b.convertTo(wp, CvType.CV_8U, -255.0 / 15.0, 255.0 * 25.0 / 15.0); Core.LUT(wp, smoothLut, wp)
+        // F = 1 - wp·(1 - f)
+        Core.bitwise_not(f, f); Core.multiply(f, wp, f, 1.0 / 255.0); Core.bitwise_not(f, f)
+        // out = 255 - F·(255 - out)
+        val inv = bag.mat(); Core.bitwise_not(o, inv)
+        val f3 = bag.mat(); Core.merge(listOf(f, f, f), f3)
+        Core.multiply(inv, f3, inv, 1.0 / 255.0)
+        Core.bitwise_not(inv, o)
+        for (x in listOf(d, m, b, df, mf, bf, f, g, wp, inv, f3)) x.release()
+    }
+
+    private val smoothLut: Mat by lazy { Cv.lut { i -> val x = i / 255.0; x * x * (3 - 2 * x) * 255.0 } }
 
     /**
      * BLANCO Y NEGRO: Sauvola suave sobre la luminancia con niveles. T = m·(1 + k·(s/128 - 1)) en una ventana de
@@ -705,13 +756,20 @@ internal object PrintedPage {
     private const val BLACK_ABS = 70.0
 
     /** Máscara de enfoque con umbral sobre un canal 8UC1 (in-place). */
-    private fun sharpen(img: Mat, sigma: Double, amount: Double, threshold: Double, bag: MatBag) {
+    private fun sharpen(img: Mat, sigma: Double, amount: Double, threshold: Double, bag: MatBag, clamp: Boolean = false) {
         val blur = bag.mat(); Imgproc.GaussianBlur(img, blur, Size(0.0, 0.0), sigma)
         val diff = bag.mat(); Core.absdiff(img, blur, diff)
         val flat = bag.mat(); Imgproc.threshold(diff, flat, threshold, 255.0, Imgproc.THRESH_BINARY_INV)
         Imgproc.erode(flat, flat, Cv.kernel(Imgproc.MORPH_RECT, 3))
         val orig = bag.add(img.clone())
         Core.addWeighted(img, 1.0 + amount, blur, -amount, 0.0, img)
+        if (clamp) {
+            // Sin sobreimpulsos: el realce no sale del rango del entorno 3x3 (ni anillo claro ni oscuro junto al borde)
+            val lo = bag.mat(); val hi = bag.mat()
+            Imgproc.erode(orig, lo, Cv.kernel(Imgproc.MORPH_RECT, 3)); Imgproc.dilate(orig, hi, Cv.kernel(Imgproc.MORPH_RECT, 3))
+            Core.max(img, lo, img); Core.min(img, hi, img)
+            lo.release(); hi.release()
+        }
         orig.copyTo(img, flat)
         blur.release(); diff.release(); flat.release(); orig.release()
     }

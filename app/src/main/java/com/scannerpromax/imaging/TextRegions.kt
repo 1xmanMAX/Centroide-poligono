@@ -1259,7 +1259,15 @@ object TextRegions {
         val smooth: Mat = bag.add(Cv.lut { i -> val x = i / 255.0; x * x * (3 - 2 * x) * 255.0 })
         /** refuerzo de la tinta tenue por zona: clamp(150 / max(tinta, 20), 1, 4) · 63.75 */
         val boost: Mat = bag.add(Cv.lut { i -> (150.0 / max(i, 20)).coerceIn(1.0, 4.0) * 63.75 })
+        /** re-afilado del alfa suavizado: smoothstep de 50..175 */
+        val edge: Mat = bag.add(Cv.lut { i -> val x = ((i - 50.0) / 125.0).coerceIn(0.0, 1.0); x * x * (3 - 2 * x) * 255.0 })
+        /** suelo del alfa antiguo: 0 bajo 20, rampa 20..44 hasta el valor propio (sin escalón) */
+        val floor: Mat = bag.add(Cv.lut { i -> if (i <= 20) 0.0 else if (i >= 44) i.toDouble() else i * (i - 20) / 24.0 })
+        val g3 = bag.mat(); val mx = bag.mat()
     }
+
+    /** Desenfoque del alfa antes de re-afilarlo: ~1/3 del radio de trazo (0.6..1.2 px). */
+    private fun edgeSigma(rad: Int) = (0.3 * (rad - 1)).coerceIn(0.6, 1.2)
 
     /** dst(8U) = smoothstep(clamp(a·src + b)) · 255 (src en coma flotante u 8 bits). */
     private fun smooth8(src: Mat, a: Double, b: Double, dst: Mat, s: StrokeMats) {
@@ -1307,6 +1315,11 @@ object TextRegions {
         smooth8(s.f, 1.0 / 0.45, -0.2 / 0.45, s.aNew, s)
         smooth8(s.dc, 1.0 / t0, -1.0, s.gate, s)
         Core.multiply(s.aNew, s.gate, s.aNew, 1.0 / 255.0)
+        // Borde limpio: el alfa se suaviza a escala de ~1/3 de semiancho y se vuelve a afilar alrededor de ~0.45 -> las
+        // muescas y pelos del ruido y las motas pegadas (de menos de ~1 px) desaparecen y el borde queda con una transición
+        // monótona de 1-2 px (antialias) en el mismo sitio
+        Imgproc.GaussianBlur(s.aNew, s.aNew, Size(0.0, 0.0), edgeSigma(rad))
+        Core.LUT(s.aNew, s.edge, s.aNew)
         // --- Peso de la uniformización: trazo firme ([cohFull]) y fino (oscuridad sobre el mínimo local a ~2.5
         // semianchos, relativa a la propia; en el interior de una mancha ancha el mínimo local es la propia mancha)
         Imgproc.erode(s.dc, s.lm, Cv.kernel(Imgproc.MORPH_RECT, 2 * radBg + 1))
@@ -1316,6 +1329,13 @@ object TextRegions {
         Core.divide(s.g, s.den, s.g)
         smooth8(s.g, 1.0 / 0.4, -0.3 / 0.4, s.q, s)
         val cRoi = cohFull.submat(outer); Core.multiply(s.q, cRoi, s.q, 1.0 / 255.0); cRoi.release()
+        // El borde de un trazo firme es parte del trazo: el peso se mide a escala de trazo (máximo en ~rad px). Sin esto, en
+        // el borde (oscuridad baja -> "fino" bajo) mandaba el modelo antiguo -con el color propio del píxel y el refuerzo
+        // x1..x4 de la zona- y cada letra quedaba con un contorno de otro tono y motas pegadas (halo)
+        Imgproc.dilate(s.q, s.q, Cv.kernel(Imgproc.MORPH_ELLIPSE, 2 * rad + 1))
+        // Restos tenues del modelo antiguo (grano del papel, cola del desenfoque junto al trazo): < ~8 % no es tinta (el
+        // refuerzo por zona los volvía motas grises alrededor de las letras)
+        Core.LUT(s.aOld, s.floor, s.aOld)
         // --- Tinta aceptada
         val kRoi = keepFull.submat(outer)
         Core.multiply(s.aOld, kRoi, s.aOld, 1.0 / 255.0); Core.multiply(s.aNew, kRoi, s.aNew, 1.0 / 255.0)
@@ -1380,22 +1400,36 @@ object TextRegions {
         for (c in ch) { Core.subtract(c, mean, c); Core.multiply(c, s.tmp, c); Core.add(c, s.num, c) }
         Core.merge(ch, s.d3)
         for (c in ch) c.release()
-        Imgproc.resize(s.d3, s.nf, full, 0.0, 0.0, Imgproc.INTER_LINEAR)
-        s.nf.convertTo(s.af, CvType.CV_8UC3)                       // tono uniforme (8UC3)
+        Imgproc.resize(s.d3, s.nf, full, 0.0, 0.0, Imgproc.INTER_LINEAR)   // tono uniforme (32FC3, sin recortar)
         // Antiguo: oscuridad del propio píxel con saturación 1.35 (d_c = 1.35·d_c - 0.35·media) y refuerzo por zona
         // 150 / tinta (x1..x4, codificado x63.75)
         val sat = Mat(3, 3, CvType.CV_32F)
         val dg = 1.35 - 0.35 / 3; val og = -0.35 / 3
         sat.put(0, 0, dg * sc, og * sc, og * sc, og * sc, dg * sc, og * sc, og * sc, og * sc, dg * sc)
-        Core.transform(s.tmp3, s.g, sat); sat.release()   // 8UC3 saturado
+        s.tmp3.convertTo(s.g3, CvType.CV_32FC3)
+        Core.transform(s.g3, s.g3, sat); sat.release()   // 32FC3 saturado (sin recortar)
         val inkRoi2 = inkFull.submat(outer); Core.LUT(inkRoi2, s.boost, s.k8); inkRoi2.release()
         Core.multiply(s.aOld, s.k8, s.aOld, 1.0 / 255.0)       // (1-q)·aOld·refuerzo·63.75
         val a3 = ArrayList<Mat>(3)
-        repeat(3) { a3.add(s.aOld) }; Core.merge(a3, s.d3); a3.clear()
-        Core.multiply(s.g, s.d3, s.g, 1.0 / 63.75)
-        repeat(3) { a3.add(s.gate) }; Core.merge(a3, s.d3)
-        Core.multiply(s.af, s.d3, s.af, 1.0 / 255.0)
-        Core.add(s.g, s.af, s.g)
+        s.aOld.convertTo(s.af, CvType.CV_32F, 1.0 / 63.75)
+        repeat(3) { a3.add(s.af) }; Core.merge(a3, s.d3); a3.clear()
+        Core.multiply(s.g3, s.d3, s.g3)
+        s.gate.convertTo(s.af, CvType.CV_32F, 1.0 / 255.0)
+        repeat(3) { a3.add(s.af) }; Core.merge(a3, s.d3); a3.clear()
+        Core.multiply(s.nf, s.d3, s.nf)
+        Core.add(s.g3, s.nf, s.g3)
+        Core.max(s.g3, Scalar.all(0.0), s.g3)
+        // Oscuridad por canal acotada SIN cambiar el tono: si un canal pasa de 250 se escala todo el vector (recortar cada
+        // canal por separado volvía casi negro el centro del trazo de bolígrafo azul -rojo y verde a tope- mientras el
+        // borde, sin recortar, quedaba azul vivo: un contorno de otro color alrededor de cada letra)
+        Core.extractChannel(s.g3, s.mx, 0)
+        Core.extractChannel(s.g3, s.af, 1); Core.max(s.mx, s.af, s.mx)
+        Core.extractChannel(s.g3, s.af, 2); Core.max(s.mx, s.af, s.mx)
+        Core.max(s.mx, Scalar(250.0), s.mx)
+        Core.divide(250.0, s.mx, s.mx)
+        repeat(3) { a3.add(s.mx) }; Core.merge(a3, s.d3); a3.clear()
+        Core.multiply(s.g3, s.d3, s.g3)
+        s.g3.convertTo(s.g, CvType.CV_8UC3)
         Core.bitwise_not(s.g, s.g)
         val oc = s.g.submat(crop)
         Core.min(dst, oc, dst)
