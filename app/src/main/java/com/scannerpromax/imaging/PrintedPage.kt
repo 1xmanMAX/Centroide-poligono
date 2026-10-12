@@ -76,9 +76,16 @@ internal object PrintedPage {
      * Clasificación impreso / manuscrito. Trabaja a <= [ANALYSIS_SIDE] px (INTER_AREA): la vista previa (~1200 px)
      * y el render final deciden igual.
      */
-    fun analyze(rgb: Mat): Stats = MatBag().use { bag ->
+    /** Reducción de [rgb] que usa [analyze] (para conservarla antes de modificar la página). */
+    fun reduceForAnalysis(rgb: Mat): Mat { val m = Mat(); Cv.downscale(rgb, m, ANALYSIS_SIDE); return m }
+
+    fun analyze(rgb: Mat, pre: Mat? = null): Stats = MatBag().use { bag ->
         val sm = bag.mat()
-        val s = Cv.downscale(rgb, sm, ANALYSIS_SIDE)
+        // [pre]: la misma página reducida ([reduceForAnalysis]) ANTES de la restauración de nitidez: la clasificación no
+        // debe cambiar porque las zonas alejadas se hayan enfocado (rayas de tabla más finas parecían un rayado)
+        val usePre = pre != null && !pre.empty() && abs(pre.cols().toDouble() / pre.rows() - rgb.cols().toDouble() / rgb.rows()) < 0.01 &&
+            max(pre.cols(), pre.rows()) == min(ANALYSIS_SIDE, max(rgb.cols(), rgb.rows()))
+        val s = if (usePre) { pre!!.copyTo(sm); pre.cols().toDouble() / rgb.cols() } else Cv.downscale(rgb, sm, ANALYSIS_SIDE)
         val w = sm.cols(); val h = sm.rows()
         // Imagen diminuta: nada que clasificar -> la ruta que conserva todo
         if (min(w, h) < 120) return@use Stats(true, 0, 0, 0, 0.0, false)

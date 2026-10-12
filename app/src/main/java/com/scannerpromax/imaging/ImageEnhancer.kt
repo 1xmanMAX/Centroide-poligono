@@ -48,6 +48,8 @@ object ImageEnhancer {
         val sheetSides: Int = 0,
         /** Cuaderno: conservar la cuadrícula / renglones (limpios y claros) en vez de borrarlos ([PageEdits.keepRuling]). */
         val keepRuling: Boolean = true,
+        /** Página reducida antes de la restauración de nitidez ([PrintedPage.reduceForAnalysis]) para clasificarla. */
+        val classify: Mat? = null,
     ) {
         companion object {
             fun default(): Options {
@@ -481,7 +483,7 @@ object ImageEnhancer {
      * tiene el tamaño de la entrada (x2 con super-resolución).
      */
     private fun segmented(rgb: Mat, opt: Options, style: TextRegions.Style): Mat = MatBag().use { bag ->
-        val stats = runCatching { PrintedPage.analyze(rgb) }.getOrNull()
+        val stats = runCatching { PrintedPage.analyze(rgb, opt.classify) }.getOrNull()
         var base = rgb
         // Sin anti-muaré: la cuadrícula azul de un cuaderno es periódica y cromática y el detector de muaré la
         // confundía con una pantalla (el des-tramado emborronaba la escritura). La segmentación ya deja el fondo

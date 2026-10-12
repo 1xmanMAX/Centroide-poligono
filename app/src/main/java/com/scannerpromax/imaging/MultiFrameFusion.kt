@@ -150,6 +150,7 @@ object MultiFrameFusion {
         val refIdx = sharp.indices.maxByOrNull { sharp[it] } ?: 0
         val ref = frames[refIdx]
         val aligned = ArrayList<Mat>(frames.size - 1)
+        var refGray: Mat? = null
         try {
             var done = 0
             for (i in frames.indices) {
@@ -160,7 +161,12 @@ object MultiFrameFusion {
                     val wf = Mat()
                     Imgproc.warpPerspective(frames[i], wf, m, ref.size(), Imgproc.INTER_LINEAR, Core.BORDER_REPLICATE)
                     m.release()
-                    aligned.add(wf)
+                    // Residuo LOCAL que la homografía no explica (hoja no plana, paralaje, giro del móvil durante la
+                    // ráfaga): sin corregirlo, los trazos de los cuadros quedan desplazados 1-3 px y el promedio deja
+                    // "fantasmas" (trazos dobles y sombras), sobre todo en la zona alejada
+                    val refined = if (localRefine) runCatching { refineLocal(refGray ?: Cv.gray(ref).also { refGray = it }, wf) }
+                        .onFailure { if (Cv.isOutOfMemory(it)) throw it }.getOrNull() else null
+                    if (refined != null) { wf.release(); aligned.add(refined) } else aligned.add(wf)
                 } else Log.i(TAG, "Cuadro $i descartado: no se pudo alinear")
                 // El cuadro original ya no hace falta: liberar cuanto antes (pico de memoria)
                 frames[i].release()
@@ -170,6 +176,7 @@ object MultiFrameFusion {
             for (s in smallG) s.release()
             smallG.clear()
             frames.clear()
+            refGray?.release(); refGray = null
             if (aligned.isEmpty()) return ref to Stats(0, 1, false, 0.0, w, h)
 
             // Ruido en NIVELES REALES (no relativo al papel normalizado a 230: con poca luz el papel está a 50-80
@@ -194,7 +201,104 @@ object MultiFrameFusion {
             for (a in aligned) a.release()
             for (s in smallG) s.release()
             for (f in frames) f.release()
+            refGray?.release()
         }
+    }
+
+    /** Refinamiento local de la alineación (se puede desactivar para comparar). */
+    @Volatile internal var localRefine = true
+
+    /**
+     * Corrección del desplazamiento RESIDUAL local de [img] (ya alineado con la homografía) respecto de [refY] (gris 8U):
+     * correlación de fase por teselas (subpíxel, con ventana de Hann; sólo teselas con textura y respuesta clara),
+     * rejilla depurada (mediana 3x3, huecos con la media de las vecinas válidas) e interpolada bilinealmente; se aplica
+     * con un remuestreo por franjas (memoria acotada). Null si el residuo es despreciable (< 0.35 px) o no es fiable.
+     */
+    internal fun refineLocal(refY: Mat, img: Mat): Mat? = MatBag().use { bag ->
+        val w = refY.cols(); val h = refY.rows()
+        val t = (max(w, h) / 12).coerceIn(128, 256)
+        val ntx = w / t; val nty = h / t
+        if (ntx < 3 || nty < 3) return@use null
+        val imgY = bag.add(Cv.gray(img))
+        val win = bag.mat(); Imgproc.createHanningWindow(win, Size(t.toDouble(), t.toDouble()), CvType.CV_32F)
+        val a = bag.mat(); val b = bag.mat()
+        val sx = DoubleArray(ntx * nty) { Double.NaN }; val sy = DoubleArray(ntx * nty) { Double.NaN }
+        val ox = (w - ntx * t) / 2; val oy = (h - nty * t) / 2
+        val mean = org.opencv.core.MatOfDouble(); val sd = org.opencv.core.MatOfDouble()
+        val resp = DoubleArray(1)
+        try {
+            for (ty in 0 until nty) for (tx in 0 until ntx) {
+                val r = org.opencv.core.Rect(ox + tx * t, oy + ty * t, t, t)
+                val ra = refY.submat(r); val rb = imgY.submat(r)
+                Core.meanStdDev(ra, mean, sd)
+                if (sd.toArray()[0] < 6.0) { ra.release(); rb.release(); continue }   // papel liso: sin referencia
+                ra.convertTo(a, CvType.CV_32F); rb.convertTo(b, CvType.CV_32F); ra.release(); rb.release()
+                // phaseCorrelate(ref, img) = -d con img(x) = ref(x + d): la muestra alineada es img(x + s)
+                val pnt = Imgproc.phaseCorrelate(a, b, win, resp)
+                if (resp[0] < 0.2 || abs(pnt.x) > t / 8.0 || abs(pnt.y) > t / 8.0) continue
+                sx[ty * ntx + tx] = pnt.x; sy[ty * ntx + tx] = pnt.y
+            }
+        } finally { mean.release(); sd.release() }
+        val valid = sx.count { it.isFinite() }
+        if (valid < max(6, ntx * nty / 4)) return@use null
+        val gx = smoothGrid(sx, ntx, nty); val gy = smoothGrid(sy, ntx, nty)
+        var maxS = 0.0
+        for (i in gx.indices) maxS = max(maxS, hypot(gx[i], gy[i]))
+        if (maxS < 0.35) return@use null
+        val gridX = bag.add(Mat(nty, ntx, CvType.CV_32F)); gridX.put(0, 0, FloatArray(gx.size) { gx[it].toFloat() })
+        val gridY = bag.add(Mat(nty, ntx, CvType.CV_32F)); gridY.put(0, 0, FloatArray(gy.size) { gy[it].toFloat() })
+        val out = Mat(h, w, img.type())
+        val band = max(32, 400_000 / max(1, w))
+        val mx = bag.mat(); val my = bag.mat(); val xs = bag.mat()
+        // Coordenada x de cada columna (fila única, se repite por filas)
+        val xrow = bag.add(Mat(1, w, CvType.CV_32F)); xrow.put(0, 0, FloatArray(w) { it.toFloat() })
+        val am = bag.add(Mat(2, 3, CvType.CV_64F))
+        try {
+            var y0 = 0
+            while (y0 < h) {
+                val y1 = min(h, y0 + band); val bh = y1 - y0
+                // Píxel (x, y) -> rejilla ((x - ox + 0.5)/t - 0.5, (y - oy + 0.5)/t - 0.5)
+                am.put(0, 0, 1.0 / t, 0.0, (0.5 - ox) / t - 0.5, 0.0, 1.0 / t, (y0 - oy + 0.5) / t - 0.5)
+                Imgproc.warpAffine(gridX, mx, am, Size(w.toDouble(), bh.toDouble()), Imgproc.INTER_LINEAR or Imgproc.WARP_INVERSE_MAP, Core.BORDER_REPLICATE)
+                Imgproc.warpAffine(gridY, my, am, Size(w.toDouble(), bh.toDouble()), Imgproc.INTER_LINEAR or Imgproc.WARP_INVERSE_MAP, Core.BORDER_REPLICATE)
+                Core.repeat(xrow, bh, 1, xs)
+                Core.add(mx, xs, mx)
+                for (r in 0 until bh) { val row = my.row(r); Core.add(row, Scalar((y0 + r).toDouble()), row); row.release() }
+                val dst = out.submat(y0, y1, 0, w)
+                Imgproc.remap(img, dst, mx, my, Imgproc.INTER_LINEAR, Core.BORDER_REPLICATE)
+                dst.release()
+                y0 = y1
+            }
+        } catch (e: Throwable) { out.release(); throw e }
+        out
+    }
+
+    /** Rejilla de desplazamientos depurada: huecos con la media de las vecinas válidas (iterativo) y mediana 3x3. */
+    private fun smoothGrid(v: DoubleArray, nx: Int, ny: Int): DoubleArray {
+        val g = v.copyOf()
+        repeat(nx + ny) {
+            if (g.all { it.isFinite() }) return@repeat
+            val n = g.copyOf()
+            for (y in 0 until ny) for (x in 0 until nx) {
+                if (g[y * nx + x].isFinite()) continue
+                var s = 0.0; var c = 0
+                for (j in max(0, y - 1)..min(ny - 1, y + 1)) for (i in max(0, x - 1)..min(nx - 1, x + 1)) {
+                    val q = g[j * nx + i]; if (q.isFinite()) { s += q; c++ }
+                }
+                if (c > 0) n[y * nx + x] = s / c
+            }
+            System.arraycopy(n, 0, g, 0, g.size)
+        }
+        for (i in g.indices) if (!g[i].isFinite()) g[i] = 0.0
+        val out = DoubleArray(g.size)
+        val tmp = DoubleArray(9)
+        for (y in 0 until ny) for (x in 0 until nx) {
+            var c = 0
+            for (j in max(0, y - 1)..min(ny - 1, y + 1)) for (i in max(0, x - 1)..min(nx - 1, x + 1)) tmp[c++] = g[j * nx + i]
+            java.util.Arrays.sort(tmp, 0, c)
+            out[y * nx + x] = if (c % 2 == 1) tmp[c / 2] else 0.5 * (tmp[c / 2 - 1] + tmp[c / 2])
+        }
+        return out
     }
 
     private fun laplacianVar(g: Mat): Double {

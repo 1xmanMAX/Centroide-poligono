@@ -91,7 +91,7 @@ class PageProcessor(val tier: DeviceTier) {
     /** [geometryFull] sobre un Mat RGBA (que se libera). */
     internal fun geometryFullMat(input: Mat, edits: PageEdits, maxSide: Int): Mat {
         var rgba: Mat? = input
-        sheetExact.set(0)
+        sheetExact.set(0); setClassify(null)
         try {
             val src = rgba!!
             val w = src.cols(); val h = src.rows()
@@ -160,6 +160,7 @@ class PageProcessor(val tier: DeviceTier) {
                 } finally {
                     out.release()
                 }
+                if (quad != null && maxSide == 0) restoreSharpness(rgb, inv3(mTot))
                 // Con el modelo por los cantos la salida ya es la hoja (sin cuñas de fondo): la limpieza de cuñas sólo
                 // podría tomar por fondo una franja de la propia hoja (margen de otro tono, tapa de un cuaderno)
                 if (quad != null && !model.beyond) cleanWedges(rgb, edits)
@@ -187,12 +188,34 @@ class PageProcessor(val tier: DeviceTier) {
             val rgb = Mat()
             Imgproc.cvtColor(out, rgb, Imgproc.COLOR_RGBA2RGB)
             out.release()
+            if (quad != null && maxSide == 0) restoreSharpness(rgb, inv3(mTot))
             // Esquinas que el enderezado deja fuera del documento -> color del papel (no la mesa del fondo)
             if (rd != null) fillOutsideRotated(rgb, rd, preW, preH)
             if (quad != null) cleanWedges(rgb, edits)
             return rgb
         } finally {
             rgba?.release()
+        }
+    }
+
+    /**
+     * Nitidez de las zonas ALEJADAS tras la rectificación ([Deblur]: escala local de la homografía + desenfoque medido,
+     * deconvolución por zonas sin halos). Sólo en el render a resolución completa con recorte (la vista previa no lo
+     * necesita) y fuera de la gama baja (tiempo). [hinv] = salida -> foto. Un fallo no impide el render.
+     */
+    private fun restoreSharpness(rgb: Mat, hinv: DoubleArray) {
+        if (tier.isLowRam) return
+        val pre = PrintedPage.reduceForAnalysis(rgb)
+        // Primero la estela/imagen doble (núcleo no paramétrico, relativo a la zona más nítida); Deblur no repite lo ya
+        // corregido
+        var keep = false
+        try {
+            val dg = runCatching { Deghost.restore(rgb, hinv) }.onFailure { if (Cv.isOutOfMemory(it)) throw it }.getOrNull()
+            val db = runCatching { Deblur.restore(rgb, hinv, done = dg?.takeIf { it.applied }?.let { r -> { x: Double, y: Double -> r.weightAt(x, y) } }) }
+                .onFailure { if (Cv.isOutOfMemory(it)) throw it }.getOrNull()
+            keep = dg?.applied == true || db?.applied == true
+        } finally {
+            if (keep) setClassify(pre) else pre.release()
         }
     }
 
@@ -360,7 +383,7 @@ class PageProcessor(val tier: DeviceTier) {
      * la zona del documento mida ~[maxSide]; así el warp no produce aliasing y es muy rápido.
      */
     private fun geometryPreview(original: Bitmap, edits: PageEdits, maxSide: Int): Mat {
-        sheetExact.set(0)
+        sheetExact.set(0); setClassify(null)
         val ow = original.width; val oh = original.height
         val (qw, qh) = edits.quad?.let { PerspectiveCorrector.quadExtent(it) } ?: (ow.toDouble() to oh.toDouble())
         val wanted = min(1.0, maxSide * 1.1 / max(1.0, max(qw, qh)))
@@ -471,10 +494,15 @@ class PageProcessor(val tier: DeviceTier) {
      */
     private val sheetExact = ThreadLocal<Int>()
 
+    /** Página reducida ANTES de [restoreSharpness] (misma secuencia y hilo que [sheetExact]): la clasificación de [finish]. */
+    private val classifyRef = ThreadLocal<Mat?>()
+    private fun setClassify(m: Mat?) { classifyRef.get()?.release(); classifyRef.set(m) }
+
     /** Libera [geo]; devuelve el Mat final (8UC3 u 8UC1). */
     private fun finish(geo: Mat, edits: PageEdits, opt0: ImageEnhancer.Options, progress: ProgressCallback?): Mat {
         // Contenido pegado al canto (cabecera de color, foto a sangre): con la salida recortada en los cantos no es fondo
         val opt = (sheetExact.get() ?: 0).let { if (it != 0) opt0.copy(sheetSides = it) else opt0 }
+            .let { o -> classifyRef.get()?.let { o.copy(classify = it) } ?: o }
         // AUTO se clasifica una sola vez (a 256 px) y se usa tanto para el filtro como para decidir la limpieza
         val analysis = if (edits.filter == FilterType.AUTO) runCatching { ImageEnhancer.analyzeMat(geo) }.getOrNull() else null
         val effective = ImageEnhancer.effectiveFilter(edits.filter, analysis)
