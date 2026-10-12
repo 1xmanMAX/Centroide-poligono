@@ -684,6 +684,14 @@ internal object PrintedPage {
         val g = bag.add(Cv.gray(smN))
         val w = g.cols(); val h = g.rows(); val side = max(w, h)
         val m = bag.mat(); Core.compare(g, Scalar(0.55 * pm), m, Core.CMP_LT)
+        // (croma de cada mancha: la sombra sobre papel blanco es casi neutra; la madera o el corcho, no)
+        val chroma = bag.mat()
+        run {
+            val ch = ArrayList<Mat>(3); Core.split(smN, ch)
+            val mn = bag.mat()
+            Core.max(ch[0], ch[1], chroma); Core.max(chroma, ch[2], chroma); Core.min(ch[0], ch[1], mn); Core.min(mn, ch[2], mn)
+            Core.subtract(chroma, mn, chroma); for (c in ch) c.release()
+        }
         Imgproc.morphologyEx(m, m, Imgproc.MORPH_OPEN, Cv.kernel(Imgproc.MORPH_ELLIPSE, Cv.odd(max(5, (side * 0.008).roundToInt()))))
         if (Core.countNonZero(m) == 0) return null
         val labels = bag.mat(); val stats = bag.mat(); val cents = bag.mat()
@@ -708,12 +716,31 @@ internal object PrintedPage {
                 if (l > 0 && keep[l]) { val dd = min(dy, min(xx, w - 1 - xx)); if (dd > depth[l]) depth[l] = dd }
             }
         }
+        // Escritura dentro de una mancha profunda: trazos claramente más oscuros que la mediana local (la sombra de la mano
+        // o del móvil que entra por el borde lleva el texto de la hoja; la mesa o la tela no)
+        val textM = bag.mat()
+        run {
+            val med = bag.mat(); Imgproc.medianBlur(g, med, Cv.odd(max(5, (side * 0.012).roundToInt())))
+            val d = bag.mat(); Core.subtract(med, g, d)
+            val thr = bag.mat(); med.convertTo(thr, CvType.CV_8U, 0.25, 0.0); Core.max(thr, Scalar(12.0), thr)
+            Core.compare(d, thr, textM, Core.CMP_GE)
+        }
+        val tb = ByteArray(w * h); textM.get(0, 0, tb)
+        // Croma (máx - mín) de cada mancha: la sombra sobre papel blanco es casi neutra; la madera o el corcho, no
+        val cb = ByteArray(w * h); chroma.get(0, 0, cb)
+        val nText = IntArray(nc); val sumC = LongArray(nc); val nPix = IntArray(nc)
+        for (i in lab.indices) { val l = lab[i]; if (l > 0 && keep[l]) { nPix[l]++; sumC[l] += (cb[i].toInt() and 0xff).toLong(); if (tb[i].toInt() != 0) nText[l]++ } }
         any = false
         for (c in 1 until nc) if (keep[c]) {
             // Mancha profunda: fondo ajeno sólo si es lisa (mesa, tela, fondo negro de estudio). Un bloque oscuro de
             // contenido (anuncio en negativo, foto a sangre) lleva texto claro o detalles dentro: muchos huecos pequeños
-            keep[c] = PrintTone.isOutsideBand(0, depth[c], w, h) ||
-                PrintTone.isPlainBackground(smallHoleFraction(labels, c, st, w, h, bag))
+            val band = PrintTone.isOutsideBand(0, depth[c], w, h)
+            keep[c] = band || PrintTone.isPlainBackground(smallHoleFraction(labels, c, st, w, h, bag))
+            // ...y una sombra profunda y neutra con escritura dentro es la HOJA en sombra (se re-ilumina, nunca se borra)
+            if (keep[c] && !band && PrintTone.isShadowWithText(nText[c].toDouble() / max(1, nPix[c]), sumC[c].toDouble() / max(1, nPix[c]))) {
+                log?.invoke("fondo ajeno descartado: sombra con escritura (texto %.3f, croma %.0f)".format(nText[c].toDouble() / max(1, nPix[c]), sumC[c].toDouble() / max(1, nPix[c])))
+                keep[c] = false
+            }
             any = any || keep[c]
         }
         if (!any) return null

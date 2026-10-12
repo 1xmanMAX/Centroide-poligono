@@ -40,21 +40,33 @@ class PageProcessor(val tier: DeviceTier) {
     fun render(original: Bitmap, edits: PageEdits, progress: ProgressCallback? = null): Bitmap {
         progress?.invoke(0f)
         val geo = geometryFull(original, edits, maxSide = 0)
-        progress?.invoke(0.3f)
+        // (el callback de progreso puede lanzar para cancelar un render en segundo plano: nada queda sin liberar)
+        try { progress?.invoke(0.3f) } catch (e: Throwable) { geo.release(); throw e }
         val out = finish(geo, edits, ImageEnhancer.Options.of(tier, fast = false), progress)
-        val bmp = Cv.toBitmap(out)
-        out.release()
-        progress?.invoke(1f)
-        return bmp
+        try {
+            val bmp = Cv.toBitmap(out)
+            progress?.invoke(1f)
+            return bmp
+        } finally {
+            out.release()
+        }
     }
 
-    /** Vista previa rápida (reduce a [maxSide] antes de procesar) para sliders/filtros en tiempo real. */
+    /**
+     * Vista previa (reduce a [maxSide] antes de procesar) con las MISMAS decisiones que el render final: opciones
+     * completas (no las rápidas), misma clasificación de la página ([PrintedPage.reduceForAnalysis]) y modelo de hoja
+     * curvada / ángulo medidos a la misma escala fija; sólo lee la caché del modelo (no la llena: lo que se guarda es lo
+     * que calcula el render).
+     */
     fun preview(original: Bitmap, edits: PageEdits, maxSide: Int = 1200): Bitmap {
         val geo = geometryPreview(original, edits, maxSide)
-        val out = finish(geo, edits, ImageEnhancer.Options.of(tier, fast = true), null)
-        val bmp = Cv.toBitmap(out)
-        out.release()
-        return bmp
+        if (classifyRef.get() == null) runCatching { setClassify(PrintedPage.reduceForAnalysis(geo)) }
+        val out = finish(geo, edits, ImageEnhancer.Options.of(tier, fast = false).copy(preview = true), null)
+        try {
+            return Cv.toBitmap(out)
+        } finally {
+            out.release()
+        }
     }
 
     /** Imagen recortada+rotada SIN filtro (base donde el usuario dibuja los trazos de borrado). */
@@ -89,7 +101,7 @@ class PageProcessor(val tier: DeviceTier) {
         geometryFullMat(Cv.toRgba(original), edits, maxSide)
 
     /** [geometryFull] sobre un Mat RGBA (que se libera). */
-    internal fun geometryFullMat(input: Mat, edits: PageEdits, maxSide: Int): Mat {
+    internal fun geometryFullMat(input: Mat, edits: PageEdits, maxSide: Int, preview: Boolean = false): Mat {
         var rgba: Mat? = input
         sheetExact.set(0); setClassify(null)
         try {
@@ -108,7 +120,7 @@ class PageProcessor(val tier: DeviceTier) {
                 val small = shrunk(src, quad, side)
                 val red = reducedRectified(small, w, h, quad, rot, side)
                 try {
-                    val est = if (edits.autoDewarp) dewarpModel(red, quadKey(quad, w, h), rot, cacheable = true) {
+                    val est = if (edits.autoDewarp) dewarpModel(red, quadKey(quad, w, h), rot, cacheable = !preview) {
                         if (quad != null) borderInput(small, w, h, quad, rot, side, red.cols(), red.rows()) else null
                     } else null
                     model = est?.model
@@ -122,7 +134,7 @@ class PageProcessor(val tier: DeviceTier) {
                 // Sin warp: reducción INTER_AREA (si hace falta) + rotación sin pérdidas
                 val warped = cropMat(src, null, tier.maxWorkingPixels, maxSide)
                 src.release(); rgba = null
-                return orient(warped, edits.copy(autoDeskew = false, autoDewarp = false), null)
+                return orient(warped, edits.copy(autoDeskew = false, autoDewarp = false), null, cacheable = false)
             }
             // 1) Homografía (o escala) a la resolución de trabajo
             val hm: DoubleArray; var ow: Int; var oh: Int; val interp: Int
@@ -395,7 +407,7 @@ class PageProcessor(val tier: DeviceTier) {
         if (edits.autoDewarp && edits.quad != null && !PerspectiveCorrector.isFullFrame(edits.quad, ow, oh)) {
             val input = synchronized(previewLock) { previewSourceFor(original, scale).clone() }
             val q = PerspectiveCorrector.scaleQuad(edits.quad, input.cols().toDouble() / ow, input.rows().toDouble() / oh)
-            return geometryFullMat(input, edits.copy(quad = q), maxSide)
+            return geometryFullMat(input, edits.copy(quad = q), maxSide, preview = true)
         }
         val warped = synchronized(previewLock) {
             val src = previewSourceFor(original, scale)
@@ -403,7 +415,7 @@ class PageProcessor(val tier: DeviceTier) {
             cropMat(src, q, maxPixels = 0, maxSide = maxSide)
         }
         val qk = quadKey(edits.quad?.takeIf { !PerspectiveCorrector.isFullFrame(it, ow, oh) }, ow, oh)
-        return orient(warped, edits, qk)
+        return orient(warped, edits, qk, cacheable = false)
     }
 
     private fun previewSourceFor(original: Bitmap, scale: Double): Mat {
@@ -449,7 +461,7 @@ class PageProcessor(val tier: DeviceTier) {
      * RGBA -> RGB, rotación de 90°, hoja curvada ([GridDewarp], con el modelo en caché si lo hay) o enderezado
      * automático. [quadKey] identifica el recorte (ver [quadKey]). Libera [rgba].
      */
-    private fun orient(rgba: Mat, edits: PageEdits, quadKey: List<Int>?): Mat {
+    private fun orient(rgba: Mat, edits: PageEdits, quadKey: List<Int>?, cacheable: Boolean): Mat {
         var cur = Mat()
         Imgproc.cvtColor(rgba, cur, Imgproc.COLOR_RGBA2RGB)
         rgba.release()
@@ -465,18 +477,26 @@ class PageProcessor(val tier: DeviceTier) {
             cur.release(); cur = r
         }
         val rot = ((edits.rotation % 360) + 360) % 360
-        val est = if (edits.autoDewarp) dewarpModel(cur, quadKey, rot, cacheable = true) else null
+        // Estimaciones (modelo de hoja curvada y ángulo) sobre una reducción FIJA, como en [geometryFullMat]: la vista
+        // previa (a resolución de pantalla) y el render (a resolución completa) deciden lo mismo
+        var est: GridDewarp.Estimate? = null
+        var skewFixed: Double? = null
+        if (edits.autoDewarp || edits.autoDeskew) {
+            val red = Mat()
+            try {
+                val side = if (edits.autoDewarp) GridDewarp.EST_SIDE else 1000
+                if (max(cur.cols(), cur.rows()) > side) Cv.downscale(cur, red, side) else cur.copyTo(red)
+                if (edits.autoDewarp) est = dewarpModel(red, quadKey, rot, cacheable = cacheable)
+                if (est?.model == null && edits.autoDeskew) skewFixed = est?.skew ?: Cleanup.estimateSkew(red)
+            } finally { red.release() }
+        }
         val model = est?.model
         if (model != null) {
             val d = GridDewarp.apply(cur, model)
             cur.release(); cur = d
         } else if (edits.autoDeskew) {
-            val skew = est?.skew
-            val d = when {
-                skew == null -> Cleanup.deskewMat(cur)
-                skew == 0.0 -> cur.clone()
-                else -> Cleanup.rotateExpand(cur, skew)
-            }
+            val skew = skewFixed ?: 0.0
+            val d = if (skew == 0.0) cur.clone() else Cleanup.rotateExpand(cur, skew)
             cur.release(); cur = d
         }
         if (quadKey != null && model?.beyond != true) cleanWedges(cur, edits)
@@ -511,24 +531,31 @@ class PageProcessor(val tier: DeviceTier) {
         } finally {
             geo.release()
         }
-        progress?.invoke(0.65f)
-        if (edits.autoRemoveLines) {
-            val r = Cleanup.removeLinesMat(cur)
-            cur.release(); cur = r
+        // (si el callback de progreso lanza -cancelación- o falla un paso, el intermedio se libera)
+        var ok = false
+        try {
+            progress?.invoke(0.65f)
+            if (edits.autoRemoveLines) {
+                val r = Cleanup.removeLinesMat(cur)
+                cur.release(); cur = r
+            }
+            progress?.invoke(0.8f)
+            // Los filtros segmentados ya dejan blanco puro fuera de la escritura (la limpieza de motas sólo costaría tiempo)
+            if (edits.autoDenoise && effective != FilterType.ORIGINAL && effective != FilterType.VIVID &&
+                !ImageEnhancer.isSegmented(edits.filter, analysis)
+            ) {
+                val r = Cleanup.denoiseMat(cur)
+                cur.release(); cur = r
+            }
+            progress?.invoke(0.9f)
+            if (edits.eraseStrokes.isNotEmpty()) {
+                val r = Cleanup.applyEraseStrokesMat(cur, edits.eraseStrokes)
+                cur.release(); cur = r
+            }
+            ok = true
+            return cur
+        } finally {
+            if (!ok) cur.release()
         }
-        progress?.invoke(0.8f)
-        // Los filtros segmentados ya dejan blanco puro fuera de la escritura (la limpieza de motas sólo costaría tiempo)
-        if (edits.autoDenoise && effective != FilterType.ORIGINAL && effective != FilterType.VIVID &&
-            !ImageEnhancer.isSegmented(edits.filter, analysis)
-        ) {
-            val r = Cleanup.denoiseMat(cur)
-            cur.release(); cur = r
-        }
-        progress?.invoke(0.9f)
-        if (edits.eraseStrokes.isNotEmpty()) {
-            val r = Cleanup.applyEraseStrokesMat(cur, edits.eraseStrokes)
-            cur.release(); cur = r
-        }
-        return cur
     }
 }

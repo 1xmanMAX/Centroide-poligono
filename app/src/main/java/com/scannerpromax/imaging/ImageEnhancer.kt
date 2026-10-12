@@ -50,6 +50,12 @@ object ImageEnhancer {
         val keepRuling: Boolean = true,
         /** Página reducida antes de la restauración de nitidez ([PrintedPage.reduceForAnalysis]) para clasificarla. */
         val classify: Mat? = null,
+        /**
+         * Vista previa con las decisiones del render ([PageProcessor.preview]): todo como en el render salvo la
+         * super-resolución de páginas pequeñas (la previa a resolución de pantalla siempre lo sería; el render a
+         * resolución completa no).
+         */
+        val preview: Boolean = false,
     ) {
         companion object {
             fun default(): Options {
@@ -430,7 +436,7 @@ object ImageEnhancer {
         // Super-resolución real (FSRCNN x2 o Lanczos + realce dirigido por bordes) para fuentes pequeñas.
         // Sólo en el render final; en gama baja hasta ~1 MP de entrada (presupuesto de tiempo).
         var superRes = false
-        if (pro && !opt.fast && max(den.cols(), den.rows()) < SR_MAX_SIDE &&
+        if (pro && !opt.fast && !opt.preview && max(den.cols(), den.rows()) < SR_MAX_SIDE &&
             den.total() <= (if (opt.lowEnd) 900_000L else 2_000_000L) && den.total() * 4 <= opt.maxPixels.toLong()
         ) {
             val small = den
@@ -488,7 +494,7 @@ object ImageEnhancer {
         // Sin anti-muaré: la cuadrícula azul de un cuaderno es periódica y cromática y el detector de muaré la
         // confundía con una pantalla (el des-tramado emborronaba la escritura). La segmentación ya deja el fondo
         // en blanco puro, así que el muaré de una foto de pantalla tampoco llega a la salida.
-        if (!opt.fast && max(base.cols(), base.rows()) < SR_MAX_SIDE &&
+        if (!opt.fast && !opt.preview && max(base.cols(), base.rows()) < SR_MAX_SIDE &&
             base.total() <= (if (opt.lowEnd) 900_000L else 2_000_000L) && base.total() * 4 <= opt.maxPixels.toLong()
         ) {
             base = bag.add(SuperResolution.upscale2x(base, lowEnd = !opt.highEnd, maxPixels = opt.maxPixels))

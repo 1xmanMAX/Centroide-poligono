@@ -44,4 +44,13 @@ class PrintToneTest {
         assertTrue(PrintTone.isPlainBackground(0.002))                   // mesa negra lisa alrededor del libro
         assertFalse(PrintTone.isPlainBackground(0.08))                   // bloque negro de anuncio con texto blanco
     }
+
+    @Test
+    fun deepNeutralShadowWithWritingIsNotBackground() {
+        // Sombra de la mano sobre la hoja: casi neutra y con trazos dentro -> es la hoja (se re-ilumina, no se borra)
+        org.junit.Assert.assertTrue(PrintTone.isShadowWithText(0.02, 12.0))
+        // Mesa lisa (sin escritura) o madera (croma alto): fondo ajeno
+        org.junit.Assert.assertFalse(PrintTone.isShadowWithText(0.0005, 10.0))
+        org.junit.Assert.assertFalse(PrintTone.isShadowWithText(0.03, 60.0))
+    }
 }

@@ -45,6 +45,13 @@ internal object PrintTone {
     /** ¿Mancha oscura profunda pegada al borde que es FONDO liso (mesa, tela) y no un bloque de contenido? */
     fun isPlainBackground(smallHoleFrac: Double): Boolean = smallHoleFrac < PLAIN_MAX_HOLES
 
+    /**
+     * ¿Mancha oscura profunda pegada al borde que es la HOJA en sombra? Casi neutra (croma medio < 30: papel blanco
+     * bajo la sombra; la madera, el corcho o una tela de color no) y con escritura dentro (>= 0.4 % de sus píxeles son
+     * trazos más oscuros que la mediana local).
+     */
+    fun isShadowWithText(textFrac: Double, meanChroma: Double): Boolean = textFrac >= 0.004 && meanChroma < 30.0
+
     /** Fracción de fondo ajeno a partir de la cual el papel se vuelve a medir sin él. */
     const val OUTSIDE_RESTAT_FRAC = 0.15
 
