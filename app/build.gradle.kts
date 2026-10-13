@@ -149,7 +149,6 @@ dependencies { pdfboxTestAssets("com.tom-roush:pdfbox-android:2.0.27.0@aar") }
 val unpackPdfboxTestAssets by tasks.registering(Copy::class) {
     from(pdfboxTestAssets.elements.map { files -> files.map { zipTree(it.asFile) } }) {
         include("assets/com/**")
-        exclude("**/*.ttf")
         eachFile { path = path.removePrefix("assets/") }
         includeEmptyDirs = false
     }
@@ -158,3 +157,9 @@ val unpackPdfboxTestAssets by tasks.registering(Copy::class) {
 android.sourceSets.getByName("test").resources.srcDir(layout.buildDirectory.dir("pdfbox-test-resources"))
 tasks.matching { it.name.startsWith("process") && it.name.endsWith("UnitTestJavaRes") }
     .configureEach { dependsOn(unpackPdfboxTestAssets) }
+// Muestras del PDF reconstruido para revisarlas a ojo: ./gradlew testDebugUnitTest -PreconOut=DIR [-PreconImages=DIR]
+tasks.withType<Test>().configureEach {
+    listOf("reconOut" to "recon.out", "reconImages" to "recon.images").forEach { (p, sp) ->
+        (project.findProperty(p) as String?)?.let { systemProperty(sp, it) }
+    }
+}

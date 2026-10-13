@@ -15,7 +15,6 @@ import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
-import kotlin.math.sqrt
 
 /** Fuentes de la página reconstruida. */
 enum class ReFont { REGULAR, BOLD, HAND }
@@ -172,18 +171,18 @@ object ReconstructionLayout {
     ) {
         if (b.lines.isNotEmpty()) {
             for (line in b.lines) {
-                val (font, text) = usableFont(fontFor(b, line, bodyLineH), line.text, metrics)
-                if (text.isEmpty()) continue
-                placeLine(text, font, line, map, metrics, rgbOf(line.color))?.let { ops += it }
+                val text = InlineMath.plain(line.text)
+                ops += placeLineRuns(text, fontFor(b, line, bodyLineH), line, map, metrics, rgbOf(line.color))
             }
             return
         }
         if (b.text.isBlank()) return
         // Bloque sin líneas: el texto se reparte en su caja (como un párrafo).
-        val (font, _) = usableFont(fontFor(b, null, bodyLineH), b.text, metrics)
+        val plain = b.text.lines().joinToString("\n") { InlineMath.plain(it) }
+        val (font, _) = usableFont(fontFor(b, null, bodyLineH), plain, metrics)
         val r = pageRect(b.box, map)
-        val maxSize = (bodySizePt ?: (r.h / max(1, b.text.lines().size) / LEADING)).let { if (font == ReFont.BOLD) it * 1.3f else it }
-        ops += fitParagraph(b.text, font, r, metrics, maxSize, visible = true)
+        val maxSize = (bodySizePt ?: (r.h / max(1, plain.lines().size) / LEADING)).let { if (font == ReFont.BOLD) it * 1.3f else it }
+        ops += fitParagraph(plain, font, r, metrics, maxSize, visible = true)
     }
 
     /** Geometría de una línea en px de imagen (y hacia abajo): longitud, alto y ángulo (horario, radianes). */
@@ -226,9 +225,10 @@ object ReconstructionLayout {
         m: ReFontMetrics,
         rgb: Int,
         visible: Boolean = true,
+        widthEmOverride: Float? = null,
     ): ReOp.Text? {
         // Vértices en la página (y hacia arriba).
-        val q = if (line.quad.size >= 8) line.quad else with(line.box) {
+        val q = verticalQuad(text, line) ?: if (line.quad.size >= 8) line.quad else with(line.box) {
             listOf(left, top, right, top, right, bottom, left, bottom)
         }
         val p = FloatArray(8) { i -> if (i % 2 == 0) map.x(q[i]) else map.y(q[i]) }
@@ -244,7 +244,7 @@ object ReconstructionLayout {
         val hr = (p[2] - p[4]) * -s + (p[3] - p[5]) * c
         val height = (hl + hr) / 2f
         if (length <= 0.5f || height <= 0.3f) return null
-        val widthEm = m.widthEm(font, text)
+        val widthEm = widthEmOverride ?: m.widthEm(font, text)
         if (widthEm <= 0f) return null
 
         val top = inkTop(text, font, m)
@@ -268,6 +268,70 @@ object ReconstructionLayout {
         val ox = p[6] + -s * off
         val oy = p[7] + c * off
         return ReOp.Text(text, font, size, hScale * 100f, charSpacing, ox, oy, c, s, rgb, visible)
+    }
+
+    /**
+     * Texto vertical: el modelo da una caja recta mucho más alta que ancha (sin orientación) para textos escritos
+     * de arriba abajo (números de registro en el margen, lomos). Se gira 90° en sentido horario (lectura hacia abajo):
+     * cuadrilátero reordenado (TR, BR, BL, TL). null si la línea no es vertical.
+     */
+    fun verticalQuad(text: String, line: LayoutLine): List<Float>? {
+        if (text.trim().length < 3) return null
+        val q = if (line.quad.size >= 8) line.quad else with(line.box) { listOf(left, top, right, top, right, bottom, left, bottom) }
+        val tdx = q[2] - q[0]; val tdy = q[3] - q[1]
+        // Solo cajas casi alineadas a los ejes (un cuadrilátero ya girado se respeta tal cual).
+        if (abs(tdy) > abs(tdx) * 0.18f) return null
+        val w = (abs(q[2] - q[0]) + abs(q[4] - q[6])) / 2f
+        val h = (abs(q[7] - q[1]) + abs(q[5] - q[3])) / 2f
+        if (w <= 0f || h < w * 1.8f) return null
+        return listOf(q[2], q[3], q[4], q[5], q[6], q[7], q[0], q[1])
+    }
+
+    /**
+     * Coloca una línea con varias fuentes: los caracteres que la fuente deseada (subconjunto latino) no tiene van en
+     * la normal, en el mismo renglón, mismo tamaño y escala (p. ej. flechas "→" en una línea manuscrita).
+     */
+    fun placeLineRuns(
+        text: String,
+        wanted: ReFont,
+        line: LayoutLine,
+        map: ImageToPage,
+        m: ReFontMetrics,
+        rgb: Int,
+    ): List<ReOp.Text> {
+        val runs = fontRuns(text, wanted, m)
+        if (runs.isEmpty()) return emptyList()
+        if (runs.size == 1) return listOfNotNull(placeLine(runs[0].second, runs[0].first, line, map, m, rgb))
+        val widths = runs.map { (f, t) -> m.widthEm(f, t) }
+        val total = widths.sum()
+        // Geometría de toda la línea con la fuente mayoritaria (decide la altura de tinta) y el ancho mezclado.
+        val main = runs.maxByOrNull { it.second.length }!!.first
+        val whole = placeLine(text, main, line, map, m, rgb, widthEmOverride = total) ?: return emptyList()
+        val out = ArrayList<ReOp.Text>(runs.size)
+        var x = whole.x; var y = whole.y
+        runs.forEachIndexed { i, (f, t) ->
+            out += whole.copy(text = t, font = f, x = x, y = y)
+            val adv = (widths[i] * whole.size + whole.charSpacing * t.length) * whole.hScale / 100f
+            x += adv * whole.cos; y += adv * whole.sin
+        }
+        return out
+    }
+
+    /** Trozos consecutivos de [text] por fuente: [wanted] donde puede dibujarlos, la normal donde no. */
+    fun fontRuns(text: String, wanted: ReFont, m: ReFontMetrics): List<Pair<ReFont, String>> {
+        val clean = m.clean(ReFont.REGULAR, text)
+        if (wanted == ReFont.REGULAR || clean.isEmpty()) return if (clean.isEmpty()) emptyList() else listOf(ReFont.REGULAR to clean)
+        val out = ArrayList<Pair<ReFont, String>>()
+        val cur = StringBuilder()
+        var curFont: ReFont? = null
+        for (ch in clean) {
+            val f = if (ch == ' ') (curFont ?: wanted) else if (m.clean(wanted, ch.toString()).isNotEmpty()) wanted else ReFont.REGULAR
+            if (curFont != null && f != curFont) { out += curFont to cur.toString(); cur.setLength(0) }
+            curFont = f
+            cur.append(ch)
+        }
+        if (curFont != null && cur.isNotEmpty()) out += curFont to cur.toString()
+        return out
     }
 
     // ------------------------------------------------------------------------------------------------ párrafos
@@ -402,7 +466,7 @@ object ReconstructionLayout {
 
         // Texto de las celdas: un tamaño común (el que cabe en la mayoría) acotado por el de cada celda.
         val rowH = r.h / rows
-        val maxSize = min(rowH * 0.62f, (bodySizePt ?: rowH * 0.62f) * 1.1f).coerceAtLeast(MIN_FONT_PT)
+        val maxSize = min(rowH * 0.68f, (bodySizePt ?: rowH * 0.68f) * 1.1f).coerceAtLeast(MIN_FONT_PT)
         val cellRects = cells.filter { it.text.isNotBlank() }.map { c ->
             val x0 = px[c.col]; val x1 = px[c.col + c.colSpan]
             val yT = py[c.row]; val yB = py[c.row + c.rowSpan]
@@ -410,7 +474,7 @@ object ReconstructionLayout {
             c to PtRect(x0 + pad, yB + pad * 0.5f, (x1 - x0) - 2 * pad, (yT - yB) - pad)
         }
         val fitSizes = cellRects.map { (c, rr) -> bestFitSize(c.text, ReFont.REGULAR, rr, m, maxSize) }.sorted()
-        val common = if (fitSizes.isEmpty()) maxSize else fitSizes[(fitSizes.size * 0.25f).toInt().coerceIn(0, fitSizes.size - 1)]
+        val common = if (fitSizes.isEmpty()) maxSize else fitSizes[(fitSizes.size * 0.5f).toInt().coerceIn(0, fitSizes.size - 1)]
         cellRects.forEachIndexed { i, (c, rr) ->
             val numeric = isNumeric(c.text)
             ops += fitParagraph(c.text, ReFont.REGULAR, rr, m, min(common, maxSize), visible = true, alignRight = numeric, centerVertically = true)
@@ -514,8 +578,7 @@ object TableGrid {
     }
 
     /**
-     * Peso de cada columna según el texto más ancho de sus celdas sin combinar (raíz para no exagerar; mínimo para
-     * columnas vacías).
+     * Peso de cada columna según el texto más ancho de sus celdas sin combinar (con mínimo y tope).
      */
     fun columnWeights(cols: Int, cells: List<TableCell>, widthOf: (String) -> Float): FloatArray {
         val w = FloatArray(cols)
@@ -524,9 +587,11 @@ object TableGrid {
             val longest = c.text.split('\n').maxOfOrNull { widthOf(it) } ?: 0f
             w[c.col] = max(w[c.col], longest)
         }
-        val positive = w.filter { it > 0f }
-        val floorW = if (positive.isEmpty()) 1f else positive.sorted()[positive.size / 2] * 0.35f
-        return FloatArray(cols) { sqrt(max(w[it], floorW).coerceAtLeast(0.1f)) + 0.6f }
+        val positive = w.filter { it > 0f }.sorted()
+        if (positive.isEmpty()) return FloatArray(cols) { 1f }
+        val med = positive[positive.size / 2]
+        // Proporcional al texto, con un mínimo (columnas vacías o de "—") y un tope (celdas muy largas se parten).
+        return FloatArray(cols) { max(w[it], med * 0.5f).coerceAtMost(med * 3.5f) + med * 0.25f }
     }
 
     /** Fronteras (n+1) repartiendo [start]..[end] según [weights]. */
