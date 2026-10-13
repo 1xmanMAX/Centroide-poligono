@@ -112,6 +112,8 @@ import com.scannerpromax.domain.PdfTextMode
 import com.scannerpromax.domain.TextPlacement
 import com.scannerpromax.export.TextExporter
 import com.scannerpromax.export.TextFormat
+import com.scannerpromax.domain.DocLayout
+import com.scannerpromax.pdf.DocLayoutFiles
 import com.scannerpromax.pdf.PdfPageInput
 import com.scannerpromax.pdf.binaryHintFor
 import com.scannerpromax.ui.components.AppTopBar
@@ -138,12 +140,19 @@ private enum class ExportAction { SAVE, SHARE }
 
 private data class Progress(val value: Float, val message: String)
 
-/** PDF generado y cuántas páginas quedaron sin texto reconocido (el OCR falló en ellas). */
-private class PdfBuild(val file: File, val missingText: Int)
+/**
+ * PDF generado y cuántas páginas quedaron sin texto reconocido (el OCR falló en ellas) o, en el PDF reconstruido,
+ * sin reconocer con IA ([missingAi]).
+ */
+private class PdfBuild(val file: File, val missingText: Int, val missingAi: Int = 0)
 
 private fun missingTextMessage(n: Int) =
     if (n == 1) "1 página sin texto reconocido (se exporta como imagen)"
     else "$n páginas sin texto reconocido (se exportan como imagen)"
+
+private fun missingAiMessage(n: Int) =
+    if (n == 1) "1 página sin reconocer con IA (se exporta como imagen)"
+    else "$n páginas sin reconocer con IA (se exportan como imagen)"
 
 /** Exportación con PDF de texto opcional ([PdfTextMode]) y la opción "Exportar en PDF con el texto reconocido". */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
@@ -169,6 +178,8 @@ fun ExportScreen(
     var fileName by rememberSaveable { mutableStateOf("") }
     var defaultsLoaded by rememberSaveable { mutableStateOf(false) }
     var missingOcr by remember { mutableIntStateOf(0) }
+    // Páginas con maquetación de la IA (DocLayout) para el PDF reconstruido; -1 = aún sin contar.
+    var aiPages by remember { mutableIntStateOf(-1) }
 
     val progressFlow = remember { MutableStateFlow<Progress?>(null) }
     val progress by progressFlow.collectAsState()
@@ -181,6 +192,7 @@ fun ExportScreen(
     var seenDoc by remember { mutableStateOf(false) }
     // PDF ya generado con las mismas opciones: compartir y guardar no lo regeneran.
     var cachedPdf by remember { mutableStateOf<Pair<String, File>?>(null) }
+    var cachedMissingAi by remember { mutableIntStateOf(0) }
     // Páginas cuyo OCR falló en la última exportación (el PDF no es buscable en ellas) y acción para reintentar.
     var ocrWarning by remember { mutableStateOf<Pair<Int, ExportAction>?>(null) }
     val view = LocalView.current
@@ -218,6 +230,11 @@ fun ExportScreen(
         }
         // Páginas cuyo texto aún hay que reconocer (se hace solo al exportar). Disco en IO, fuera del hilo principal.
         if (doc != null) missingOcr = container.documents.pagesMissingOcr(docId)
+        doc?.let { dd ->
+            aiPages = withContext(Dispatchers.IO) {
+                dd.pages.count { p -> container.documents.processedFileIfReady(docId, p)?.let { DocLayoutFiles.exists(it) } == true }
+            }
+        }
     }
     LaunchedEffect(doc?.title) {
         val t = doc?.title ?: return@LaunchedEffect
@@ -232,6 +249,8 @@ fun ExportScreen(
         listOf(
             d.pages.joinToString { it.id + it.edits.hashCode() + "/" + it.processedFile + "/" + it.ocrEditedText.hashCode() },
             pageSize, quality, textMode, textPlacement, usePassword, password.hashCode(), fileName,
+            // PDF reconstruido: si cambia cuántas páginas tienen maquetación de la IA, se rehace.
+            if (textMode == PdfTextMode.RECONSTRUIDO) aiPages else 0,
         ).joinToString("|")
 
     /** OCR de todas las páginas (lo que falte se reconoce de una en una, con progreso y cancelable). */
@@ -246,7 +265,7 @@ fun ExportScreen(
     /** null = no hay nada que exportar (solo texto y no se reconoció texto en ninguna página; ya se avisó). */
     suspend fun buildPdf(d: Document): PdfBuild? {
         val key = pdfKey(d)
-        cachedPdf?.let { (k, f) -> if (k == key && f.exists()) return PdfBuild(f, 0) }
+        cachedPdf?.let { (k, f) -> if (k == key && f.exists()) return PdfBuild(f, 0, cachedMissingAi) }
         val pages = d.pages
         val n = pages.size
         val mode = textMode
@@ -258,6 +277,13 @@ fun ExportScreen(
         // ensureOcr devuelve null si el reconocimiento falló (sin memoria, error de ML Kit...): esas páginas no
         // llevan capa de texto. Se avisa y el PDF no se reutiliza para que "Reintentar"/"Compartir" lo rehaga.
         val missing = if (mode.needsOcr) ocrs.count { it == null } else 0
+        // PDF reconstruido: maquetación de la IA guardada junto a cada procesado (las que falten van como imagen).
+        val layouts: List<DocLayout?> = if (mode == PdfTextMode.RECONSTRUIDO) {
+            withContext(Dispatchers.IO) { files.map { DocLayoutFiles.read(it) } }
+        } else {
+            List(n) { null }
+        }
+        val missingAi = if (mode == PdfTextMode.RECONSTRUIDO) layouts.count { it == null } else 0
         if (mode == PdfTextMode.SOLO_TEXTO && ocrs.all { it == null || it.displayText.isBlank() }) {
             toast("No se encontró texto en el documento")
             return null
@@ -274,12 +300,13 @@ fun ExportScreen(
             textPlacement = textPlacement,
         )
         container.pdfExporter.export(
-            pages.indices.map { PdfPageInput(files[it], ocrs[it], binaryHint = binaryHintFor(pages[it].edits.filter)) },
+            pages.indices.map { PdfPageInput(files[it], ocrs[it], binaryHint = binaryHintFor(pages[it].edits.filter), layout = layouts[it]) },
             options,
             out,
         ) { p -> progressFlow.value = Progress(0.65f + 0.35f * p.coerceIn(0f, 1f), "Generando PDF…") }
         cachedPdf = if (missing == 0) key to out else null
-        return PdfBuild(out, missing)
+        cachedMissingAi = missingAi
+        return PdfBuild(out, missing, missingAi)
     }
 
     fun execute(action: ExportAction) {
@@ -308,9 +335,16 @@ fun ExportScreen(
                             savedUris = listOf(uri)
                             savedMime = "application/pdf"
                             lastSaved = "PDF guardado en Descargas/EscanerProMax"
-                            toast(if (built.missingText > 0) "PDF guardado. ${missingTextMessage(built.missingText)}" else "PDF guardado en Descargas")
+                            toast(
+                                when {
+                                    built.missingText > 0 -> "PDF guardado. ${missingTextMessage(built.missingText)}"
+                                    built.missingAi > 0 -> "PDF guardado. ${missingAiMessage(built.missingAi)}"
+                                    else -> "PDF guardado en Descargas"
+                                },
+                            )
                         } else {
                             if (built.missingText > 0) toast(missingTextMessage(built.missingText))
+                            else if (built.missingAi > 0) toast(missingAiMessage(built.missingAi))
                             context.startActivity(container.imageExporter.shareChooser(listOf(pdf), "application/pdf", "Compartir PDF"))
                         }
                     }
@@ -529,6 +563,19 @@ fun ExportScreen(
                                 }
                             }
                         }
+                        if (textMode == PdfTextMode.RECONSTRUIDO && d != null && aiPages >= 0) {
+                            val total = d.pages.size
+                            InfoLine(
+                                Icons.Filled.AutoAwesome,
+                                when {
+                                    aiPages == 0 -> "Ninguna página está reconocida con IA todavía: se exportarán como imagen. " +
+                                        "Reconócelas con IA para obtener el texto real con la misma disposición."
+                                    aiPages < total -> "${missingAiMessage(total - aiPages).replaceFirstChar { it.uppercase() }}. " +
+                                        "Las otras $aiPages se reconstruyen con texto real."
+                                    else -> "Todas las páginas se reconstruyen con texto real, tablas y la misma disposición."
+                                },
+                            )
+                        }
                         if (textMode.needsOcr && missingOcr > 0) {
                             InfoLine(
                                 Icons.Filled.AutoAwesome,
@@ -588,9 +635,9 @@ fun ExportScreen(
                     )
                 }
                 if (d != null && d.pages.isNotEmpty()) {
-                    val est = remember(d, quality, kind, imageFormat, textMode, textPlacement) {
+                    val est = remember(d, quality, kind, imageFormat, textMode, textPlacement, aiPages) {
                         when (kind) {
-                            ExportKind.PDF -> estimatePdfBytes(d, quality, textMode, container.deviceTier.maxWorkingPixels)
+                            ExportKind.PDF -> estimatePdfBytes(d, quality, textMode, container.deviceTier.maxWorkingPixels, aiPages)
                             ExportKind.IMAGES -> estimateBytes(d, quality, imageFormat, container.deviceTier.maxWorkingPixels)
                             ExportKind.TXT -> estimateTextChars(d) + 64L
                             ExportKind.DOCX -> estimateTextChars(d) / 3 + 3_000L
@@ -765,6 +812,7 @@ private fun textModeIcon(m: PdfTextMode): ImageVector = when (m) {
     PdfTextMode.BUSCABLE -> Icons.Filled.Search
     PdfTextMode.BUSCABLE_CON_TEXTO -> Icons.Filled.FindInPage
     PdfTextMode.SOLO_TEXTO -> Icons.Filled.TextFields
+    PdfTextMode.RECONSTRUIDO -> Icons.Filled.AutoAwesome
 }
 
 private fun textModeDescription(m: PdfTextMode): String = when (m) {
@@ -772,6 +820,8 @@ private fun textModeDescription(m: PdfTextMode): String = when (m) {
     PdfTextMode.BUSCABLE -> "Se ve igual, pero puedes buscar, seleccionar y copiar el texto."
     PdfTextMode.BUSCABLE_CON_TEXTO -> "Buscable y, además, páginas con el texto reconocido para leerlo o imprimirlo."
     PdfTextMode.SOLO_TEXTO -> "Solo el texto reconocido, maquetado. Muy liviano."
+    PdfTextMode.RECONSTRUIDO -> "PDF reconstruido (texto real, misma disposición): títulos, tablas y gráficos como en el " +
+        "original. Solo páginas reconocidas con IA; el resto, como imagen."
 }
 
 private fun Context.hasWritePermission() =
@@ -789,8 +839,16 @@ private fun estimateTextChars(doc: Document): Long =
     doc.pages.sumOf { p -> (p.ocrEditedText ?: p.ocrText)?.length?.toLong() ?: 1_800L }
 
 /** PDF: imágenes (si el modo las lleva) + capa de texto + páginas de texto + fuente incrustada. */
-private fun estimatePdfBytes(doc: Document, quality: ExportQuality, mode: PdfTextMode, maxPixels: Int): Long {
+private fun estimatePdfBytes(doc: Document, quality: ExportQuality, mode: PdfTextMode, maxPixels: Int, aiPages: Int = 0): Long {
     val chars = estimateTextChars(doc)
+    if (mode == PdfTextMode.RECONSTRUIDO) {
+        // Páginas reconstruidas: texto vectorial + fuentes + recortes (~15 % de la imagen); el resto, imagen entera.
+        val n = doc.pages.size.coerceAtLeast(1)
+        val ai = aiPages.coerceIn(0, n)
+        val allImages = estimateBytes(doc, quality, null, maxPixels)
+        val perPage = allImages / n
+        return perPage * (n - ai) + (perPage * 0.15).toLong() * ai + (chars * 4.5).toLong() * ai / n + 90_000L + 2_000L
+    }
     val images = if (mode.hasImages) estimateBytes(doc, quality, null, maxPixels) else 0L
     val font = if (mode.needsOcr) 45_000L else 0L
     val layer = if (mode == PdfTextMode.BUSCABLE || mode == PdfTextMode.BUSCABLE_CON_TEXTO) (chars * 3.5).toLong() else 0L

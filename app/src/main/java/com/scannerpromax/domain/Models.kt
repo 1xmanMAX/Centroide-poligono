@@ -243,6 +243,11 @@ enum class PdfTextMode(val label: String, val description: String, val needsOcr:
     BUSCABLE("Buscable (recomendado)", "Imagen + texto invisible: buscar, seleccionar y copiar", true, true),
     BUSCABLE_CON_TEXTO("Buscable + texto reconocido", "Además añade páginas con el texto reconocido legible", true, true),
     SOLO_TEXTO("Solo texto", "Solo el texto reconocido maquetado: muy liviano", true, false),
+    /**
+     * PDF reconstruido por la IA (DocLayout): texto real con la misma disposición, tablas como rejilla, gráficos y
+     * figuras como recorte. Las páginas sin reconocer con IA van como imagen. No usa el OCR clásico.
+     */
+    RECONSTRUIDO("PDF reconstruido", "Texto real con la misma disposición (páginas reconocidas con IA)", false, true),
 }
 
 /** Ubicación de las páginas de texto reconocido. */

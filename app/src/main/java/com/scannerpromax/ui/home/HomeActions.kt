@@ -23,7 +23,12 @@ internal suspend fun buildSharePdf(container: AppContainer, doc: Document, progr
         val image = repo.processedFile(doc.id, page)
         val ocr = if (settings.pdfTextMode.needsOcr) repo.ensureOcr(doc.id, page.id) else null
         progress(0.3f * (i + 1) / doc.pages.size)
-        PdfPageInput(image, ocr, binaryHint = binaryHintFor(page.edits.filter))
+        val layout = if (settings.pdfTextMode == PdfTextMode.RECONSTRUIDO) {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { com.scannerpromax.pdf.DocLayoutFiles.read(image) }
+        } else {
+            null
+        }
+        PdfPageInput(image, ocr, binaryHint = binaryHintFor(page.edits.filter), layout = layout)
     }
     if (settings.pdfTextMode == PdfTextMode.SOLO_TEXTO && inputs.all { it.ocr == null || it.ocr.displayText.isBlank() }) {
         throw IOException("No hay texto reconocido para un PDF de solo texto")
