@@ -124,7 +124,12 @@ class PageRegions(val w: Int, val h: Int, private val gray: ByteArray, private v
     private fun classify(rect: IRect, rows: List<Int>, cols: List<Int>): Ruled.Kind? {
         // Papel cuadriculado / pautado: muchas rectas a paso regular en ambas familias por toda la página.
         if (rows.size >= 12 && cols.size >= 12 && regular(rows) && regular(cols) && rect.area > 0.5 * w * h) return null
-        if (rows.size >= 2 && cols.size >= 2 && (rows.size >= 3 || cols.size >= 3) && rect.area >= 0.015 * w * h) return Ruled.Kind.TABLE
+        if (rows.size >= 2 && cols.size >= 2 && (rows.size >= 3 || cols.size >= 3) && rect.area >= 0.015 * w * h) {
+            // Rejilla con trazos de color saturado (barras, curvas): gráfico con líneas de guía, no tabla. (El sombreado
+            // claro de filas de una tabla apenas tiene croma.)
+            val few = rows.size <= 8 && cols.size <= 8
+            return if (few && colorFraction(rect) > 0.04f) Ruled.Kind.CHART_AXES else Ruled.Kind.TABLE
+        }
         // Ejes de gráfico: una vertical en el borde izquierdo y una horizontal abajo, sin rejilla.
         if (rows.size in 1..2 && cols.size in 1..2 && rect.area >= 0.02 * w * h) {
             val left = cols.first() - rect.x0 <= rect.w * 0.15f

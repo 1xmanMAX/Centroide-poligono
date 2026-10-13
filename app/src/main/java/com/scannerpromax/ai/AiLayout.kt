@@ -211,13 +211,17 @@ object AiLayout {
             var x0 = gw; var y0 = gh; var x1 = 0; var y1 = 0; var n = 0
             while (sp > 0) {
                 val p = stack[--sp]; val x = p % gw; val y = p / gw
-                if (g[p]) n++
-                x0 = min(x0, x); y0 = min(y0, y); x1 = max(x1, x + 1); y1 = max(y1, y + 1)
+                if (g[p]) {
+                    n++
+                    // caja de las celdas reales (sin la dilatación)
+                    x0 = min(x0, x); y0 = min(y0, y); x1 = max(x1, x + 1); y1 = max(y1, y + 1)
+                }
                 for (yy in max(0, y - 1)..min(gh - 1, y + 1)) for (xx in max(0, x - 1)..min(gw - 1, x + 1)) {
                     val q = yy * gw + xx
                     if (d[q] && !seen[q]) { seen[q] = true; stack[sp++] = q }
                 }
             }
+            if (n == 0) continue
             val r = IRect(x0, y0, x1, y1)
             if (r.area < minArea * gw * gh || r.w < 0.08f * gw || r.h < 0.08f * gh) continue
             if (n < 0.25f * r.area) continue  // contorno disperso (motas sueltas)
