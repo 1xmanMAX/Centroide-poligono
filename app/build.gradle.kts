@@ -20,6 +20,24 @@ android {
         // Solo español (textos de la app) e inglés: quita cientos de traducciones de AndroidX/Material/ML Kit
         // (APK y resources.arsc más pequeños = menos memoria y arranque algo más rápido).
         resourceConfigurations += listOf("es", "en")
+
+        // Motor de IA local (llama.cpp + mtmd) por JNI: app/src/main/cpp.
+        externalNativeBuild {
+            cmake {
+                arguments += listOf("-DANDROID_STL=c++_shared", "-DCMAKE_BUILD_TYPE=Release")
+                cppFlags += listOf("-O3")
+                // Mismas ABIs que los splits (sin x86 de 32 bits).
+                abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+            }
+        }
+    }
+
+    ndkVersion = "27.3.13750724"
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.31.6"
+        }
     }
 
     // APKs por ABI: cada celular descarga solo las librerías nativas que necesita (APK más liviano).
@@ -56,7 +74,11 @@ android {
         // Recursos de criptografía post-cuántica de BouncyCastle (dependencia de pdfbox) que la app no usa: ~7 MB.
         resources { excludes += setOf("/META-INF/{AL2.0,LGPL2.1}", "META-INF/DEPENDENCIES", "org/bouncycastle/pqc/**") }
         // Librerías nativas comprimidas: APK mucho más liviano para descargar/compartir.
-        jniLibs { useLegacyPackaging = true }
+        jniLibs {
+            useLegacyPackaging = true
+            // OpenCV trae su propio libc++_shared.so; el del NDK 27 (llama.cpp) es más nuevo y compatible hacia atrás.
+            pickFirsts += setOf("**/libc++_shared.so")
+        }
     }
 }
 
@@ -112,6 +134,9 @@ dependencies {
     implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+
+    // Descarga de modelos de IA en segundo plano (servicio en primer plano + notificación)
+    implementation("androidx.work:work-runtime-ktx:2.10.0")
 
     testImplementation("junit:junit:4.13.2")
 }

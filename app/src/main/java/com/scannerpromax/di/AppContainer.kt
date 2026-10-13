@@ -2,6 +2,8 @@ package com.scannerpromax.di
 
 import android.content.Context
 import com.scannerpromax.NativeLibs
+import com.scannerpromax.ai.LlmEngine
+import com.scannerpromax.ai.ModelManager
 import com.scannerpromax.data.DocumentRepository
 import com.scannerpromax.data.SettingsRepository
 import com.scannerpromax.export.ImageExporter
@@ -50,6 +52,12 @@ class AppContainer(context: Context) {
     }
 
     val imageExporter: ImageExporter by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { ImageExporter(appContext) }
+
+    /** Motor de IA local (llama.cpp). Crearlo no carga la biblioteca nativa: eso ocurre al primer uso. */
+    val llm: LlmEngine by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { LlmEngine(appContext) }
+
+    /** Modelos de IA descargables (estado, descargas en segundo plano, borrado). */
+    val models: ModelManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { ModelManager(appContext) { llm } }
 
     /** El procesador solo si ya existe (para liberar cachés sin crearlo por accidente). */
     fun pageProcessorIfCreated(): PageProcessor? = if (pageProcessorLazy.isInitialized()) pageProcessor else null

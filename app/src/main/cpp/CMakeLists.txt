@@ -25,8 +25,10 @@ set(CMAKE_C_FLAGS_RELWITHDEBINFO   "-O3 -DNDEBUG -g")
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O3 -DNDEBUG -g")
 
 # Secciones separadas para que el enlazador tire el código que no se usa (llama-common es grande).
-set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} -ffunction-sections -fdata-sections")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffunction-sections -fdata-sections")
+# -g0: sin información de depuración (el NDK pone -g; los objetos de llama.cpp pasan de ~600 MB a ~150 MB por ABI
+# y las .so se recortan igualmente al empaquetar).
+set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} -ffunction-sections -fdata-sections -g0")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffunction-sections -fdata-sections -g0")
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--gc-sections -Wl,--as-needed")
 
 # Opciones de llama.cpp comunes a todas las ABIs.

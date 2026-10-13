@@ -282,6 +282,7 @@ bool Session::generate(const GenParams & g, const std::vector<Image> & images, c
 
         mtmd_input_text txt;
         txt.text = prompt.c_str();
+        txt.text_len = prompt.size();
         txt.add_special = true;
         txt.parse_special = true;
         mtmd::input_chunks chunks(mtmd_input_chunks_init());

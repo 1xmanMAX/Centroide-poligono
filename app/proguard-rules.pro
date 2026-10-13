@@ -30,3 +30,8 @@
     public static int v(...);
     public static int d(...);
 }
+# Motor de IA (llm_jni): el código nativo llama por nombre a TextCallback.onText(String) y lanza
+# IllegalStateException; LlmNative se resuelve por nombre JNI (Java_com_scannerpromax_ai_LlmNative_*).
+-keep class com.scannerpromax.ai.LlmNative { *; }
+-keep interface com.scannerpromax.ai.LlmNative$TextCallback { *; }
+-keep class * implements com.scannerpromax.ai.LlmNative$TextCallback { boolean onText(java.lang.String); }
