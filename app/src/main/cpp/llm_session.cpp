@@ -361,7 +361,7 @@ bool Session::generate(const GenParams & g, const std::vector<Image> & images, c
     scp.no_perf = true;
     llama_sampler * smpl = llama_sampler_chain_init(scp);
     if (g.repeat_penalty > 0.0f && g.repeat_penalty != 1.0f) {
-        llama_sampler_chain_add(smpl, llama_sampler_init_penalties(g.repeat_last_n, g.repeat_penalty, 0.0f, 0.0f));
+        llama_sampler_chain_add(smpl, llama_sampler_init_penalties(llama_vocab_n_tokens(vocab), g.repeat_last_n, g.repeat_penalty, 0.0f, 0.0f));
     }
     if (g.temperature <= 0.0f) {
         llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
