@@ -46,3 +46,6 @@ Actualízalo en cada paso importante (y haz commit + push).
 
 ## v12 (2026-10-12)
 Halo + red regular de cuadrícula + vista previa = render (agente algoritmos, abbc951..be08e6a) + vista = exportado sin reprocesar (cherry-pick de b2abce8). APK scratchpad/EscanerProMax-v12-arm64.apk. Pendiente: franjas de madera/manchas de color en bordes (3 reglas probadas y revertidas), hueco blanco en sombra no reproducido (falta foto original), mancha azul no reproducida; probar v12 en emulador.
+
+## Petición nueva (2026-10-13): modelo de lenguaje pequeño en el dispositivo
+Usuario pide un LLM open source muy pequeño y moderno para mejorar OCR, reescribir PDF, etc. Investigado y propuesto: Qwen3.5-0.8B (Apache 2.0, feb 2026, multimodal, OCRBench 79,1, 201 idiomas) vía llama.cpp GGUF Q4 como descarga opcional. Alternativas: LFM2.5-350M (solo texto, gama muy baja, licencia LFM con límites comerciales), Gemma 4 E2B (más capaz pero ~2,3B efectivos). PENDIENTE: confirmación del usuario antes de implementar.
