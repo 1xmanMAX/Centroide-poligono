@@ -7,7 +7,7 @@ import kotlin.math.abs
 
 /**
  * Lectura del [DocLayout] guardado junto al procesado de una página (`<procesado>.layout.json`, lo escribe la tubería
- * de IA). Lógica pura (JVM).
+ * de IA con [encode]). Lógica pura (JVM).
  */
 object DocLayoutFiles {
     const val SUFFIX = ".layout.json"
@@ -21,6 +21,9 @@ object DocLayoutFiles {
     fun fileFor(processed: File): File = File(processed.parentFile, processed.name + SUFFIX)
 
     fun exists(processed: File): Boolean = fileFor(processed).let { it.isFile && it.length() > 0L }
+
+    /** JSON que escribe la tubería de IA (DocumentRepository.saveAiResult) y que [parse] lee. */
+    fun encode(layout: DocLayout): String = json.encodeToString(DocLayout.serializer(), layout)
 
     fun parse(text: String): DocLayout? = try {
         json.decodeFromString(DocLayout.serializer(), text).takeIf { it.imageWidth > 0 && it.imageHeight > 0 }

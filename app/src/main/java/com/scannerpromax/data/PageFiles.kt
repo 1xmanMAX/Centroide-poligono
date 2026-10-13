@@ -39,9 +39,12 @@ object PageFiles {
 
     /**
      * Maquetación reconocida por la IA ([com.scannerpromax.domain.DocLayout]) de la versión [edits] de la página:
-     * `ocr/{id}_{hash}.layout.json`, junto al OCR de esa misma versión. Si existe, el OCR guardado lo produjo la IA.
+     * `processed/{id}_{hash}.{jpg|png}.layout.json`, junto al procesado de esa versión (misma ruta que
+     * [com.scannerpromax.pdf.DocLayoutFiles.fileFor], que es quien la lee). Si existe, el OCR guardado lo produjo la IA.
      */
-    fun layoutName(pageId: String, edits: PageEdits) = "$OCR_DIR/${pageId}_${editsHash(edits)}.layout.json"
+    fun layoutName(pageId: String, edits: PageEdits) = processedName(pageId, edits) + LAYOUT_SUFFIX
+
+    const val LAYOUT_SUFFIX = ".layout.json"
 
     /** Tipo de documento clasificado por la IA (no depende de las ediciones): `ocr/{id}.aiclass`. */
     fun aiClassName(pageId: String) = "$OCR_DIR/$pageId.aiclass"

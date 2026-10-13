@@ -982,7 +982,9 @@ class DocumentRepository(
     /** Borra procesados/miniaturas antiguos de la página distintos de los que se conservan. */
     private fun cleanupStale(dir: File, page: Page, keepProcessed: String, keepThumb: String) {
         File(dir, PROCESSED_DIR).listFiles()?.forEach { f ->
-            if (f.name.startsWith(page.id) && "$PROCESSED_DIR/${f.name}" != keepProcessed) f.delete()
+            // (la maquetación de la IA del procesado que se conserva, `<procesado>.layout.json`, también se conserva)
+            val rel = "$PROCESSED_DIR/${f.name}"
+            if (f.name.startsWith(page.id) && rel != keepProcessed && rel != keepProcessed + PageFiles.LAYOUT_SUFFIX) f.delete()
         }
         File(dir, THUMB_DIR).listFiles()?.forEach { f ->
             if (f.name.startsWith(page.id) && "$THUMB_DIR/${f.name}" != keepThumb) f.delete()
@@ -1286,7 +1288,7 @@ class DocumentRepository(
     /**
      * Guarda el resultado de la IA para la versión [edits] de la página: el [ocr] sustituye al OCR guardado (capa de
      * texto del PDF, búsqueda, pantalla de texto; el texto corregido por el usuario se conserva) y [layout] va a
-     * `ocr/{id}_{hash}.layout.json`. Si las ediciones cambiaron mientras la IA leía, no se guarda nada (false).
+     * `<procesado>.layout.json` (pdf/DocLayoutFiles). Si las ediciones cambiaron mientras la IA leía, no se guarda nada (false).
      */
     suspend fun saveAiResult(docId: String, pageId: String, edits: PageEdits, ocr: OcrResult, layout: DocLayout): Boolean {
         loaded.await()
@@ -1296,7 +1298,7 @@ class DocumentRepository(
         val lf = File(docDir(docId), PageFiles.layoutName(pageId, edits))
         withContext(Dispatchers.IO) {
             lf.parentFile?.mkdirs()
-            writeAtomic(lf, json.encodeToString(DocLayout.serializer(), layout), sync = false)
+            writeAtomic(lf, com.scannerpromax.pdf.DocLayoutFiles.encode(layout), sync = false)
         }
         ocrLock(docId, pageId).withLock { saveOcrFor(docId, pageId, edits, ocr, fromAi = true) }
         val after = findPage(docId, pageId)
@@ -1314,14 +1316,7 @@ class DocumentRepository(
     suspend fun loadLayout(docId: String, pageId: String): DocLayout? {
         val page = findPage(docId, pageId) ?: return null
         return withContext(Dispatchers.IO) {
-            val f = File(docDir(docId), PageFiles.layoutName(pageId, page.edits))
-            if (!f.exists()) return@withContext null
-            try {
-                json.decodeFromString(DocLayout.serializer(), f.readText())
-            } catch (t: Throwable) {
-                Log.w(TAG, "Maquetación corrupta en $f", t)
-                null
-            }
+            com.scannerpromax.pdf.DocLayoutFiles.read(File(docDir(docId), PageFiles.processedName(pageId, page.edits)))
         }
     }
 

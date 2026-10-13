@@ -328,19 +328,16 @@ object AiLayout {
         val regs = regions.toMutableList()
         val textBlocks = ArrayList<LayoutBlock>()
         for (b in text) {
-            val bb = box(b.box)
-            val host = regs.indexOfFirst { it.type != BlockType.FORMULA && insideFraction(bb, it.box) > 0.5f }
-            if (host >= 0) {
-                val r = regs[host]
-                if (r.type == BlockType.FIGURE || r.type == BlockType.CHART || r.type == BlockType.TABLE) {
-                    regs[host] = r.copy(lines = r.lines + b.lines.mapIndexed { i, l -> layoutLine(l, b.quads.getOrNull(i)) })
-                }
-                continue
-            }
-            // Líneas que son fórmulas (ya reconocidas como bloque FORMULA): fuera del texto.
-            val keep = b.lines.indices.filter { i ->
+            // Cada LÍNEA que cae (> 50 %) dentro de una tabla/figura/gráfico pasa a esa región (la reconstrucción del
+            // PDF usa las líneas de la tabla, con sus cajas, para alinear filas y columnas); las que caen en una
+            // fórmula ya reconocida se quitan; el resto sigue como texto.
+            val keep = ArrayList<Int>()
+            for (i in b.lines.indices) {
                 val lb = box(b.lines[i].box)
-                regs.none { it.type == BlockType.FORMULA && insideFraction(lb, it.box) > 0.5f }
+                val host = regs.indexOfFirst { insideFraction(lb, it.box) > 0.5f }
+                if (host < 0) { keep.add(i); continue }
+                val r = regs[host]
+                if (r.type != BlockType.FORMULA) regs[host] = r.copy(lines = r.lines + layoutLine(b.lines[i], b.quads.getOrNull(i)))
             }
             if (keep.isEmpty()) continue
             val lines = keep.map { b.lines[it] }
@@ -354,6 +351,13 @@ object AiLayout {
                 ),
             )
         }
+        // Figuras/gráficos sin texto propio: su texto (etiquetas) queda en lines; tablas sin celdas: texto de sus líneas.
+        for (i in regs.indices) {
+            val r = regs[i]
+            if (r.type == BlockType.TABLE && r.cells.isEmpty() && r.text.isEmpty() && r.lines.isNotEmpty()) {
+                regs[i] = r.copy(text = r.lines.sortedWith(compareBy({ it.box.top }, { it.box.left })).joinToString("\n") { it.text })
+            }
+        }
         val all = textBlocks + regs
         val norm: (LayoutBlock) -> FloatArray = { b ->
             floatArrayOf(b.box.left * 1000f / w, b.box.top * 1000f / h, b.box.right * 1000f / w, b.box.bottom * 1000f / h)
@@ -364,7 +368,8 @@ object AiLayout {
 
     /** DocLayout mínimo a partir de un OCR sin maquetación (ML Kit o texto alineado): un bloque de texto por bloque. */
     fun fromOcr(ocr: OcrResult, docType: String?, engine: String): DocLayout {
-        val text = ocr.blocks.map { b -> TextBlockPx(b.box, b.lines, b.lines.map { null }, b.lines.map { it.box.bottom - it.box.top }.sorted().let { it[it.size / 2] }) }
+        val text = ocr.blocks.filter { it.lines.isNotEmpty() }
+            .map { b -> TextBlockPx(b.box, b.lines, b.lines.map { null }, b.lines.map { it.box.bottom - it.box.top }.sorted().let { it[it.size / 2] }) }
         return assemble(ocr.imageWidth, ocr.imageHeight, text, emptyList(), docType, engine)
     }
 }
