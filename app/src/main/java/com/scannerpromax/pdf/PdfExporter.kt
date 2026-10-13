@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.RectF
 import android.util.Log
+import com.scannerpromax.domain.DocLayout
 import com.scannerpromax.domain.FilterType
 import com.scannerpromax.domain.OcrLine
 import com.scannerpromax.domain.OcrResult
@@ -57,6 +58,8 @@ data class PdfPageInput(
      * null = desconocido (PDF externos, compresor): se decide con [ImageCodec.isNearlyBinary].
      */
     val binaryHint: Boolean? = null,
+    /** Maquetación de la IA para [PdfTextMode.RECONSTRUIDO]; null = página sin reconocer (va como imagen). */
+    val layout: DocLayout? = null,
 )
 
 /** [PdfPageInput.binaryHint] según el filtro de la página: B/N y Ahorro tinta son binarios; el resto no. */
@@ -90,12 +93,23 @@ class PdfExporter(private val context: Context) {
             try {
                 PdfSupport.applyMetadata(doc, output.nameWithoutExtension)
                 val fonts = Fonts(doc)
+                var reFonts: PdfFontMetrics? = null
                 val deferredText = ArrayList<Pair<Int, OcrResult?>>()
                 pages.forEachIndexed { index, input ->
                     currentCoroutineContext().ensureActive()
                     val pageNo = index + 1
                     when (mode) {
                         PdfTextMode.SOLO_TEXTO -> addTextPages(doc, titleFor(pageNo, pages.size), input.ocr, textPageSize(options, null), fonts)
+                        PdfTextMode.RECONSTRUIDO -> {
+                            val layout = input.layout
+                            if (layout != null && reconstructable(layout, input.imageFile)) {
+                                val m = reFonts ?: reconstructor.loadFonts(doc).also { reFonts = it }
+                                reconstructor.addPage(doc, m, layout, input.imageFile, options, input.binaryHint)
+                            } else {
+                                // Sin maquetación de la IA: como imagen (lo mismo que "Solo imagen").
+                                addImagePage(doc, input, options, PdfTextMode.SOLO_IMAGEN, fonts)
+                            }
+                        }
                         else -> {
                             val box = addImagePage(doc, input, options, mode, fonts)
                             if (mode == PdfTextMode.BUSCABLE_CON_TEXTO) {
@@ -126,6 +140,15 @@ class PdfExporter(private val context: Context) {
             progress?.invoke(1f)
             output
         }
+
+    private val reconstructor by lazy { PdfReconstructor(context) }
+
+    /** La maquetación corresponde a esta imagen (misma proporción) y tiene algo que dibujar. */
+    private fun reconstructable(layout: DocLayout, file: File): Boolean {
+        if (!DocLayoutFiles.hasContent(layout) || !file.exists()) return false
+        val (w, h) = ImageCodec.bounds(file)
+        return w > 0 && h > 0 && DocLayoutFiles.sameAspect(layout, w, h)
+    }
 
     // -----------------------------------------------------------------------------------------
 

@@ -31,7 +31,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -60,6 +62,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
@@ -71,6 +74,9 @@ import androidx.exifinterface.media.ExifInterface
 import com.scannerpromax.di.AppContainer
 import com.scannerpromax.domain.Page
 import com.scannerpromax.imaging.BitmapIO
+import com.scannerpromax.pdf.DocLayoutFiles
+import com.scannerpromax.pdf.PdfReconstructor
+import com.scannerpromax.pdf.binaryHintFor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
@@ -186,7 +192,47 @@ internal fun PageViewerDialog(
                 }
             }
             val f = file
-            if (f == null) {
+            // "Ver reconstruido": la página que daría el PDF reconstruido (DocLayout de la IA) para compararla con el
+            // escaneo. Solo si la página está reconocida con IA.
+            val appContext = LocalContext.current.applicationContext
+            val reconstructor = remember { PdfReconstructor(appContext) }
+            var showRebuilt by remember { mutableStateOf(false) }
+            val hasLayout by produceState(false, f) {
+                value = f != null && withContext(Dispatchers.IO) { DocLayoutFiles.exists(f) }
+            }
+            var rebuildError by remember(f, showRebuilt) { mutableStateOf<String?>(null) }
+            val rebuilt by produceState<File?>(null, f, showRebuilt, hasLayout) {
+                value = null
+                val src = f ?: return@produceState
+                if (!showRebuilt || !hasLayout) return@produceState
+                value = runCatching {
+                    withContext(Dispatchers.IO) {
+                        val layoutFile = DocLayoutFiles.fileFor(src)
+                        val out = File(appContext.cacheDir, "reconstruido/${src.nameWithoutExtension}_${layoutFile.lastModified()}.png")
+                        if (out.isFile && out.length() > 0L) return@withContext out
+                        out.parentFile?.listFiles()?.filter { it.name.startsWith(src.nameWithoutExtension + "_") }?.forEach { it.delete() }
+                        val (w, h) = com.scannerpromax.export.ImageCodec.bounds(src)
+                        val layout = DocLayoutFiles.read(src, w, h) ?: throw java.io.IOException("La maquetación de la IA es de otra versión de la página")
+                        reconstructor.renderPreview(layout, src, binaryHintFor(page.edits.filter), out)
+                    }
+                }.onFailure { rebuildError = it.message ?: "No se pudo reconstruir la página" }.getOrNull()
+            }
+            if (showRebuilt && hasLayout && f != null) {
+                val r = rebuilt
+                if (r != null) {
+                    androidx.compose.runtime.key(r.path) { ZoomableFileImage(r, Modifier.fillMaxSize().background(Color.White)) }
+                } else {
+                    Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+                        if (rebuildError == null) {
+                            CircularProgressIndicator(color = Color.White)
+                            Spacer(Modifier.height(12.dp))
+                            Text("Reconstruyendo la página…", color = Color.White)
+                        } else {
+                            Text(rebuildError ?: "", color = Color.White, modifier = Modifier.padding(24.dp))
+                        }
+                    }
+                }
+            } else if (f == null) {
                 Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(color = Color.White)
                     if (rendering) {
@@ -214,6 +260,13 @@ internal fun PageViewerDialog(
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f),
                 )
+                if (hasLayout) {
+                    TextButton(onClick = { showRebuilt = !showRebuilt }) {
+                        Icon(if (showRebuilt) Icons.Filled.Image else Icons.Filled.AutoAwesome, null, tint = Color.White, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (showRebuilt) "Ver escaneo" else "Ver reconstruido", color = Color.White)
+                    }
+                }
                 TextButton(onClick = { onEdit(page) }) {
                     Icon(Icons.Filled.Edit, null, tint = Color.White, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))

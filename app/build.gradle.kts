@@ -140,3 +140,21 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
 }
+
+// Tests JVM con pdfbox-android (PDF reconstruido): sus recursos (cmaps, glyphlist) van en los assets del AAR, que en
+// la JVM no están en el classpath; se desempaquetan como recursos de test (pdfbox los busca con getResourceAsStream
+// si PDFBoxResourceLoader no está inicializado). No afecta al APK.
+val pdfboxTestAssets: Configuration by configurations.creating
+dependencies { pdfboxTestAssets("com.tom-roush:pdfbox-android:2.0.27.0@aar") }
+val unpackPdfboxTestAssets by tasks.registering(Copy::class) {
+    from(pdfboxTestAssets.elements.map { files -> files.map { zipTree(it.asFile) } }) {
+        include("assets/com/**")
+        exclude("**/*.ttf")
+        eachFile { path = path.removePrefix("assets/") }
+        includeEmptyDirs = false
+    }
+    into(layout.buildDirectory.dir("pdfbox-test-resources"))
+}
+android.sourceSets.getByName("test").resources.srcDir(layout.buildDirectory.dir("pdfbox-test-resources"))
+tasks.matching { it.name.startsWith("process") && it.name.endsWith("UnitTestJavaRes") }
+    .configureEach { dependsOn(unpackPdfboxTestAssets) }
