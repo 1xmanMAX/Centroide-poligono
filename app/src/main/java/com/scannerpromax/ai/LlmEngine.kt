@@ -225,6 +225,15 @@ class LlmEngine(context: Context) {
     companion object {
         private const val TAG = "LlmEngine"
 
+        /** Escala (<= 1) para que el lado mayor no pase de [maxSide] ni el área de [maxPixels] (0 = sin límite). */
+        fun fitScale(w: Int, h: Int, maxSide: Int, maxPixels: Int): Float {
+            var s = 1f
+            val long = max(w, h)
+            if (maxSide in 1 until long) s = maxSide.toFloat() / long
+            if (maxPixels > 0 && w.toDouble() * h * s * s > maxPixels) s = kotlin.math.sqrt(maxPixels.toDouble() / (w.toDouble() * h)).toFloat()
+            return s
+        }
+
         /**
          * Reduce el lado mayor a [maxSide] (y el área a [maxPixels] si > 0) y garantiza ARGB_8888 (lo que exige el
          * JNI). Puede devolver [src].
