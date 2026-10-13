@@ -128,7 +128,14 @@ class AiRecognizer(private val llm: LlmEngine) {
         fun fullBox(r: IRect) = LayoutBox(r.x0 * toFull, r.y0 * toFullY, r.x1 * toFull, r.y1 * toFullY)
         val ruled = raster.ruledRegions()
         val out = ArrayList<LayoutBlock>()
-        val tables = ruled.filter { it.kind == PageRegions.Ruled.Kind.TABLE }.take(MAX_TABLES)
+        val ruledTables = ruled.filter { it.kind == PageRegions.Ruled.Kind.TABLE }
+        // Tablas sin reglado: renglones del Spotting con varias celdas alineadas en columnas.
+        val textTables = AiLayout.textGridTables(sp.items).map { tt ->
+            fun x(v: Float) = (v / 1000f * rw).roundToInt().coerceIn(0, rw)
+            fun y(v: Float) = (v / 1000f * rh).roundToInt().coerceIn(0, rh)
+            PageRegions.Ruled(IRect(x(tt.box[0]), y(tt.box[1]), x(tt.box[2]), y(tt.box[3])), emptyList(), tt.colSeps.map { x(it) }, PageRegions.Ruled.Kind.TABLE)
+        }.filter { t -> ruled.none { r -> t.rect.intersect(r.rect) > 0.3 * min(t.rect.area, r.rect.area) } }
+        val tables = (ruledTables + textTables).take(MAX_TABLES)
         val axes = ruled.filter { it.kind == PageRegions.Ruled.Kind.CHART_AXES }.take(MAX_CHARTS)
 
         // Fórmulas candidatas (líneas del Spotting)
@@ -232,7 +239,8 @@ class AiRecognizer(private val llm: LlmEngine) {
         val r = t.rect
         val pad = max(2, (min(r.w, r.h) * 0.015f).roundToInt())
         val rect = IRect(max(0, r.x0 - pad), max(0, r.y0 - pad), min(rw, r.x1 + pad), min(rh, r.y1 + pad))
-        val rotation = tableRotation(rect, rw, rh, sp, mlkit, fullW, fullH)
+        // (las tablas sin reglado salen de renglones horizontales del Spotting: ya están derechas)
+        val rotation = if (t.rows.isEmpty()) 0 else tableRotation(rect, rw, rh, sp, mlkit, fullW, fullH)
         val crop0 = cropScaled(page, rect, rw, rh)
         val crop = if (rotation != 0) rotate(crop0, rotation).also { crop0.recycle() } else crop0
         try {

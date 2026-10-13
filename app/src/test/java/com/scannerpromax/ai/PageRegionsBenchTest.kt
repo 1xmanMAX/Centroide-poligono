@@ -68,3 +68,16 @@ class PageRegionsBenchTest {
         return if (u > 0) i / u else 0f
     }
 }
+
+/** Tabla sin reglado sobre un Spotting real del banco (DocLayNet 5383; referencia: tabla en y 265..571). */
+class TextTableBenchTest {
+    @Test fun financialTableFromSpotting() {
+        val f = File("/tmp/claude-0/-home-user-Centroide-poligono/fd1fa83a-ce0b-5e57-90bd-06b9887dce8c/scratchpad/spot_5383.txt")
+        assumeTrue(f.exists())
+        val raw = f.readLines().filter { "<|LOC_" in it }.joinToString("\n")
+        val t = AiLayout.textGridTables(com.scannerpromax.ai.parse.IaParse.parseSpotting(raw))
+        t.forEach { println("tabla ${it.box.toList()} filas=${it.rows} columnas=${it.colSeps.size - 1}") }
+        org.junit.Assert.assertEquals(1, t.size)
+        org.junit.Assert.assertTrue(t[0].box[1] in 240f..290f && t[0].box[3] in 540f..600f)
+    }
+}

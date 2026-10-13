@@ -235,6 +235,74 @@ object AiLayout {
 
     // ------------------------------------------------------------------------------------------ tablas
 
+    /** Tabla SIN reglado encontrada en el Spotting: caja y separadores de columna (0..1000). */
+    class TextTable(val box: FloatArray, val colSeps: List<Float>, val rows: Int)
+
+    private val NUMERIC = Regex("^[\\s$€£%()+\\-–—.,:/0-9]*\\d[\\s$€£%()+\\-–—.,:/0-9]*$")
+
+    /**
+     * Tablas sin líneas (estados financieros, listados) a partir de los fragmentos del Spotting: Paddle devuelve
+     * cada celda como fragmento aparte, así que una fila de tabla es un renglón con >= 3 fragmentos separados, o 2 con
+     * alguno numérico corto. Se buscan >= [minRows] renglones así (tolerando 2 renglones sueltos en medio, p. ej.
+     * subtítulos de categoría) con >= 3 columnas distintas. Las columnas salen de agrupar los bordes izquierdos.
+     */
+    fun textGridTables(items: List<IaParse.SpotItem>, minRows: Int = 4): List<TextTable> {
+        val boxes = items.filter { it.box != null && it.text.isNotBlank() }
+        if (boxes.size < minRows * 2) return emptyList()
+        // renglones por solape vertical
+        val sorted = boxes.sortedBy { (it.box!![1] + it.box[3]) / 2 }
+        val rows = ArrayList<MutableList<IaParse.SpotItem>>()
+        for (it in sorted) {
+            val b = it.box!!
+            val cy = (b[1] + b[3]) / 2
+            val row = rows.lastOrNull()
+            if (row != null) {
+                val rb = row[0].box!!
+                if (cy in rb[1]..rb[3] || abs(cy - (rb[1] + rb[3]) / 2) < (rb[3] - rb[1]) * 0.5f) { row.add(it); continue }
+            }
+            rows.add(mutableListOf(it))
+        }
+        fun isTableRow(r: List<IaParse.SpotItem>): Boolean {
+            if (r.size < 2) return false
+            val s = r.sortedBy { it.box!![0] }
+            val h = s.map { it.box!![3] - it.box[1] }.sorted()[s.size / 2].coerceAtLeast(1f)
+            val gaps = s.zipWithNext().count { (a, b) -> b.box!![0] - a.box!![2] > 1.5f * h }
+            if (gaps < 1) return false
+            return r.size >= 3 && gaps >= 2 || r.any { it.text.length <= 14 && NUMERIC.matches(it.text.trim()) }
+        }
+        val flags = rows.map { isTableRow(it) }
+        val out = ArrayList<TextTable>()
+        var i = 0
+        while (i < rows.size) {
+            if (!flags[i]) { i++; continue }
+            var j = i; var last = i; var count = 0; var miss = 0
+            while (j < rows.size) {
+                if (flags[j]) { count++; last = j; miss = 0 } else if (++miss > 2) break
+                j++
+            }
+            if (count >= minRows) {
+                // cabecera: hasta 3 renglones de encima con >= 2 fragmentos pegados a la tabla
+                var first = i
+                while (first > 0 && i - first < 3 && rows[first - 1].size >= 2) first--
+                val members = rows.subList(first, last + 1).flatten()
+                val starts = members.filter { m -> rows.subList(i, last + 1).any { r -> m in r } }.map { it.box!![0] }.sorted()
+                val h = members.map { it.box!![3] - it.box[1] }.sorted()[members.size / 2].coerceAtLeast(1f)
+                val clusters = ArrayList<MutableList<Float>>()
+                for (x in starts) if (clusters.isNotEmpty() && x - clusters.last().last() < 2f * h) clusters.last().add(x) else clusters.add(mutableListOf(x))
+                val cols = clusters.filter { it.size >= 2 }
+                if (cols.size >= 3) {
+                    val box = floatArrayOf(members.minOf { it.box!![0] }, members.minOf { it.box!![1] }, members.maxOf { it.box!![2] }, members.maxOf { it.box!![3] })
+                    // separadores: justo antes del inicio de cada columna (salvo la primera) y los bordes
+                    val seps = listOf(box[0]) + cols.drop(1).map { c -> c.min() - h * 0.3f } + box[2]
+                    out.add(TextTable(box, seps, last - first + 1))
+                }
+            }
+            i = last + 1
+        }
+        return out
+    }
+
+
     /** Bandas de columnas para una tabla de [nCols] columnas: <= [maxCols] por banda, la 1ª (clave) se repite. */
     fun columnBands(nCols: Int, maxCols: Int = 10): List<IntRange> {
         if (nCols <= maxCols + 2) return listOf(0 until nCols)

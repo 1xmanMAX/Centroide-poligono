@@ -171,4 +171,20 @@ class AiLayoutTest {
         assertEquals(PageFiles.processedName("p", e) + ".layout.json", PageFiles.layoutName("p", e))
         assertNotNull(PageFiles.layoutName("p", e))
     }
+
+    @Test fun textGridTablesOnlyWhereThereAreColumns() {
+        // Formulario FUNSD (pares etiqueta: valor) y texto corrido: ninguna tabla
+        assertTrue(AiLayout.textGridTables(IaParse.parseSpotting(IaParseTest.sample("spotting_funsd13.txt"))).size <= 1)
+        fun item(t: String, x0: Float, y0: Float, x1: Float) = IaParse.SpotItem(t, null, floatArrayOf(x0, y0, x1, y0 + 10))
+        val rows = (0 until 6).flatMap { r ->
+            val y = 100f + r * 15
+            listOf(item("Producto $r", 20f, y, 150f), item("${r + 1}", 400f, y, 420f), item("${r * 3},50", 600f, y, 650f), item("${r * 7},00", 850f, y, 900f))
+        }
+        val para = (0 until 5).map { item("Línea de texto corrido número $it del párrafo", 20f, 300f + it * 15, 900f) }
+        val t = AiLayout.textGridTables(rows + para)
+        assertEquals(1, t.size)
+        assertEquals(6, t[0].rows)
+        assertEquals(4, t[0].colSeps.size - 1)
+        assertEquals(100f, t[0].box[1])
+    }
 }
