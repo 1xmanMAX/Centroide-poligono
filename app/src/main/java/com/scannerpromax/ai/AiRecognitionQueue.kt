@@ -1,0 +1,474 @@
+package com.scannerpromax.ai
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.util.Log
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.OutOfQuotaPolicy
+import androidx.work.WorkManager
+import com.scannerpromax.data.AppSettings
+import com.scannerpromax.data.DocumentRepository
+import com.scannerpromax.data.SettingsRepository
+import com.scannerpromax.domain.Quad
+import com.scannerpromax.imaging.BitmapIO
+import com.scannerpromax.imaging.DeviceTier
+import com.scannerpromax.imaging.DocumentDetector
+import com.scannerpromax.domain.Pt
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.json.Json
+import java.io.File
+
+/**
+ * Cola de reconocimiento con IA en SEGUNDO PLANO (una página tarda 0,5–4 min en un móvil):
+ *
+ *  - Las páginas nuevas o reeditadas llegan por [DocumentRepository.AiHook]; el botón "Volver a leer con IA" llama
+ *    a [reread]. La cola se guarda en disco (`filesDir/ai/queue.json`) y la procesa [AiRecognitionWorker]
+ *    (WorkManager, servicio en primer plano con notificación de progreso): sobrevive a cambiar de pantalla y a
+ *    salir de la app; si el sistema mata el proceso, WorkManager lo reanuda.
+ *  - Fases por tanda: 1) con el Asistente visual (Qwen) cargado, rescate de encuadre y clasificación + mejora AUTO
+ *    de las páginas que lo necesitan; 2) con el motor elegido cargado UNA vez para toda la tanda, lectura de cada
+ *    página ([AiRecognizer]) -> OCR + DocLayout guardados por el repositorio. Al vaciarse la cola el modelo se
+ *    descarga (unload) para liberar la RAM.
+ *  - Fallback robusto: modelo no descargado, RAM insuficiente, fallo de carga o salida basura/bucle -> la página se
+ *    queda con el OCR básico (ML Kit, que siempre corre antes) y se avisa discretamente por [notices].
+ *  - Progreso por página en [status] ("Leyendo con IA… 40 %"); [cancel] / [cancelAll].
+ */
+class AiRecognitionQueue(
+    context: Context,
+    private val llm: LlmEngine,
+    private val models: ModelManager,
+    private val settings: SettingsRepository,
+    private val documents: () -> DocumentRepository,
+    private val detector: () -> DocumentDetector,
+    private val tier: DeviceTier,
+) : DocumentRepository.AiHook {
+
+    @Serializable
+    data class AiJob(
+        val docId: String,
+        val pageId: String,
+        /** El detector clásico no dio bordes fiables al añadir la página: pedir la caja a Qwen. */
+        val rescue: Boolean = false,
+        val detConfidence: Float? = null,
+        /** Releer aunque ya haya resultado de IA (botón). */
+        val force: Boolean = false,
+        /** Fase Qwen (rescate / clasificación) ya hecha. */
+        val qwenDone: Boolean = false,
+    ) {
+        val key: String get() = "$docId/$pageId"
+    }
+
+    /** Estado visible de una página. */
+    sealed interface PageStatus {
+        data object Queued : PageStatus
+        data class Running(val fraction: Float, val label: String) : PageStatus {
+            val percent: Int get() = (fraction * 100).toInt().coerceIn(0, 99)
+        }
+    }
+
+    /** Progreso global (para la notificación del worker). */
+    data class Overall(val done: Int, val total: Int, val fraction: Float, val label: String)
+
+    private val appContext = context.applicationContext
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val recognizer = AiRecognizer(llm)
+    private val file = File(appContext.filesDir, "ai/queue.json")
+    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+
+    private val jobsLock = Any()
+    private val jobs = LinkedHashMap<String, AiJob>()   // protegido por jobsLock
+    private val drainMutex = Mutex()
+    @Volatile private var current: Pair<String, Job>? = null
+    /** Páginas que la propia cola está re-editando (rescate / mejora): su aviso de "página cambiada" se ignora. */
+    private val selfEditing = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    private val _status = MutableStateFlow<Map<String, PageStatus>>(emptyMap())
+    val status: StateFlow<Map<String, PageStatus>> = _status.asStateFlow()
+
+    private val _overall = MutableStateFlow<Overall?>(null)
+    val overall: StateFlow<Overall?> = _overall.asStateFlow()
+
+    private val _notices = MutableSharedFlow<String>(extraBufferCapacity = 8)
+    /** Avisos discretos (p. ej. "Página 3: se usó el OCR básico (la IA no pudo leerla)"). */
+    val notices: SharedFlow<String> = _notices.asSharedFlow()
+
+    init {
+        scope.launch {
+            restore()
+            if (pending() > 0) kick()
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------ API
+
+    fun statusOf(docId: String, pageId: String): PageStatus? = _status.value["$docId/$pageId"]
+
+    fun pending(): Int = synchronized(jobsLock) { jobs.size }
+
+    /** Botón "Volver a leer con IA". Devuelve un mensaje de error en español si no se puede (modelo no listo…). */
+    suspend fun reread(docId: String, pageId: String): String? {
+        val s = settings.settings.first()
+        val model = s.recognitionEngine.role?.let { ModelCatalog.forRole(it) }
+            ?: return "Elige un motor de IA en Ajustes → Modelos IA"
+        if (!models.isReady(model)) return "Descarga primero el ${model.name} en Ajustes → Modelos IA"
+        if (!llm.isAvailable) return llm.unavailableReason ?: "IA no disponible en este dispositivo"
+        add(AiJob(docId, pageId, force = true))
+        return null
+    }
+
+    /** Quita la página de la cola (y corta su lectura si está en curso). */
+    fun cancel(docId: String, pageId: String) {
+        val key = "$docId/$pageId"
+        synchronized(jobsLock) { jobs.remove(key) }
+        persist()
+        current?.takeIf { it.first == key }?.second?.cancel()
+        _status.update { it - key }
+    }
+
+    /** Vacía la cola y corta la lectura en curso. */
+    fun cancelAll() {
+        synchronized(jobsLock) { jobs.clear() }
+        persist()
+        current?.second?.cancel()
+        _status.value = emptyMap()
+    }
+
+    override fun onPageAdded(docId: String, pageId: String, rescueFrame: Boolean, detConfidence: Float?) {
+        scope.launch {
+            val s = settings.settings.first()
+            if (!wantsAny(s, rescueFrame)) return@launch
+            add(AiJob(docId, pageId, rescue = rescueFrame, detConfidence = detConfidence))
+        }
+    }
+
+    override fun onPageChanged(docId: String, pageId: String) {
+        val key = "$docId/$pageId"
+        if (key in selfEditing) return
+        // La lectura en curso de la versión anterior ya no vale.
+        current?.takeIf { it.first == key }?.second?.cancel()
+        scope.launch {
+            val s = settings.settings.first()
+            if (!wantsAny(s, false)) return@launch
+            add(AiJob(docId, pageId, qwenDone = true))
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------ cola
+
+    private fun wantsAny(s: AppSettings, rescue: Boolean): Boolean {
+        if (!llm.isAvailable) return false
+        val rec = s.recognitionEngine.role?.let { ModelCatalog.forRole(it) }?.let { models.isReady(it) } == true
+        val qwen = models.isReady(ModelCatalog.VISUAL_ASSISTANT) && (s.aiAutoEnhance || (rescue && s.aiFrameRescue))
+        return rec || qwen
+    }
+
+    private fun add(job: AiJob) {
+        synchronized(jobsLock) {
+            val old = jobs[job.key]
+            jobs[job.key] = if (old == null) job else old.copy(
+                force = old.force || job.force,
+                rescue = old.rescue || job.rescue,
+                qwenDone = old.qwenDone && job.qwenDone,
+            )
+        }
+        _status.update { if (it[job.key] is PageStatus.Running) it else it + (job.key to PageStatus.Queued) }
+        persist()
+        kick()
+    }
+
+    private fun remove(key: String) {
+        synchronized(jobsLock) { jobs.remove(key) }
+        _status.update { it - key }
+        persist()
+    }
+
+    private fun snapshot(): List<AiJob> = synchronized(jobsLock) { jobs.values.toList() }
+
+    private fun update(key: String, f: (AiJob) -> AiJob) {
+        synchronized(jobsLock) { jobs[key]?.let { jobs[key] = f(it) } }
+        persist()
+    }
+
+    private fun persist() {
+        val list = snapshot()
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                file.parentFile?.mkdirs()
+                val tmp = File(file.path + ".tmp")
+                tmp.writeText(json.encodeToString(ListSerializer(AiJob.serializer()), list))
+                tmp.renameTo(file)
+            }.onFailure { Log.w(TAG, "No se pudo guardar la cola de IA", it) }
+        }
+    }
+
+    private suspend fun restore() = withContext(Dispatchers.IO) {
+        val list = runCatching { json.decodeFromString(ListSerializer(AiJob.serializer()), file.readText()) }.getOrNull() ?: return@withContext
+        synchronized(jobsLock) { list.forEach { jobs[it.key] = it } }
+        _status.value = list.associate { it.key to PageStatus.Queued }
+    }
+
+    /** Arranca el worker (WorkManager); si no se puede, procesa en el proceso. */
+    private fun kick() {
+        try {
+            val req = OneTimeWorkRequestBuilder<AiRecognitionWorker>()
+                .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                .addTag(AiRecognitionWorker.TAG_WORK)
+                .build()
+            WorkManager.getInstance(appContext).enqueueUniqueWork(AiRecognitionWorker.WORK_NAME, ExistingWorkPolicy.APPEND_OR_REPLACE, req)
+        } catch (t: Throwable) {
+            Log.w(TAG, "WorkManager no disponible: cola de IA en el proceso", t)
+            scope.launch { runCatching { drain {} } }
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------ proceso
+
+    /**
+     * Procesa la cola hasta vaciarla (lo llama el worker). [onOverall] recibe el progreso global. Al terminar
+     * (o cancelarse) descarga el modelo.
+     */
+    suspend fun drain(onOverall: (Overall) -> Unit) = drainMutex.withLock {
+        var done = 0
+        try {
+            while (true) {
+                val batch = snapshot()
+                if (batch.isEmpty()) break
+                val s = settings.settings.first()
+                val repo = documents()
+
+                // ---- Fase 1: Qwen (rescate de encuadre, clasificación -> mejora AUTO)
+                val qwenModel = ModelCatalog.VISUAL_ASSISTANT
+                val qwenOk = llm.isAvailable && models.isReady(qwenModel) && ramOk(qwenModel)
+                val needQwen = batch.filter { j ->
+                    !j.qwenDone && qwenOk && ((j.rescue && s.aiFrameRescue) || (s.aiAutoEnhance && repo.aiDocType(j.docId, j.pageId) == null))
+                }
+                batch.filter { !it.qwenDone && it !in needQwen }.forEach { j -> update(j.key) { it.copy(qwenDone = true) } }
+                if (needQwen.isNotEmpty() && loadModel(qwenModel)) {
+                    for (j in needQwen) {
+                        if (snapshot().none { it.key == j.key }) continue
+                        runGuarded(j) { qwenPhase(j, s) }
+                        update(j.key) { it.copy(qwenDone = true) }
+                    }
+                } else needQwen.forEach { j -> update(j.key) { it.copy(qwenDone = true) } }
+
+                // ---- Fase 2: lectura con el motor elegido
+                val recJobs = snapshot().filter { it.qwenDone }
+                if (recJobs.isEmpty()) continue
+                val recModel = s.recognitionEngine.role?.let { ModelCatalog.forRole(it) }
+                if (recModel == null) {
+                    // Motor básico: la cola solo hacía la fase de Qwen.
+                    recJobs.forEach { remove(it.key) }
+                    continue
+                }
+                val reason = when {
+                    !models.isReady(recModel) -> "el ${recModel.name} no está descargado"
+                    !llm.isAvailable -> llm.unavailableReason ?: "IA no disponible en este dispositivo"
+                    !ramOk(recModel) -> "memoria insuficiente (${models.totalRamMb()} MB; mínimo ${recModel.minRamMb} MB)"
+                    !loadModel(recModel) -> "no se pudo cargar el ${recModel.name}"
+                    else -> null
+                }
+                if (reason != null) {
+                    _notices.tryEmit("Lectura con IA no disponible: $reason. Se usa el OCR básico.")
+                    recJobs.forEach { remove(it.key) }
+                    continue
+                }
+                for ((i, j) in recJobs.withIndex()) {
+                    if (snapshot().none { it.key == j.key }) continue
+                    val total = done + snapshot().size
+                    runGuarded(j) {
+                        recognize(j, s, recModel) { p ->
+                            _status.update { it + (j.key to PageStatus.Running(p.fraction, p.label)) }
+                            val o = Overall(done, total, p.fraction, p.label)
+                            _overall.value = o
+                            onOverall(o)
+                        }
+                    }
+                    remove(j.key)
+                    done++
+                }
+            }
+        } finally {
+            withContext(NonCancellable) {
+                runCatching { llm.unload() }
+                _overall.value = null
+                _status.update { m -> m.filterValues { it !is PageStatus.Running } }
+            }
+        }
+    }
+
+    /** Ejecuta [block] como trabajo cancelable de la página [j]; los errores no paran la cola. */
+    private suspend fun runGuarded(j: AiJob, block: suspend () -> Unit) {
+        try {
+            coroutineScope {
+                val job = launch { block() }
+                current = j.key to job
+                job.join()
+            }
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            Log.w(TAG, "IA en ${j.key}", t)
+            _notices.tryEmit("No se pudo leer una página con IA (${t.message ?: t.javaClass.simpleName}); se usa el OCR básico.")
+        } finally {
+            current = null
+        }
+    }
+
+    private fun ramOk(m: AiModel): Boolean {
+        val total = models.totalRamMb()
+        return total <= 0 || total >= m.minRamMb
+    }
+
+    private suspend fun loadModel(m: AiModel): Boolean {
+        val cfg = models.loadConfig(m) ?: return false
+        return try {
+            llm.load(cfg)
+            true
+        } catch (e: LlmException) {
+            Log.w(TAG, "carga ${m.id}", e)
+            false
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------ fase Qwen
+
+    private suspend fun qwenPhase(j: AiJob, s: AppSettings) {
+        val repo = documents()
+        val doc = repo.get(j.docId) ?: return
+        var page = doc.pages.firstOrNull { it.id == j.pageId } ?: return
+        val orig = repo.originalFile(j.docId, page)
+        if (!orig.exists()) return
+        _status.update { it + (j.key to PageStatus.Running(0.02f, "Analizando la foto")) }
+
+        if (j.rescue && s.aiFrameRescue) {
+            val newQuad = rescueFrame(orig, page.width, page.height, page.edits.quad, j.detConfidence)
+            if (newQuad != null) {
+                val cur = repo.getPage(j.docId, j.pageId)
+                if (cur != null && cur.edits.quad == page.edits.quad) {
+                    page = selfEdit(j) { repo.updateEdits(j.docId, j.pageId, cur.edits.copy(quad = newQuad)) } ?: page
+                }
+            }
+        }
+        if (s.aiAutoEnhance && repo.aiDocType(j.docId, j.pageId) == null) {
+            val thumb = withContext(Dispatchers.IO) { BitmapIO.decodeThumbnail(orig.absolutePath, CLASSIFY_SIDE) }
+            val cls = try { recognizer.classify(thumb) } finally { thumb.recycle() }
+            repo.saveAiDocType(j.docId, j.pageId, cls)
+            Log.i(TAG, "${j.key}: tipo = $cls")
+            val cur = repo.getPage(j.docId, j.pageId) ?: return
+            AiEnhance.decide(cls, doc.mode, cur.edits)?.let { e ->
+                selfEdit(j) { repo.updateEdits(j.docId, j.pageId, e) }
+                _notices.tryEmit("Mejora automática para ${AiEnhance.label(cls)?.lowercase() ?: cls} aplicada")
+            }
+        }
+    }
+
+    private suspend fun <T> selfEdit(j: AiJob, block: suspend () -> T): T? {
+        selfEditing.add(j.key)
+        return try { block() } catch (c: kotlinx.coroutines.CancellationException) { throw c } catch (t: Throwable) {
+            Log.w(TAG, "edición IA ${j.key}", t); null
+        } finally { selfEditing.remove(j.key) }
+    }
+
+    /**
+     * Rescate de encuadre: caja del documento según Qwen (foto <= 896 px) -> ROI ampliada un 6 % -> detector
+     * clásico dentro de la ROI. Si el detector la encuentra (confianza >= 0,35, área razonable) se usa su quad; si
+     * no, la caja de Qwen (error medido 4,5–10 % frente al 33–36 % de "imagen completa"), pero solo si la página
+     * no tenía ya un quad. Devuelve el quad en el espacio de la página ([pw] x [ph]) o null.
+     */
+    private suspend fun rescueFrame(orig: File, pw: Int, ph: Int, currentQuad: Quad?, detConf: Float?): Quad? {
+        val photo = withContext(Dispatchers.IO) { BitmapIO.decodeThumbnail(orig.absolutePath, DOCBOX_SIDE) }
+        val box = try { recognizer.locateDocument(photo) } finally { photo.recycle() } ?: return null
+        val work = withContext(Dispatchers.IO) { BitmapIO.decode(orig.absolutePath, RESCUE_PIXELS) }
+        try {
+            val r = AiEnhance.roi(box, work.width, work.height)
+            val sx = pw.toFloat() / work.width
+            val sy = ph.toFloat() / work.height
+            val crop = Bitmap.createBitmap(work, r[0], r[1], r[2] - r[0], r[3] - r[1])
+            try {
+                val det = withContext(Dispatchers.Default) { runCatching { detector().detect(crop) }.getOrNull() }
+                if (det != null && det.confidence >= 0.35f && det.frameWidth > 0 && det.frameHeight > 0) {
+                    val fx = crop.width.toFloat() / det.frameWidth
+                    val fy = crop.height.toFloat() / det.frameHeight
+                    val q = Quad.of(det.quad.points().map { p -> Pt((p.x * fx + r[0]) * sx, (p.y * fy + r[1]) * sy) })
+                    val a = AiEnhance.area(q) / (sx * sy)
+                    val roiArea = (r[2] - r[0]).toFloat() * (r[3] - r[1])
+                    if (a >= 0.3f * roiArea && a <= 0.985f * work.width * work.height &&
+                        (currentQuad == null || det.confidence > (detConf ?: 0f))
+                    ) return q
+                }
+                if (currentQuad != null) return null
+                val tight = AiEnhance.roi(box, work.width, work.height, margin = 0.01f)
+                return AiEnhance.rectQuad(tight, sx, sy)
+            } finally {
+                if (crop !== work) crop.recycle()
+            }
+        } finally {
+            work.recycle()
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------ lectura
+
+    private suspend fun recognize(j: AiJob, s: AppSettings, model: AiModel, onProgress: (AiRecognizer.Progress) -> Unit) {
+        val repo = documents()
+        val page0 = repo.getPage(j.docId, j.pageId) ?: return
+        if (!j.force && repo.hasAiLayout(j.docId, j.pageId)) return
+        onProgress(AiRecognizer.Progress(0.01f, "Preparando"))
+        val processed = repo.processedFile(j.docId, page0)
+        val page = repo.getPage(j.docId, j.pageId) ?: return
+        val edits = page.edits
+        // OCR básico de la misma versión (rápido): base para validar la IA, orientar tablas y alinear el texto de Qwen.
+        val mlkit = runCatching { repo.ensureOcr(j.docId, j.pageId) }.getOrNull()
+        val (fw, fh) = withContext(Dispatchers.IO) { BitmapIO.decodeBounds(processed.absolutePath) }
+        val bmp = withContext(Dispatchers.IO) { BitmapIO.decode(processed.absolutePath, decodePixels()) }
+        val docType = AiEnhance.docTypeCode(repo.aiDocType(j.docId, j.pageId))
+        val fullW = if (fw > 0) fw else bmp.width
+        val fullH = if (fh > 0) fh else bmp.height
+        val result = try {
+            when (model.role) {
+                ModelRole.DOCUMENT_READER -> recognizer.readWithPaddle(bmp, fullW, fullH, mlkit, docType, onProgress)
+                ModelRole.VISUAL_ASSISTANT -> recognizer.readWithQwen(bmp, fullW, fullH, mlkit, docType, onProgress)
+            }
+        } finally {
+            bmp.recycle()
+        }
+        val number = (repo.get(j.docId)?.pages?.indexOfFirst { it.id == j.pageId } ?: -1) + 1
+        if (result == null) {
+            _notices.tryEmit("Página $number: la IA no pudo leerla bien; se mantiene el OCR básico.")
+            return
+        }
+        // El texto corregido por el usuario se conserva (saveAiResult no lo toca).
+        val saved = repo.saveAiResult(j.docId, j.pageId, edits, result.ocr, result.layout)
+        if (!saved) Log.i(TAG, "${j.key}: la página cambió mientras se leía; resultado descartado")
+        result.warning?.let { _notices.tryEmit("Página $number: $it") }
+    }
+
+    private fun decodePixels(): Int = if (tier.isLowRam) 4_000_000 else 6_000_000
+
+    companion object {
+        private const val TAG = "AiRecognitionQueue"
+        private const val CLASSIFY_SIDE = 512
+        private const val DOCBOX_SIDE = 896
+        private const val RESCUE_PIXELS = 3_000_000
+    }
+}

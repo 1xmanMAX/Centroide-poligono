@@ -110,6 +110,12 @@ data class PageEdits(
     val autoDewarp: Boolean = true,         // enderezar hoja curvada/combada (malla de líneas de tablas y cuadrículas)
     val keepRuling: Boolean = true,         // conservar la cuadrícula / renglones del cuaderno (limpia, tono claro) en Texto resaltado y B/N
     val eraseStrokes: List<EraseStroke> = emptyList(),
+    /**
+     * Tipo de documento según la IA (clasificación de Qwen: "receipt", "whiteboard", "screen"…) que orienta el filtro
+     * AUTO (ver ImageEnhancer.withAiHint). null = ninguno; al ser null no se serializa (explicitNulls = false), así que
+     * el hash de las ediciones ya guardadas NO cambia.
+     */
+    val aiHint: String? = null,
 )
 
 @Serializable

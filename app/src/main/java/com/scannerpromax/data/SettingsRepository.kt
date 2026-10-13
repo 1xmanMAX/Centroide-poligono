@@ -57,6 +57,8 @@ class SettingsRepository(private val context: Context) {
             prefs[Keys.RECOGNITION_ENGINE] = updated.recognitionEngine.name
             prefs[Keys.AI_WIFI_ONLY] = updated.aiWifiOnly
             prefs[Keys.AI_QUANTIZE_ON_DEVICE] = updated.aiQuantizeOnDevice
+            prefs[Keys.AI_AUTO_ENHANCE] = updated.aiAutoEnhance
+            prefs[Keys.AI_FRAME_RESCUE] = updated.aiFrameRescue
         }
     }
 
@@ -88,6 +90,8 @@ class SettingsRepository(private val context: Context) {
             recognitionEngine = enumOr(this[Keys.RECOGNITION_ENGINE], d.recognitionEngine),
             aiWifiOnly = this[Keys.AI_WIFI_ONLY] ?: d.aiWifiOnly,
             aiQuantizeOnDevice = this[Keys.AI_QUANTIZE_ON_DEVICE] ?: d.aiQuantizeOnDevice,
+            aiAutoEnhance = this[Keys.AI_AUTO_ENHANCE] ?: d.aiAutoEnhance,
+            aiFrameRescue = this[Keys.AI_FRAME_RESCUE] ?: d.aiFrameRescue,
         )
     }
 
@@ -111,6 +115,8 @@ class SettingsRepository(private val context: Context) {
         val RECOGNITION_ENGINE = stringPreferencesKey("recognition_engine")
         val AI_WIFI_ONLY = booleanPreferencesKey("ai_wifi_only")
         val AI_QUANTIZE_ON_DEVICE = booleanPreferencesKey("ai_quantize_on_device")
+        val AI_AUTO_ENHANCE = booleanPreferencesKey("ai_auto_enhance")
+        val AI_FRAME_RESCUE = booleanPreferencesKey("ai_frame_rescue")
     }
 
     private companion object {
@@ -147,4 +153,11 @@ data class AppSettings(
     val aiWifiOnly: Boolean = true,
     /** Tras descargar el Lector de documentos, cuantizarlo en el móvil (Q8_0: ~mitad de RAM y disco). */
     val aiQuantizeOnDevice: Boolean = false,
+    /**
+     * Con el Asistente visual descargado: clasificar cada página (recibo, pizarra, pantalla…) y, si sigue con el filtro
+     * por defecto, elegir la mejora automática adecuada a ese tipo.
+     */
+    val aiAutoEnhance: Boolean = true,
+    /** Con el Asistente visual descargado: si no se detectan los bordes, pedirle dónde está el documento. */
+    val aiFrameRescue: Boolean = true,
 )

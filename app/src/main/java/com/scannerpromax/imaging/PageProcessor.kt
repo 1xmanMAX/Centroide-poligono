@@ -524,7 +524,9 @@ class PageProcessor(val tier: DeviceTier) {
         val opt = (sheetExact.get() ?: 0).let { if (it != 0) opt0.copy(sheetSides = it) else opt0 }
             .let { o -> classifyRef.get()?.let { o.copy(classify = it) } ?: o }
         // AUTO se clasifica una sola vez (a 256 px) y se usa tanto para el filtro como para decidir la limpieza
-        val analysis = if (edits.filter == FilterType.AUTO) runCatching { ImageEnhancer.analyzeMat(geo) }.getOrNull() else null
+        val analysis = if (edits.filter == FilterType.AUTO) {
+            runCatching { ImageEnhancer.analyzeMat(geo) }.getOrNull()?.let { ImageEnhancer.withAiHint(it, edits.aiHint) }
+        } else null
         val effective = ImageEnhancer.effectiveFilter(edits.filter, analysis)
         var cur = try {
             ImageEnhancer.applyMat(geo, edits.filter, edits.adjustments, opt.copy(keepRuling = edits.keepRuling), analysis)

@@ -133,6 +133,21 @@ object ImageEnhancer {
         }
     }
 
+    /**
+     * Ajusta la clasificación clásica de AUTO con el tipo de documento que dio la IA (Qwen: fiable en recibos,
+     * pizarras y pantallas según el banco; AUTO clásico solo reconocía el 6 % de los recibos). [hint] = clase de
+     * Qwen ("receipt", "whiteboard", "screen"); otras clases no cambian nada. La pizarra oscura (tiza) se respeta.
+     */
+    fun withAiHint(a: ContentAnalysis, hint: String?): ContentAnalysis = when (hint) {
+        "receipt" -> if (a.darkBoard) a else a.copy(kind = ContentKind.RECEIPT, recommended = FilterType.GRAYSCALE)
+        "whiteboard" -> a.copy(kind = ContentKind.WHITEBOARD, recommended = if (a.darkBoard) FilterType.MAGIC else FilterType.WHITEBOARD)
+        "screen" -> if (a.darkBoard) a else a.copy(
+            kind = ContentKind.SCREEN, moire = true,
+            recommended = if (a.paperFraction < 0.30f) FilterType.VIVID else FilterType.MAGIC,
+        )
+        else -> a
+    }
+
     /** Resuelve AUTO al filtro concreto equivalente (para decisiones de la tubería, p. ej. limpieza). */
     internal fun effectiveFilter(filter: FilterType, analysis: ContentAnalysis?): FilterType =
         if (filter == FilterType.AUTO) analysis?.recommended ?: FilterType.MAGIC else filter

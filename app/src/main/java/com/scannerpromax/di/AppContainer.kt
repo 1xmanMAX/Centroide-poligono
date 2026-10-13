@@ -38,7 +38,10 @@ class AppContainer(context: Context) {
     val ocr: OcrEngine by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { OcrEngine(appContext, deviceTier) }
 
     val documents: DocumentRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
-        DocumentRepository(appContext, pageProcessor, deviceTier).also { it.attachOcrEngine(ocr) }
+        DocumentRepository(appContext, pageProcessor, deviceTier).also {
+            it.attachOcrEngine(ocr)
+            it.aiHook = aiQueue
+        }
     }
 
     val pdfExporter: PdfExporter by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
@@ -58,6 +61,19 @@ class AppContainer(context: Context) {
 
     /** Modelos de IA descargables (estado, descargas en segundo plano, borrado). */
     val models: ModelManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { ModelManager(appContext) { llm } }
+
+    /**
+     * Cola de lectura con IA en segundo plano (motor principal de reconocimiento cuando el usuario elige un modelo
+     * descargado; además clasificación y rescate de encuadre con el Asistente visual). Crearla no carga modelos.
+     */
+    val aiQueue: com.scannerpromax.ai.AiRecognitionQueue by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        com.scannerpromax.ai.AiRecognitionQueue(
+            appContext, llm, models, settings,
+            documents = { documents },
+            detector = { pageProcessor.detector },
+            tier = deviceTier,
+        )
+    }
 
     /** El procesador solo si ya existe (para liberar cachés sin crearlo por accidente). */
     fun pageProcessorIfCreated(): PageProcessor? = if (pageProcessorLazy.isInitialized()) pageProcessor else null

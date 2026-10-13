@@ -38,6 +38,15 @@ object PageFiles {
     fun ocrName(pageId: String, edits: PageEdits) = "$OCR_DIR/${pageId}_${editsHash(edits)}.json"
 
     /**
+     * Maquetación reconocida por la IA ([com.scannerpromax.domain.DocLayout]) de la versión [edits] de la página:
+     * `ocr/{id}_{hash}.layout.json`, junto al OCR de esa misma versión. Si existe, el OCR guardado lo produjo la IA.
+     */
+    fun layoutName(pageId: String, edits: PageEdits) = "$OCR_DIR/${pageId}_${editsHash(edits)}.layout.json"
+
+    /** Tipo de documento clasificado por la IA (no depende de las ediciones): `ocr/{id}.aiclass`. */
+    fun aiClassName(pageId: String) = "$OCR_DIR/$pageId.aiclass"
+
+    /**
      * ¿La miniatura [thumbName] corresponde al procesado de [edits]? Una miniatura de otra versión (otras ediciones)
      * no se muestra nunca: se regenera desde el procesado actual.
      */

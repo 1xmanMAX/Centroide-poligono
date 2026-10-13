@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import android.util.Log
+import com.scannerpromax.domain.DocLayout
 import com.scannerpromax.domain.Document
 import com.scannerpromax.domain.FilterType
 import com.scannerpromax.domain.OcrResult
@@ -113,6 +114,19 @@ class DocumentRepository(
      * Se procesa de una en una y solo cuando no hay procesamiento pesado en curso.
      */
     @Volatile var backgroundOcrEnabled: Boolean = true
+
+    /**
+     * Avisos para el reconocimiento con IA ([com.scannerpromax.ai.AiRecognitionQueue]): páginas nuevas o con la imagen
+     * cambiada. El repositorio no sabe nada de modelos: solo avisa.
+     */
+    interface AiHook {
+        /** Página nueva. [rescueFrame] = el detector clásico no dio bordes fiables ([detConfidence] o null). */
+        fun onPageAdded(docId: String, pageId: String, rescueFrame: Boolean, detConfidence: Float?)
+        /** La imagen procesada de la página cambió (ediciones): su OCR/maquetación de IA ya no vale. */
+        fun onPageChanged(docId: String, pageId: String)
+    }
+
+    @Volatile var aiHook: AiHook? = null
 
     /** Motor OCR: el contenedor puede asignar el suyo con [attachOcrEngine]; si no, se crea uno (el cliente ML Kit es compartido). */
     @Volatile private var ocrEngine: OcrEngine? = null
@@ -276,6 +290,8 @@ class DocumentRepository(
         val dir = docDir(docId)
         val originalName = "$ORIGINAL_DIR/$pageId.jpg"
         val dst = File(dir, originalName)
+        var rescue = false
+        var detConf: Float? = null
 
         val page = heavyWork {
             withContext(Dispatchers.Default) {
@@ -295,8 +311,12 @@ class DocumentRepository(
                     currentCoroutineContext().ensureActive()
 
                     val edits = presetEdits ?: run {
-                        val quad = (if (autoDetect && m != ScanMode.PHOTO) detectQuad(bmp) else null)
-                            ?.let { toSpace(it, bmp.width, bmp.height, pw, ph) }
+                        val det = if (autoDetect && m != ScanMode.PHOTO) detectQuadWithConfidence(bmp) else null
+                        detConf = det?.second
+                        rescue = autoDetect && m != ScanMode.PHOTO && m != ScanMode.ID_CARD &&
+                            (det?.first == null || (det.second ?: 0f) < RESCUE_CONFIDENCE ||
+                                nearlyFull(det.first!!, bmp.width, bmp.height))
+                        val quad = det?.first?.let { toSpace(it, bmp.width, bmp.height, pw, ph) }
                         defaultEdits(m, quad)
                     }
                     val (processedName, thumbName) = try {
@@ -327,6 +347,7 @@ class DocumentRepository(
             }
         }
         enqueueOcr(docId, page.id)
+        aiHook?.onPageAdded(docId, page.id, rescue, detConf)
         return page
     }
 
@@ -422,6 +443,7 @@ class DocumentRepository(
             }
         }
         enqueueOcr(docId, page.id)
+        aiHook?.onPageAdded(docId, page.id, false, null)
         return page
     }
 
@@ -462,6 +484,7 @@ class DocumentRepository(
                         val editsChanged = p.edits != edits
                         if (editsChanged) {
                             p.ocrFile?.let { File(dir, it).delete() }
+                            File(dir, PageFiles.layoutName(pageId, p.edits)).delete()
                             ocrFailFile(docId, pageId).delete() // imagen nueva: se vuelve a intentar
                         }
                         p.copy(
@@ -477,7 +500,10 @@ class DocumentRepository(
                     }
                 }
             }
-            if (result.ocrFile == null) enqueueOcr(docId, pageId)
+            if (result.ocrFile == null) {
+                enqueueOcr(docId, pageId)
+                aiHook?.onPageChanged(docId, pageId)
+            }
             result
         }
     }
@@ -555,10 +581,13 @@ class DocumentRepository(
         edits: PageEdits,
         result: OcrResult,
         clearEdited: Boolean = false,
+        fromAi: Boolean = false,
     ) {
         if (docId in deletedIds) return
         val dir = docDir(docId)
         val name = ocrName(pageId, edits)
+        // El OCR de la IA (con su maquetación) manda: un OCR básico de fondo que termina después no lo pisa.
+        if (!fromAi && withContext(Dispatchers.IO) { File(dir, PageFiles.layoutName(pageId, edits)).exists() }) return
         val edited = result.editedText?.takeIf { it.isNotBlank() && it != result.text }
         withContext(Dispatchers.IO) {
             val f = File(dir, name)
@@ -756,6 +785,9 @@ class DocumentRepository(
                     from.copyTo(to, overwrite = true)
                     return newName
                 }
+                // La maquetación de la IA y su clasificación siguen a la página (mismo hash de ediciones).
+                cp(PageFiles.layoutName(p.id, p.edits))
+                cp(PageFiles.aiClassName(p.id))
                 p.copy(
                     id = newId,
                     originalFile = cp(p.originalFile) ?: p.originalFile,
@@ -777,14 +809,32 @@ class DocumentRepository(
         get(docId)?.pages?.firstOrNull { it.id == pageId }
 
     /** Detecta el documento y devuelve el quad en coordenadas del bitmap, o null si la confianza es baja. */
-    private fun detectQuad(bmp: Bitmap): Quad? {
+    private fun detectQuad(bmp: Bitmap): Quad? = detectQuadWithConfidence(bmp)?.first
+
+    /**
+     * Como [detectQuad] pero con la confianza del detector: (quad o null si es baja, confianza). null si el detector
+     * no devolvió nada (cae a "imagen completa").
+     */
+    private fun detectQuadWithConfidence(bmp: Bitmap): Pair<Quad?, Float?>? {
         val det = try {
             processor.detector.detect(bmp)
         } catch (t: Throwable) {
             Log.w(TAG, "Fallo en detección de bordes", t)
             null
         } ?: return null
-        if (det.confidence < MIN_CONFIDENCE || det.frameWidth <= 0 || det.frameHeight <= 0) return null
+        if (det.confidence < MIN_CONFIDENCE || det.frameWidth <= 0 || det.frameHeight <= 0) return null to det.confidence
+        return detQuadScaled(bmp, det) to det.confidence
+    }
+
+    /** El cuadrilátero es (casi) la imagen entera: el detector "cayó" a la foto completa. */
+    private fun nearlyFull(q: Quad, w: Int, h: Int): Boolean {
+        val p = q.points()
+        var a = 0f
+        for (i in p.indices) { val u = p[i]; val v = p[(i + 1) % p.size]; a += u.x * v.y - v.x * u.y }
+        return kotlin.math.abs(a) / 2f > 0.97f * w * h
+    }
+
+    private fun detQuadScaled(bmp: Bitmap, det: com.scannerpromax.imaging.DetectionResult): Quad {
         val sx = bmp.width.toFloat() / det.frameWidth
         val sy = bmp.height.toFloat() / det.frameHeight
         val w = bmp.width.toFloat()
@@ -1198,6 +1248,8 @@ class DocumentRepository(
             val page = findPage(docId, pageId) ?: throw IOException("Página no encontrada")
             val file = processedFile(docId, page)
             val current = findPage(docId, pageId) ?: throw IOException("Página no encontrada")
+            // "Volver a reconocer" con el OCR básico: sustituye también al de la IA.
+            withContext(Dispatchers.IO) { File(docDir(docId), PageFiles.layoutName(pageId, current.edits)).delete() }
             // El texto corregido se descarta solo si el nuevo reconocimiento sale bien.
             val result = recognizeAndSave(docId, pageId, file, current.edits, lightweight = false, clearEdited = !keepEditedText)
             result.copy(editedText = if (keepEditedText) current.ocrEditedText else null)
@@ -1227,6 +1279,73 @@ class DocumentRepository(
             onProgress(i + 1, ids.size, false)
         }
         return out
+    }
+
+    // ------------------------------------------------------------------ IA (maquetación + OCR de la IA)
+
+    /**
+     * Guarda el resultado de la IA para la versión [edits] de la página: el [ocr] sustituye al OCR guardado (capa de
+     * texto del PDF, búsqueda, pantalla de texto; el texto corregido por el usuario se conserva) y [layout] va a
+     * `ocr/{id}_{hash}.layout.json`. Si las ediciones cambiaron mientras la IA leía, no se guarda nada (false).
+     */
+    suspend fun saveAiResult(docId: String, pageId: String, edits: PageEdits, ocr: OcrResult, layout: DocLayout): Boolean {
+        loaded.await()
+        if (docId in deletedIds) return false
+        val current = findPage(docId, pageId) ?: return false
+        if (current.edits != edits) return false
+        val lf = File(docDir(docId), PageFiles.layoutName(pageId, edits))
+        withContext(Dispatchers.IO) {
+            lf.parentFile?.mkdirs()
+            writeAtomic(lf, json.encodeToString(DocLayout.serializer(), layout), sync = false)
+        }
+        ocrLock(docId, pageId).withLock { saveOcrFor(docId, pageId, edits, ocr, fromAi = true) }
+        val after = findPage(docId, pageId)
+        if (after == null || after.edits != edits || after.ocrFile != PageFiles.ocrName(pageId, edits)) {
+            withContext(Dispatchers.IO) { lf.delete() }
+            return false
+        }
+        return true
+    }
+
+    /**
+     * Maquetación reconocida por la IA de la versión ACTUAL de la página, o null si no hay (motor básico, aún en cola,
+     * o la página se editó después). La reconstrucción del PDF la consume desde aquí.
+     */
+    suspend fun loadLayout(docId: String, pageId: String): DocLayout? {
+        val page = findPage(docId, pageId) ?: return null
+        return withContext(Dispatchers.IO) {
+            val f = File(docDir(docId), PageFiles.layoutName(pageId, page.edits))
+            if (!f.exists()) return@withContext null
+            try {
+                json.decodeFromString(DocLayout.serializer(), f.readText())
+            } catch (t: Throwable) {
+                Log.w(TAG, "Maquetación corrupta en $f", t)
+                null
+            }
+        }
+    }
+
+    /** ¿La versión actual de la página ya tiene OCR + maquetación de la IA? */
+    suspend fun hasAiLayout(docId: String, pageId: String): Boolean {
+        val page = findPage(docId, pageId) ?: return false
+        return withContext(Dispatchers.IO) { File(docDir(docId), PageFiles.layoutName(pageId, page.edits)).exists() }
+    }
+
+    /** Tipo de documento que dio la IA para la página (null si no se clasificó). */
+    suspend fun aiDocType(docId: String, pageId: String): String? = withContext(Dispatchers.IO) {
+        runCatching { File(docDir(docId), PageFiles.aiClassName(pageId)).takeIf { it.exists() }?.readText()?.trim() }
+            .getOrNull()?.takeIf { it.isNotEmpty() }
+    }
+
+    suspend fun saveAiDocType(docId: String, pageId: String, docType: String) {
+        if (docId in deletedIds) return
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val f = File(docDir(docId), PageFiles.aiClassName(pageId))
+                f.parentFile?.mkdirs()
+                f.writeText(docType)
+            }
+        }
     }
 
     /** Páginas sin OCR guardado (para estimar el trabajo antes de exportar). */
@@ -1398,6 +1517,8 @@ class DocumentRepository(
         private const val MIN_RETRY_PIXELS = 4_000_000
         private const val OCR_MAX_PIXELS = 12_600_000
         private const val MIN_CONFIDENCE = 0.35f
+        /** Por debajo de esta confianza del detector clásico se pide ayuda a la IA (rescate de encuadre). */
+        private const val RESCUE_CONFIDENCE = 0.5f
         private const val BUFFER = 64 * 1024
         private const val OCR_LOW_RAM_PIXELS = 4_000_000
         private const val OCR_BACKGROUND_PIXELS = 3_000_000
