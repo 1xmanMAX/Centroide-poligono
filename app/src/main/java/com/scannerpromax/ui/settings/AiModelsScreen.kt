@@ -38,6 +38,8 @@ import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Science
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.AutoFixHigh
+import androidx.compose.material.icons.rounded.CropFree
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material.icons.rounded.Wifi
@@ -201,13 +203,36 @@ fun AiModelsScreen(container: AppContainer, onBack: () -> Unit) {
                     checked = settings.aiWifiOnly,
                     onChange = { v -> update { it.copy(aiWifiOnly = v) } },
                 )
+                if (ModelCatalog.all.any { it.onDeviceQuantization != null }) {
+                    ToggleRow(
+                        icon = Icons.Rounded.Tune,
+                        title = "Optimizar el Lector tras descargar",
+                        subtitle = "Lo cuantiza en el teléfono (Q8_0): casi la mitad de memoria y disco, con una " +
+                            "pérdida de precisión mínima. Tarda uno o dos minutos.",
+                        checked = settings.aiQuantizeOnDevice,
+                        onChange = { v -> update { it.copy(aiQuantizeOnDevice = v) } },
+                    )
+                }
+            }
+
+            // ---------------------------------------------------------------- asistente visual
+            SectionTitle("Asistente visual (si está descargado)")
+            BrandCard(contentPadding = PaddingValues(vertical = 4.dp)) {
                 ToggleRow(
-                    icon = Icons.Rounded.Tune,
-                    title = "Optimizar el Lector tras descargar",
-                    subtitle = "Lo cuantiza en el teléfono (Q8_0): casi la mitad de memoria y disco, con una " +
-                        "pérdida de precisión mínima. Tarda uno o dos minutos.",
-                    checked = settings.aiQuantizeOnDevice,
-                    onChange = { v -> update { it.copy(aiQuantizeOnDevice = v) } },
+                    icon = Icons.Rounded.AutoFixHigh,
+                    title = "Mejora según el tipo de documento",
+                    subtitle = "Reconoce recibos, pizarras y fotos de pantalla y les aplica la mejora adecuada " +
+                        "(solo si la página sigue con el filtro por defecto).",
+                    checked = settings.aiAutoEnhance,
+                    onChange = { v -> update { it.copy(aiAutoEnhance = v) } },
+                )
+                ToggleRow(
+                    icon = Icons.Rounded.CropFree,
+                    title = "Ayuda con el encuadre",
+                    subtitle = "Si no se detectan los bordes de la hoja, la IA busca dónde está el documento y " +
+                        "vuelve a recortarlo en segundo plano.",
+                    checked = settings.aiFrameRescue,
+                    onChange = { v -> update { it.copy(aiFrameRescue = v) } },
                 )
             }
 

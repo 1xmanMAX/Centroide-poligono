@@ -60,6 +60,12 @@ class MainActivity : ComponentActivity() {
                     if (ready) {
                         AppNavHost(container = container, incomingPdf = incomingPdf, incomingImages = incomingImages)
                         CrashReportDialog()
+                        // Avisos discretos de la lectura con IA (fallback al OCR básico, mejora aplicada…).
+                        androidx.compose.runtime.LaunchedEffect(Unit) {
+                            container.aiQueue.notices.collect { msg ->
+                                android.widget.Toast.makeText(this@MainActivity, msg, android.widget.Toast.LENGTH_SHORT).show()
+                            }
+                        }
                     } else {
                         // Detrás del splash: solo el fondo. La navegación (que usa OpenCV y los documentos) se
                         // compone cuando todo está listo, así el hilo principal nunca espera a la inicialización.

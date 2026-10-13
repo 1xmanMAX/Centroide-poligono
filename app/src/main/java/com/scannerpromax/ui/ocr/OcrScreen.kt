@@ -57,6 +57,9 @@ import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material.icons.filled.AutoAwesome
+import com.scannerpromax.ai.AiRecognitionQueue
+import com.scannerpromax.ai.RecognitionEngine
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -176,6 +179,13 @@ fun OcrScreen(
     var exportJob by remember { mutableStateOf<Job?>(null) }
     var pendingSaveTxt by remember { mutableStateOf<(() -> Unit)?>(null) }
 
+    // ---- Lectura con IA (motor principal si el usuario eligió un modelo): estado de la cola para esta página
+    val aiStatusMap by container.aiQueue.status.collectAsState()
+    val aiStatus = aiStatusMap["$docId/$currentPageId"]
+    val engine by remember { container.settings.settings }.collectAsState(initial = null)
+    val aiEngineOn = engine?.recognitionEngine?.let { it != RecognitionEngine.BASIC } == true
+    var readByAi by remember { mutableStateOf(false) }
+
     val baseline = result?.displayText
     val edited = !wholeDoc && result != null && text != baseline
     val shownText = if (wholeDoc) docText else text
@@ -240,6 +250,7 @@ fun OcrScreen(
             } else {
                 toast("No se pudo reconocer el texto de esta página")
             }
+            readByAi = container.documents.hasAiLayout(docId, currentPageId)
             running = false
         } catch (c: CancellationException) {
             throw c
@@ -251,6 +262,34 @@ fun OcrScreen(
     }
     DisposableEffect(Unit) {
         onDispose { displayBitmap?.recycle() }
+    }
+
+    // Al terminar la lectura con IA de esta página se muestra su resultado (si el usuario no está editando).
+    var lastAiStatus by remember { mutableStateOf<AiRecognitionQueue.PageStatus?>(null) }
+    LaunchedEffect(aiStatus) {
+        val was = lastAiStatus
+        lastAiStatus = aiStatus
+        if (was != null && aiStatus == null) {
+            val ai = container.documents.hasAiLayout(docId, currentPageId)
+            readByAi = ai
+            if (ai && !edited) {
+                container.documents.loadOcr(docId, currentPageId)?.let { r ->
+                    result = r
+                    text = r.displayText
+                    selected = null
+                    docText = ""
+                    docPages = emptyList()
+                }
+            }
+        }
+    }
+
+    fun readWithAi() {
+        scope.launch {
+            container.documents.flushPendingWrites()
+            val err = container.aiQueue.reread(docId, currentPageId)
+            if (err != null) toast(err) else toast("En cola: la página se leerá con IA en segundo plano")
+        }
     }
 
     /** Reconoce (o carga el OCR guardado de) todas las páginas, de una en una, y las concatena con separadores. */
@@ -522,6 +561,18 @@ fun OcrScreen(
                             LinearProgressIndicator(Modifier.width(180.dp).clip(RoundedCornerShape(50)), color = secondary)
                         }
                     }
+                }
+
+                // ---- Lectura con IA: progreso / en cola / volver a leer
+                if (aiEngineOn || aiStatus != null) {
+                    AiReadRow(
+                        status = aiStatus,
+                        readByAi = readByAi,
+                        enabled = !running && image != null,
+                        accent = primary,
+                        onRead = { guardEdits { readWithAi() } },
+                        onCancel = { container.aiQueue.cancel(docId, currentPageId) },
+                    )
                 }
 
                 // Palabra / línea seleccionada
@@ -909,4 +960,52 @@ private fun countWords(text: String): Int {
         else if (!inWord) { inWord = true; n++ }
     }
     return n
+}
+
+
+/** Fila de la lectura con IA: "Leyendo con IA… 40 %" (cancelable), "En cola" o el botón "Volver a leer con IA". */
+@Composable
+private fun AiReadRow(
+    status: AiRecognitionQueue.PageStatus?,
+    readByAi: Boolean,
+    enabled: Boolean,
+    accent: Color,
+    onRead: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    Row(
+        Modifier
+            .padding(start = 12.dp, end = 12.dp, top = 8.dp)
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(accent.copy(alpha = 0.10f))
+            .padding(start = 12.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Filled.AutoAwesome, null, tint = accent, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(8.dp))
+        when (status) {
+            is AiRecognitionQueue.PageStatus.Running -> {
+                Column(Modifier.weight(1f).padding(vertical = 6.dp)) {
+                    Text("Leyendo con IA… ${status.percent} % · ${status.label}", style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(4.dp))
+                    LinearProgressIndicator(progress = { status.fraction }, modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(50)), color = accent)
+                }
+                TextButton(onClick = onCancel) { Text("Cancelar") }
+            }
+            AiRecognitionQueue.PageStatus.Queued -> {
+                Text("En cola para leer con IA", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                TextButton(onClick = onCancel) { Text("Cancelar") }
+            }
+            null -> {
+                Text(
+                    if (readByAi) "Texto leído con IA" else "Texto del OCR básico",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = onRead, enabled = enabled) { Text(if (readByAi) "Volver a leer con IA" else "Leer con IA") }
+            }
+        }
+    }
 }
