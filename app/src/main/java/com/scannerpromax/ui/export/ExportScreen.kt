@@ -249,6 +249,8 @@ fun ExportScreen(
         listOf(
             d.pages.joinToString { it.id + it.edits.hashCode() + "/" + it.processedFile + "/" + it.ocrEditedText.hashCode() },
             pageSize, quality, textMode, textPlacement, usePassword, password.hashCode(), fileName,
+            // PDF reconstruido: si cambia cuántas páginas tienen maquetación de la IA, se rehace.
+            if (textMode == PdfTextMode.RECONSTRUIDO) aiPages else 0,
         ).joinToString("|")
 
     /** OCR de todas las páginas (lo que falte se reconoce de una en una, con progreso y cancelable). */
