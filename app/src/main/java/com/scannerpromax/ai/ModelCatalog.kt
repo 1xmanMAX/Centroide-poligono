@@ -34,7 +34,7 @@ object ModelCatalog {
             ),
             ModelFile(
                 kind = FileKind.MMPROJ,
-                fileName = "PaddleOCR-VL-1.5-mmproj-F16.gguf",
+                fileName = "mmproj-F16.gguf",
                 url = hf("JamePeng2023/PaddleOCR-VL-1.5-GGUF", "mmproj-F16.gguf"),
                 sizeBytes = 880_415_744L,
                 sha256 = "68cf6bc6c4c54e3c177a080b37fdffe80b1193ae82c813fa1750d5172c311fca",
