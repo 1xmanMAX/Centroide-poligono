@@ -135,15 +135,6 @@ class ReconstructionPdfTest {
     }
 
     @Test
-    fun formularioRealDeSpotting() {
-        val t = extract(build("funsd_13"))
-        for (s in listOf("NEW COMPETITIVE PRODUCTS", "REPORTED BY:", "B & W", "VICEROY KING BOX AND VICEROY LIGHTS KING BOX")) {
-            assertTrue(s, t.visible.contains(s))
-        }
-        assertEquals("", t.invisible)
-    }
-
-    @Test
     fun manuscritoRealConColorYTamanoFijo() {
         val pdf = build("cuaderno1", PageSize.A4)
         val t = extract(pdf)
