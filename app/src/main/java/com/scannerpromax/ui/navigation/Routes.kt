@@ -12,6 +12,7 @@ object Routes {
     const val OCR = "ocr/{docId}/{pageId}"
     const val COMPRESS = "compress"
     const val SETTINGS = "settings"
+    const val AI_MODELS = "settings/ai-models"
 
     /** [docId] null = documento nuevo. */
     fun camera(mode: ScanMode = ScanMode.DOCUMENT, docId: String? = null) =

@@ -14,12 +14,14 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.callbackFlow
-import kotlinx.coroutines.isActive
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -96,7 +98,16 @@ class LlmEngine(context: Context) {
             if (h == 0L) throw LlmException("No hay ningún modelo cargado")
             val bitmaps = prepareImages(request)
             val job = currentCoroutineContext()[Job]
-            val cancelHook = job?.invokeOnCompletion(onCancelling = true) { LlmNative.nativeCancel(h) }
+            // Vigilante: si se cancela la corrutina mientras el nativo está bloqueado (p. ej. codificando la imagen
+            // o el prompt), pide al nativo que pare.
+            val finished = AtomicBoolean(false)
+            val watcher = launch(start = CoroutineStart.UNDISPATCHED) {
+                try {
+                    awaitCancellation()
+                } finally {
+                    if (!finished.get()) LlmNative.nativeCancel(h)
+                }
+            }
             val sb = StringBuilder()
             val t0 = System.nanoTime()
             try {
@@ -127,7 +138,8 @@ class LlmEngine(context: Context) {
                     stopReason = StopReason.entries.getOrElse(stats[6].toInt()) { StopReason.EOS },
                 )
             } finally {
-                cancelHook?.dispose()
+                finished.set(true)
+                watcher.cancel()
                 bitmaps.forEachIndexed { i, b -> if (b !== request.images.getOrNull(i)) b.recycle() }
             }
         }

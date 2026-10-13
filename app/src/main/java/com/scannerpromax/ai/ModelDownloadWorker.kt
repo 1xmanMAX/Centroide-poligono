@@ -15,7 +15,6 @@ import androidx.work.workDataOf
 import com.scannerpromax.ScannerApp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.coroutineScope
 
@@ -40,7 +39,7 @@ class ModelDownloadWorker(context: Context, params: WorkerParameters) : Coroutin
                 // Notificación como mucho cada ~1 s (Android limita la frecuencia de actualizaciones).
                 val progress = MutableStateFlow(Triple(0L, 0L, "Descargando"))
                 val notifier = launch {
-                    progress.conflate().collect { (done, total, phase) ->
+                    progress.collect { (done, total, phase) ->
                         runCatching { setForeground(foregroundInfo(model, phase, done, total)) }
                         kotlinx.coroutines.delay(1000)
                     }

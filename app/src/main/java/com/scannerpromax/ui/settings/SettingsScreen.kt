@@ -38,6 +38,7 @@ import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.PhotoCamera
+import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.TextFields
 import androidx.compose.material.icons.rounded.Tune
@@ -91,7 +92,7 @@ private enum class Picker { FILTER, PAGE_SIZE, QUALITY, PDF_TEXT }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
+fun SettingsScreen(container: AppContainer, onBack: () -> Unit, onOpenAiModels: () -> Unit = {}) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     // Flow recordado: SettingsRepository.settings devuelve un Flow nuevo en cada acceso y collectAsState
@@ -149,6 +150,15 @@ fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
                     subtitle = "Elimina líneas de dobleces, bolígrafo y bordes en páginas nuevas",
                     checked = settings.autoRemoveLines,
                     onCheckedChange = { v -> update { it.copy(autoRemoveLines = v) } },
+                )
+            }
+
+            SettingsGroup("Inteligencia artificial") {
+                ValueRow(
+                    icon = Icons.Rounded.Psychology,
+                    title = "Modelos IA",
+                    value = "Motor: " + settings.recognitionEngine.label,
+                    onClick = onOpenAiModels,
                 )
             }
 
