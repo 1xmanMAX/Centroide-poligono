@@ -77,6 +77,8 @@ internal object LlmNative {
         minP: Float,
         repeatPenalty: Float,
         repeatLastN: Int,
+        presencePenalty: Float,
+        special: Boolean,
         seed: Int,
         stops: Array<String>?,
         callback: TextCallback?,

@@ -19,48 +19,53 @@ object ModelCatalog {
         description = "Modelo de visión especializado en documentos. Lee texto impreso y manuscrito, tablas, " +
             "fórmulas, gráficos y sellos, y puede devolver el texto con su posición en la página.",
         role = ModelRole.DOCUMENT_READER,
+        // Banco IA (notes_ia_banco.md §2): LLM ya cuantizado a Q8_0 (Q4_K_M pierde calidad: %palabras 71,9 vs 77,7) y
+        // proyector en F16 (el BF16 oficial es lento en ARM sin BF16). Repo comunitario con licencia Apache-2.0
+        // declarada; tamaños y sha256 = X-Linked-Size / X-Linked-Etag de Hugging Face (verificados 2026-10-13).
+        // Alternativa oficial: PaddlePaddle/PaddleOCR-VL-1.5-GGUF (BF16 935 768 992 B, sha 299051d5…328c) + cuantizar
+        // en el móvil con [OnDeviceQuantization] (936 MB de descarga en vez de 498).
         files = listOf(
             ModelFile(
                 kind = FileKind.LLM,
-                fileName = "PaddleOCR-VL-1.5.gguf",
-                url = hf("PaddlePaddle/PaddleOCR-VL-1.5-GGUF", "PaddleOCR-VL-1.5.gguf"),
-                sizeBytes = 935_768_992L,
-                sha256 = "299051d54faa065abc505cc39b8383ea338fd3020c775ea3e0ba514a7022328c",
+                fileName = "PaddleOCR-VL-1.5-Q8_0.gguf",
+                url = hf("JamePeng2023/PaddleOCR-VL-1.5-GGUF", "PaddleOCR-VL-1.5-Q8_0.gguf"),
+                sizeBytes = 498_315_840L,
+                sha256 = "dfbcf5588cbd2182d3e7e6c5c0139f509c6dccc7fe4a8406eef361cfeec70922",
             ),
             ModelFile(
                 kind = FileKind.MMPROJ,
-                fileName = "PaddleOCR-VL-1.5-mmproj.gguf",
-                url = hf("PaddlePaddle/PaddleOCR-VL-1.5-GGUF", "PaddleOCR-VL-1.5-mmproj.gguf"),
-                sizeBytes = 881_770_496L,
-                sha256 = "e7f1a72400fba517046f90d964e2fa0f4dac7781ee3b1bc5d2022f5f8cecbd87",
+                fileName = "PaddleOCR-VL-1.5-mmproj-F16.gguf",
+                url = hf("JamePeng2023/PaddleOCR-VL-1.5-GGUF", "mmproj-F16.gguf"),
+                sizeBytes = 880_415_744L,
+                sha256 = "68cf6bc6c4c54e3c177a080b37fdffe80b1193ae82c813fa1750d5172c311fca",
             ),
         ),
         recommendedRamMb = 4096,
         minRamMb = 3072,
-        // Los archivos oficiales vienen sin cuantizar: opcionalmente se cuantiza el LLM en el móvil tras la descarga
-        // (el mmproj se deja tal cual: la visión es más sensible a la cuantización).
-        onDeviceQuantization = OnDeviceQuantization(
-            sourceFileName = "PaddleOCR-VL-1.5.gguf",
-            outputFileName = "PaddleOCR-VL-1.5-Q8_0.gguf",
-            ftype = QuantType.Q8_0,
-        ),
+        // Ya viene en Q8_0: no hace falta cuantizar en el móvil.
+        onDeviceQuantization = null,
         defaults = GenerationDefaults(
             temperature = 0f,
             maxTokens = 2048,
+            // Spotting necesita 6144 (≈1280 tokens de imagen + hasta 3000 de salida); el resto cabe en 4096. Se carga
+            // una vez para toda la cola con el mayor.
             contextSize = 6144,
+            // Paddle ignora image_max_tokens (usa image_max_pixels = 1 003 520 del GGUF): se reduce la imagen antes.
             maxImageTokens = 0,
             maxImageSide = 1600,
+            maxImagePixels = PADDLE_MAX_PIXELS,
             repeatPenalty = 1.0f,
             useChatTemplate = true,
             enableThinking = false,
+            specialTokens = true,
         ),
         tasks = listOf(
-            ModelTask("ocr", "Texto", "OCR:"),
-            ModelTask("table", "Tabla", "Table Recognition:"),
-            ModelTask("formula", "Fórmula", "Formula Recognition:"),
-            ModelTask("chart", "Gráfico", "Chart Recognition:"),
-            ModelTask("seal", "Sello", "Seal Recognition:"),
-            ModelTask("spotting", "Texto con posición", "Spotting:"),
+            ModelTask("ocr", "Texto", "OCR:", maxTokens = 2048),
+            ModelTask("table", "Tabla", "Table Recognition:", maxTokens = 3000),
+            ModelTask("formula", "Fórmula", "Formula Recognition:", maxTokens = 256),
+            ModelTask("chart", "Gráfico", "Chart Recognition:", maxTokens = 512),
+            ModelTask("seal", "Sello", "Seal Recognition:", maxTokens = 512),
+            ModelTask("spotting", "Texto con posición", "Spotting:", maxTokens = 3000, maxImagePixels = PADDLE_SPOTTING_MAX_PIXELS),
         ),
     )
 
@@ -70,8 +75,8 @@ object ModelCatalog {
         name = "Asistente visual",
         technicalName = "Qwen3.5-0.8B (Q4_K_M)",
         license = "Apache 2.0",
-        purpose = "Encuadre y desdoblado guiado, maquetación para reconstruir el PDF, reescritura, extracción de " +
-            "datos (DNI, boletas), mejora del documento.",
+        purpose = "Reconoce el tipo de documento para elegir la mejor mejora, rescata el encuadre cuando no se " +
+            "detectan los bordes y puede leer el texto (tiques impresos).",
         description = "Modelo de visión y lenguaje general: entiende la página, sigue instrucciones en español, " +
             "reescribe y extrae datos estructurados.",
         role = ModelRole.VISUAL_ASSISTANT,
@@ -98,20 +103,42 @@ object ModelCatalog {
             temperature = 0f,
             maxTokens = 1024,
             contextSize = 4096,
+            // Su mmproj no trae image_max_pixels: sin límite una foto grande da ~4100 tokens de imagen.
             maxImageTokens = 1024,
             maxImageSide = 1280,
-            repeatPenalty = 1.05f,
+            repeatPenalty = 1.0f,
             useChatTemplate = true,
             enableThinking = false,
         ),
         tasks = listOf(
-            ModelTask("transcribe", "Transcribir", "Transcribe todo el texto de la imagen, respetando los saltos de línea."),
+            ModelTask("ocr", "Transcribir", QWEN_OCR_PROMPT, maxTokens = 2048),
+            ModelTask("classify", "Tipo de documento", QWEN_CLASSIFY_PROMPT, maxTokens = 8, maxImageSide = 512),
+            ModelTask("docbox", "Localizar documento", QWEN_DOCBOX_PROMPT, maxTokens = 128, maxImageSide = 896, presencePenalty = 1.5f),
             ModelTask("describe", "Describir", "Describe brevemente qué tipo de documento es y qué contiene."),
             ModelTask("extract", "Extraer datos", "Extrae los datos clave del documento (nombres, fechas, importes, números de documento) en formato JSON."),
         ),
     )
 
     val all: List<AiModel> = listOf(DOCUMENT_READER, VISUAL_ASSISTANT)
+
+    /** Píxeles máximos de imagen para Paddle (image_max_pixels del GGUF = 1280 tokens). */
+    const val PADDLE_MAX_PIXELS = 1_003_520
+    /**
+     * Spotting: el banco usó 1 605 632 (2048 tokens), pero mtmd limita Paddle a image_max_pixels del GGUF; se manda a
+     * esta resolución y el modelo la reduce a ~1 MP internamente (las coordenadas son relativas 0..1000).
+     */
+    const val PADDLE_SPOTTING_MAX_PIXELS = 1_605_632
+
+    /** Prompts EXACTOS del banco (ia_eval/prompts). */
+    const val QWEN_CLASSIFY_PROMPT = "What kind of image is this? Choose exactly one category:\n" +
+        "receipt, id_card, handwritten, whiteboard, screen, book, form, printed, no_document.\n" +
+        "(receipt = shop ticket or invoice; id_card = ID, licence or bank card; handwritten = handwritten notes or letter; " +
+        "whiteboard = whiteboard or blackboard; screen = photo of a computer or phone screen; book = open book or book page; " +
+        "form = form or table to fill in; printed = other printed document or letter; no_document = no document in the photo)\n" +
+        "Answer with the category name only."
+    const val QWEN_DOCBOX_PROMPT = "Locate the document (sheet of paper, receipt, card or book page) in this photo. " +
+        "Report its bbox coordinates in JSON format with \"bbox_2d\" and \"label\"."
+    const val QWEN_OCR_PROMPT = "Read all the text in this image. Output only the text, line by line, in reading order."
 
     fun byId(id: String): AiModel? = all.firstOrNull { it.id == id }
 
@@ -159,10 +186,24 @@ data class GenerationDefaults(
     val repeatPenalty: Float,
     val useChatTemplate: Boolean,
     val enableThinking: Boolean,
+    /** Máximo de píxeles (ancho·alto) de la imagen (0 = solo [maxImageSide]). */
+    val maxImagePixels: Int = 0,
+    /** Detokenizar con special=true (Paddle: coordenadas <|LOC_n|> de Spotting). */
+    val specialTokens: Boolean = false,
 )
 
-/** Tarea predefinida (prompt) para la prueba y para la tubería. */
-data class ModelTask(val id: String, val label: String, val prompt: String)
+/**
+ * Tarea predefinida (prompt) para la prueba y para la tubería, con sus parámetros del banco (0 = los del modelo).
+ */
+data class ModelTask(
+    val id: String,
+    val label: String,
+    val prompt: String,
+    val maxTokens: Int = 0,
+    val maxImageSide: Int = 0,
+    val maxImagePixels: Int = 0,
+    val presencePenalty: Float = 0f,
+)
 
 data class AiModel(
     val id: String,
@@ -182,6 +223,8 @@ data class AiModel(
     val totalDownloadBytes: Long get() = files.sumOf { it.sizeBytes.coerceAtLeast(0) }
     val llmFile: ModelFile get() = files.first { it.kind == FileKind.LLM }
     val mmprojFile: ModelFile? get() = files.firstOrNull { it.kind == FileKind.MMPROJ }
+
+    fun task(id: String): ModelTask? = tasks.firstOrNull { it.id == id }
 }
 
 /** Motor de reconocimiento principal elegido por el usuario (Ajustes > Modelos IA). */

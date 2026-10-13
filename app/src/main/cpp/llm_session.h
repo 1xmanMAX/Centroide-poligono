@@ -47,6 +47,10 @@ struct GenParams {
     float min_p             = 0.05f;
     float repeat_penalty    = 1.0f;  // 1 = desactivado
     int   repeat_last_n     = 64;
+    float presence_penalty  = 0.0f;  // 0 = desactivado (Qwen bbox_2d: 1.5 contra bucles de objetos)
+    // true = detokenizar también los tokens de control (PaddleOCR-VL: <|LOC_n|> de Spotting son CONTROL y sin
+    // esto las coordenadas desaparecen). El texto de los tokens de fin (eog) nunca se emite.
+    bool  special           = false;
     uint32_t seed           = 0xFFFFFFFF;
     std::vector<std::string> stops;
 };

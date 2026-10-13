@@ -193,6 +193,7 @@ Java_com_scannerpromax_ai_LlmNative_nativeGenerate(JNIEnv * env, jobject, jlong 
                                                    jobjectArray images, jboolean use_template, jboolean thinking,
                                                    jint max_tokens, jfloat temperature, jint top_k, jfloat top_p,
                                                    jfloat min_p, jfloat repeat_penalty, jint repeat_last_n,
+                                                   jfloat presence_penalty, jboolean special,
                                                    jint seed, jobjectArray stops, jobject callback) {
     if (!h) {
         throw_state(env, "modelo no cargado");
@@ -210,6 +211,8 @@ Java_com_scannerpromax_ai_LlmNative_nativeGenerate(JNIEnv * env, jobject, jlong 
     g.min_p = min_p;
     g.repeat_penalty = repeat_penalty;
     g.repeat_last_n = repeat_last_n;
+    g.presence_penalty = presence_penalty;
+    g.special = special == JNI_TRUE;
     g.seed = seed < 0 ? 0xFFFFFFFFu : (uint32_t) seed;
     if (stops) {
         jsize n = env->GetArrayLength(stops);

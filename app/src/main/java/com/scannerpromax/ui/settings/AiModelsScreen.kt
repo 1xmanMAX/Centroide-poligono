@@ -541,16 +541,20 @@ private suspend fun runTest(
     val loadMs = System.currentTimeMillis() - t0
     withContext(Dispatchers.Main) { onLoaded() }
     val d = model.defaults
+    val task = model.tasks.firstOrNull { it.prompt == prompt }
     val r = container.llm.generate(
         LlmRequest(
             prompt = prompt,
             images = listOfNotNull(image),
-            maxTokens = d.maxTokens,
+            maxTokens = task?.maxTokens?.takeIf { it > 0 } ?: d.maxTokens,
             temperature = d.temperature,
             repeatPenalty = d.repeatPenalty,
+            presencePenalty = task?.presencePenalty ?: 0f,
+            special = d.specialTokens,
             useChatTemplate = d.useChatTemplate,
             enableThinking = d.enableThinking,
-            maxImageSide = d.maxImageSide,
+            maxImageSide = task?.maxImageSide?.takeIf { it > 0 } ?: d.maxImageSide,
+            maxImagePixels = task?.maxImagePixels?.takeIf { it > 0 } ?: d.maxImagePixels,
         ),
         onToken,
     )

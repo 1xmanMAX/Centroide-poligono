@@ -1,7 +1,7 @@
 // Prueba de escritorio del núcleo llm::Session (la misma lógica que usa el JNI de Android).
 // Compilar contra una build de llama.cpp del mismo commit (ver tools/build_host_test.sh):
 //   llm_host_test -m modelo.gguf [--mmproj mmproj.gguf] [--image img.jpg]... -p "OCR:" [-c 4096] [-n 256]
-//                 [-t 4] [--temp 0] [--max-image-tokens N] [--stop TEXTO] [--no-template] [--think] [--cancel-after N]
+//                 [-t 4] [--temp 0] [--max-image-tokens N] [--stop TEXTO] [--no-template] [--think] [--special] [--presence-penalty X] [--cancel-after N]
 //                 [--quantize in.gguf out.gguf ftype]
 #include "llm_session.h"
 
@@ -39,6 +39,8 @@ int main(int argc, char ** argv) {
         else if (a == "--stop") gp.stops.push_back(next());
         else if (a == "--no-template") gp.use_chat_template = false;
         else if (a == "--think") gp.enable_thinking = true;
+        else if (a == "--special") gp.special = true;
+        else if (a == "--presence-penalty") gp.presence_penalty = (float) atof(next().c_str());
         else if (a == "--no-mmap") lp.use_mmap = false;
         else if (a == "--cancel-after") cancel_after = atoi(next().c_str());
         else if (a == "--show-prompt") show_prompt = true;

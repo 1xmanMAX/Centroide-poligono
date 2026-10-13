@@ -25,12 +25,12 @@ double ms_since(clock_type::time_point t0) {
 std::once_flag g_backend_once;
 std::string g_system_info;
 
-std::string token_to_piece(const llama_vocab * vocab, llama_token tok) {
+std::string token_to_piece(const llama_vocab * vocab, llama_token tok, bool special) {
     char buf[256];
-    int n = llama_token_to_piece(vocab, tok, buf, sizeof(buf), 0, /*special*/ false);
+    int n = llama_token_to_piece(vocab, tok, buf, sizeof(buf), 0, special);
     if (n < 0) {
         std::string big(-n, '\0');
-        n = llama_token_to_piece(vocab, tok, big.data(), (int) big.size(), 0, false);
+        n = llama_token_to_piece(vocab, tok, big.data(), (int) big.size(), 0, special);
         if (n < 0) return {};
         big.resize(n);
         return big;
@@ -361,8 +361,10 @@ bool Session::generate(const GenParams & g, const std::vector<Image> & images, c
     llama_sampler_chain_params scp = llama_sampler_chain_default_params();
     scp.no_perf = true;
     llama_sampler * smpl = llama_sampler_chain_init(scp);
-    if (g.repeat_penalty > 0.0f && g.repeat_penalty != 1.0f) {
-        llama_sampler_chain_add(smpl, llama_sampler_init_penalties(llama_vocab_n_tokens(vocab), g.repeat_last_n, g.repeat_penalty, 0.0f, 0.0f));
+    const bool use_repeat = g.repeat_penalty > 0.0f && g.repeat_penalty != 1.0f;
+    if (use_repeat || g.presence_penalty != 0.0f) {
+        llama_sampler_chain_add(smpl, llama_sampler_init_penalties(llama_vocab_n_tokens(vocab),
+            g.repeat_last_n > 0 ? g.repeat_last_n : 64, use_repeat ? g.repeat_penalty : 1.0f, 0.0f, g.presence_penalty));
     }
     if (g.temperature <= 0.0f) {
         llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
@@ -406,7 +408,7 @@ bool Session::generate(const GenParams & g, const std::vector<Image> & images, c
         stats.gen_tokens++;
 
         const size_t before = text.size();
-        text += token_to_piece(vocab, tok);
+        text += token_to_piece(vocab, tok, g.special);
 
         // ¿Apareció alguna cadena de parada? (se busca solo cerca del final)
         size_t cut = std::string::npos;

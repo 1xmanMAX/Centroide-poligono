@@ -116,7 +116,7 @@ class LlmEngine(context: Context) {
                         h, request.prompt, request.system, bitmaps.toTypedArray().takeIf { it.isNotEmpty() },
                         request.useChatTemplate, request.enableThinking, request.maxTokens, request.temperature,
                         request.topK, request.topP, request.minP, request.repeatPenalty, request.repeatLastN,
-                        request.seed, request.stop.toTypedArray().takeIf { it.isNotEmpty() },
+                        request.presencePenalty, request.special, request.seed, request.stop.toTypedArray().takeIf { it.isNotEmpty() },
                     ) { piece ->
                         sb.append(piece)
                         onToken(piece)
@@ -207,7 +207,7 @@ class LlmEngine(context: Context) {
 
     private fun prepareImages(request: LlmRequest): List<Bitmap> {
         val out = ArrayList<Bitmap>()
-        for (b in request.images) out += fitBitmap(b, request.maxImageSide)
+        for (b in request.images) out += fitBitmap(b, request.maxImageSide, request.maxImagePixels)
         for (f in request.imagePaths) {
             val decoded = try {
                 BitmapIO.decodeThumbnail(f.absolutePath, request.maxImageSide)
@@ -215,7 +215,7 @@ class LlmEngine(context: Context) {
                 out.forEachIndexed { i, b -> if (b !== request.images.getOrNull(i)) b.recycle() }
                 throw LlmException("No se pudo abrir la imagen ${f.name}", t)
             }
-            val fitted = fitBitmap(decoded, request.maxImageSide)
+            val fitted = fitBitmap(decoded, request.maxImageSide, request.maxImagePixels)
             if (fitted !== decoded) decoded.recycle()
             out += fitted
         }
@@ -225,12 +225,14 @@ class LlmEngine(context: Context) {
     companion object {
         private const val TAG = "LlmEngine"
 
-        /** Reduce el lado mayor a [maxSide] y garantiza ARGB_8888 (lo que exige el JNI). Puede devolver [src]. */
-        fun fitBitmap(src: Bitmap, maxSide: Int): Bitmap {
-            val long = max(src.width, src.height)
+        /**
+         * Reduce el lado mayor a [maxSide] (y el área a [maxPixels] si > 0) y garantiza ARGB_8888 (lo que exige el
+         * JNI). Puede devolver [src].
+         */
+        fun fitBitmap(src: Bitmap, maxSide: Int, maxPixels: Int = 0): Bitmap {
             var b = src
-            if (maxSide in 1 until long) {
-                val s = maxSide.toFloat() / long
+            val s = fitScale(src.width, src.height, maxSide, maxPixels)
+            if (s < 1f) {
                 b = Bitmap.createScaledBitmap(src, max(1, (src.width * s).roundToInt()), max(1, (src.height * s).roundToInt()), true)
             }
             if (b.config != Bitmap.Config.ARGB_8888) {
@@ -273,12 +275,21 @@ data class LlmRequest(
     val minP: Float = 0.05f,
     val repeatPenalty: Float = 1.0f,
     val repeatLastN: Int = 64,
+    /** Penalización de presencia (0 = no). Qwen bbox_2d: 1.5 (evita bucles de objetos repetidos). */
+    val presencePenalty: Float = 0f,
+    /**
+     * true = el texto incluye los tokens de control (PaddleOCR-VL "Spotting:" devuelve las coordenadas como
+     * tokens <|LOC_n|> de CONTROL: sin esto desaparecen). Los de fin de generación nunca se emiten.
+     */
+    val special: Boolean = false,
     val seed: Int = -1,
     val stop: List<String> = emptyList(),
     val useChatTemplate: Boolean = true,
     val enableThinking: Boolean = false,
     /** Lado mayor máximo de cada imagen (se reduce antes de enviarla). */
     val maxImageSide: Int = 1280,
+    /** Máximo de píxeles (ancho·alto) de cada imagen; 0 = sin límite (solo [maxImageSide]). */
+    val maxImagePixels: Int = 0,
 )
 
 enum class StopReason { EOS, MAX_TOKENS, STOP_STRING, CANCELLED, CONTEXT_FULL, CALLBACK }
