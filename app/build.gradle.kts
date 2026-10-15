@@ -65,6 +65,8 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        // java.time (Duration/Instant) en Android 7.x (API 24–25): lo usa el SDK de Anthropic (timeouts, modelos).
+        isCoreLibraryDesugaringEnabled = true
     }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
@@ -137,6 +139,12 @@ dependencies {
 
     // Descarga de modelos de IA en segundo plano (servicio en primer plano + notificación)
     implementation("androidx.work:work-runtime-ktx:2.10.0")
+
+    // IA en la nube (opcional, con la clave del usuario): SDK oficial de Anthropic para Java (Claude Haiku 5.5) y
+    // OkHttp (ya lo trae el SDK) para DeepSeek, que no tiene SDK oficial para Java/Kotlin.
+    implementation("com.anthropic:anthropic-java-client-okhttp:2.72.0")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
 
     testImplementation("junit:junit:4.13.2")
 }
