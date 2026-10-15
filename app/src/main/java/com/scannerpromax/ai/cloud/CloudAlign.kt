@@ -58,6 +58,7 @@ object CloudAlign {
 
     private class Blk(val src: CloudBlock, var box: OcrRect?, var lineBoxes: List<OcrRect?>) {
         val tokens: Set<String> = tokensOf(src.plainText() + "\n" + (src.chartTitle ?: "")).toSet()
+        val grams: Set<String> = trigrams(src.plainText())
         val lineTokens: List<List<String>> = src.lines.map { tokensOf(it.text) }
     }
 
@@ -202,7 +203,9 @@ object CloudAlign {
             }
             if (best < 0 && m.letters >= 4) {
                 // Caja del modelo muy desviada (o ausente): solo por texto, si el parecido es claro y único.
-                val sims = blocks.map { similarity(m.tokens, it.tokens) }
+                // Palabras en común o, si ML Kit leyó con errores ("inforrne"), trigramas de letras en común.
+                val mg = trigrams(m.line.text)
+                val sims = blocks.map { b -> max(similarity(m.tokens, b.tokens), gramSimilarity(mg, b.grams)) }
                 val top = sims.indices.maxByOrNull { sims[it] }
                 if (top != null && sims[top] >= 0.75f && sims.withIndex().none { (i, s) -> i != top && s > sims[top] - 0.2f }) best = top
             }
@@ -367,6 +370,17 @@ object CloudAlign {
 
     /** Fracción de palabras de [line] presentes en el bloque. */
     internal fun similarity(line: List<String>, block: Set<String>): Float =
+        if (line.isEmpty() || block.isEmpty()) 0f else line.count { it in block }.toFloat() / line.size
+
+    /** Trigramas de caracteres del texto normalizado (minúsculas, sin tildes, espacios simples). */
+    internal fun trigrams(s: String): Set<String> {
+        val t = " " + tokensOf(s).joinToString(" ") + " "
+        if (t.length < 3) return emptySet()
+        return (0..t.length - 3).mapTo(HashSet()) { t.substring(it, it + 3) }
+    }
+
+    /** Fracción de trigramas de la línea presentes en el bloque. */
+    internal fun gramSimilarity(line: Set<String>, block: Set<String>): Float =
         if (line.isEmpty() || block.isEmpty()) 0f else line.count { it in block }.toFloat() / line.size
 
     /** Dice sobre bolsas de palabras. */
