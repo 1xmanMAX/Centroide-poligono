@@ -145,6 +145,9 @@ object CloudPipeline {
         val docType = AiEnhance.docTypeCode(page.docType)
         val r = CloudAlign.align(page, fullW, fullH, mlkit, docType, engine = "nube:" + provider.id.model)
         onProgress(AiRecognizer.Progress(1f, "Listo"))
-        return AiRecognizer.PageResult(r.ocr, r.layout, r.warning)
+        val warning = r.warning ?: page.rotation.takeIf { it != 0 }?.let {
+            "La IA cree que la página está girada ($it°); gírala en el editor y vuelve a leerla"
+        }
+        return AiRecognizer.PageResult(r.ocr, r.layout, warning)
     }
 }
