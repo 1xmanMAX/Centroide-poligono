@@ -73,6 +73,11 @@ object ReconstructionRenderer {
                         cs.stroke()
                     }
                     is ReOp.Text -> drawText(cs, op, metrics)
+                    is ReOp.Fill -> {
+                        cs.setNonStrokingColor(rgbF(op.rgb, 16), rgbF(op.rgb, 8), rgbF(op.rgb, 0))
+                        cs.addRect(op.x, op.y, op.w, op.h)
+                        cs.fill()
+                    }
                 }
             }
         }

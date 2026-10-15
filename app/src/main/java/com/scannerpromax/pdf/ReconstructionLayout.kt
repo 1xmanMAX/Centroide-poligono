@@ -8,6 +8,7 @@ import com.scannerpromax.domain.LayoutLine
 import com.scannerpromax.domain.PageSize
 import com.scannerpromax.domain.TableCell
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.floor
@@ -59,6 +60,9 @@ sealed class ReOp {
 
     /** Segmentos rectos (rejilla de tabla). */
     data class Lines(val segments: List<Seg>, val width: Float, val rgb: Int = 0x000000) : ReOp()
+
+    /** Rectángulo relleno (fondo de color liso). */
+    data class Fill(val x: Float, val y: Float, val w: Float, val h: Float, val rgb: Int) : ReOp()
 }
 
 data class PxRect(val left: Int, val top: Int, val right: Int, val bottom: Int) {
@@ -104,7 +108,37 @@ object ReconstructionLayout {
 
     private const val BLACK = 0x000000
 
+    /** Maquetación v2 (recon2): tamaño común por párrafo, sin estirar letras, alineación, rayas y fondos. */
+    @JvmStatic @Volatile var enableV2: Boolean = true
+
+    /** Estado de un plan() en curso (por hilo: se pueden reconstruir varias páginas a la vez). */
+    private class PlanState { var v2 = false; var handSizePt = 0f }
+    private val state = ThreadLocal.withInitial { PlanState() }
+    /** v2 activo durante plan() (solo con maquetaciones con estilo). */
+    private var v2: Boolean
+        get() = state.get()!!.v2
+        set(v) { state.get()!!.v2 = v }
+    private var handSizePt: Float
+        get() = state.get()!!.handSizePt
+        set(v) { state.get()!!.handSizePt = v }
+
+    /** ¿Se dibuja con v2? Maquetaciones con estilo (tubería por partes, nube con estilo); las antiguas como antes. */
+    fun usesV2(layout: DocLayout): Boolean =
+        enableV2 && (layout.rules.isNotEmpty() || layout.fills.isNotEmpty() || layout.blocks.any { it.hasStyle })
+
     fun plan(
+        layout: DocLayout,
+        pageSize: PageSize,
+        marginPt: Float,
+        metrics: ReFontMetrics,
+    ): RePlan {
+        val saved = v2
+        val savedHand = handSizePt
+        v2 = usesV2(layout)
+        try { return planInner(layout, pageSize, marginPt, metrics) } finally { v2 = saved; handSizePt = savedHand }
+    }
+
+    private fun planInner(
         layout: DocLayout,
         pageSize: PageSize,
         marginPt: Float,
@@ -118,11 +152,28 @@ object ReconstructionLayout {
         val bodyLineH = medianBodyLineHeight(layout)
         val blocks = layout.blocks.withIndex().sortedWith(compareBy({ it.value.order }, { it.index })).map { it.value }
         val bodySizePt = bodyLineH?.let { it * map.sy / (0.7f + 0.21f + LINE_PAD_EM) }
+        handSizePt = 0f
+        if (v2) {
+            // Manuscrito: un tamaño común en toda la página (el alto de las cajas varía mucho de un renglón a otro).
+            val hs = blocks.filter { it.type == BlockType.HANDWRITING }.flatMap { b -> b.lines.map { l -> lineSizePt(InlineMath.plain(l.text), ReFont.HAND, l, map, metrics) } }
+                .filter { it > 0f }.sorted()
+            if (hs.size >= 3) handSizePt = hs[hs.size / 2]
+            for (f in layout.fills) {
+                val r = pageRect(f.box, map)
+                ops += ReOp.Fill(r.x, r.y, r.w, r.h, rgbOf(f.color))
+            }
+        }
         for (b in blocks) {
             when (b.type) {
                 BlockType.TABLE -> planTable(b, map, metrics, bodySizePt, ops)
                 BlockType.FIGURE, BlockType.CHART, BlockType.FORMULA -> planPicture(b, layout, map, metrics, ops)
                 else -> planTextBlock(b, map, metrics, bodyLineH, bodySizePt, ops)
+            }
+        }
+        if (v2 && layout.rules.isNotEmpty()) {
+            // Rayas por grosor (una operación por grosor redondeado).
+            layout.rules.filter { it.size >= 5 }.groupBy { (it[4] * map.sx * 2f).roundToInt().coerceIn(1, 8) }.forEach { (w2, rs) ->
+                ops += ReOp.Lines(rs.map { Seg(map.x(it[0]), map.y(it[1]), map.x(it[2]), map.y(it[3])) }, (w2 / 2f).coerceIn(0.4f, 4f), 0x222222)
             }
         }
         return RePlan(fit.pageW, fit.pageH, ops)
@@ -142,7 +193,7 @@ object ReconstructionLayout {
         return hs[hs.size / 2]
     }
 
-    private fun fontFor(b: LayoutBlock, line: LayoutLine?, bodyLineH: Float?): ReFont = when (b.type) {
+    private fun fontFor(b: LayoutBlock, line: LayoutLine?, bodyLineH: Float?): ReFont = if (v2 && b.effectiveBold == true && b.type != BlockType.HANDWRITING) ReFont.BOLD else when (b.type) {
         BlockType.TITLE -> ReFont.BOLD
         BlockType.HANDWRITING -> ReFont.HAND
         BlockType.TEXT -> {
@@ -170,6 +221,29 @@ object ReconstructionLayout {
         ops: MutableList<ReOp>,
     ) {
         if (b.lines.isNotEmpty()) {
+            if (v2) {
+                // Tamaño común del párrafo (mediana de lo que pide cada línea); las líneas muy distintas (títulos
+                // dentro del bloque, notas) conservan el suyo. Sin estirar letras; alineación del bloque.
+                val texts = b.lines.map { InlineMath.plain(it.text) }
+                val fonts = b.lines.map { fontFor(b, it, bodyLineH) }
+                val sizes = b.lines.indices.map { i -> lineSizePt(texts[i], fonts[i], b.lines[i], map, metrics) }
+                val ok = sizes.filter { it > 0f }.sorted()
+                val med = if (b.type == BlockType.HANDWRITING && handSizePt > 0f) handSizePt else if (ok.isEmpty()) 0f else ok[ok.size / 2]
+                val align = b.effectiveAlign
+                b.lines.forEachIndexed { i, line ->
+                    val sz = sizes[i]
+                    val size = when {
+                        med <= 0f -> sz
+                        b.type == BlockType.HANDWRITING -> sz.coerceIn(med * 0.85f, med * 1.2f)
+                        sz > med * 1.35f || sz < med * 0.7f -> sz
+                        else -> med
+                    }
+                    val justify = align == "JUSTIFY" && i < b.lines.size - 1
+                    ops += placeLineRuns(texts[i], fonts[i], line, map, metrics, rgbOf(line.color ?: b.color),
+                        fixedSize = size.takeIf { it > 0f }, align = align, justify = justify)
+                }
+                return
+            }
             for (line in b.lines) {
                 val text = InlineMath.plain(line.text)
                 ops += placeLineRuns(text, fontFor(b, line, bodyLineH), line, map, metrics, rgbOf(line.color))
@@ -181,7 +255,9 @@ object ReconstructionLayout {
         val plain = b.text.lines().joinToString("\n") { InlineMath.plain(it) }
         val (font, _) = usableFont(fontFor(b, null, bodyLineH), plain, metrics)
         val r = pageRect(b.box, map)
-        val maxSize = (bodySizePt ?: (r.h / max(1, plain.lines().size) / LEADING)).let { if (font == ReFont.BOLD) it * 1.3f else it }
+        // Tamaño relativo que vio la nube (BlockStyle.size) si lo hay; si no, títulos algo mayores.
+        val styleFactor = if (v2) LayoutBlock.styleSizeFactor(b.style?.size) else null
+        val maxSize = (bodySizePt ?: (r.h / max(1, plain.lines().size) / LEADING)).let { if (styleFactor != null) it * styleFactor else if (font == ReFont.BOLD) it * 1.3f else it }
         ops += fitParagraph(plain, font, r, metrics, maxSize, visible = true)
     }
 
@@ -226,6 +302,9 @@ object ReconstructionLayout {
         rgb: Int,
         visible: Boolean = true,
         widthEmOverride: Float? = null,
+        fixedSize: Float? = null,
+        align: String? = null,
+        justify: Boolean = false,
     ): ReOp.Text? {
         // Vértices en la página (y hacia arriba).
         val q = verticalQuad(text, line) ?: if (line.quad.size >= 8) line.quad else with(line.box) {
@@ -249,8 +328,23 @@ object ReconstructionLayout {
 
         val top = inkTop(text, font, m)
         val bottom = inkBottom(text, font, m)
-        var size = (height / (top + bottom + LINE_PAD_EM)).coerceAtLeast(MIN_FONT_PT)
+        var size = (fixedSize ?: (height / (top + bottom + LINE_PAD_EM))).coerceAtLeast(MIN_FONT_PT)
         var natural = widthEm * size
+        if (v2) {
+            // Sin estirar: escala horizontal 85–100 %; si no cabe, letra menor; si sobra, alineación (o justificado).
+            var hs = 1f
+            var cs = 0f
+            if (natural > length) {
+                hs = (length / natural).coerceAtLeast(0.85f)
+                if (natural * 0.85f > length) { size = (length / (widthEm * 0.85f)).coerceAtLeast(MIN_FONT_PT * 0.5f); natural = widthEm * size; hs = (length / natural).coerceIn(0.5f, 1f) }
+            } else if (justify && natural < length) {
+                cs = ((length - natural) / text.length.coerceAtLeast(1)).coerceIn(0f, size * 0.3f)
+            }
+            val drawn = (natural + cs * text.length) * hs
+            val along = when (align) { "CENTER" -> ((length - drawn) / 2f).coerceAtLeast(0f); "RIGHT" -> (length - drawn).coerceAtLeast(0f); else -> 0f }
+            val off2 = (height - (top + bottom) * size) / 2f + bottom * size
+            return ReOp.Text(text, font, size, hs * 100f, cs, p[6] + -s * off2 + c * along, p[7] + c * off2 + s * along, c, s, rgb, visible)
+        }
         var hScale = (length / natural).coerceIn(MIN_HSCALE, MAX_HSCALE)
         var charSpacing = 0f
         if (natural * MIN_HSCALE > length) {
@@ -298,15 +392,18 @@ object ReconstructionLayout {
         map: ImageToPage,
         m: ReFontMetrics,
         rgb: Int,
+        fixedSize: Float? = null,
+        align: String? = null,
+        justify: Boolean = false,
     ): List<ReOp.Text> {
         val runs = fontRuns(text, wanted, m)
         if (runs.isEmpty()) return emptyList()
-        if (runs.size == 1) return listOfNotNull(placeLine(runs[0].second, runs[0].first, line, map, m, rgb))
+        if (runs.size == 1) return listOfNotNull(placeLine(runs[0].second, runs[0].first, line, map, m, rgb, fixedSize = fixedSize, align = align, justify = justify))
         val widths = runs.map { (f, t) -> m.widthEm(f, t) }
         val total = widths.sum()
         // Geometría de toda la línea con la fuente mayoritaria (decide la altura de tinta) y el ancho mezclado.
         val main = runs.maxByOrNull { it.second.length }!!.first
-        val whole = placeLine(text, main, line, map, m, rgb, widthEmOverride = total) ?: return emptyList()
+        val whole = placeLine(text, main, line, map, m, rgb, widthEmOverride = total, fixedSize = fixedSize, align = align, justify = justify) ?: return emptyList()
         val out = ArrayList<ReOp.Text>(runs.size)
         var x = whole.x; var y = whole.y
         runs.forEachIndexed { i, (f, t) ->
@@ -315,6 +412,15 @@ object ReconstructionLayout {
             x += adv * whole.cos; y += adv * whole.sin
         }
         return out
+    }
+
+    /** Tamaño (pt) que pediría la línea por su alto (como placeLine). 0 si no se puede. */
+    fun lineSizePt(text: String, font: ReFont, line: LayoutLine, map: ImageToPage, m: ReFontMetrics): Float {
+        val g = quadGeometryPx(line)
+        if (g.height <= 0f || text.isBlank()) return 0f
+        val (f, t) = usableFont(font, text, m)
+        val h = g.height * map.sy
+        return h / (inkTop(t, f, m) + inkBottom(t, f, m) + LINE_PAD_EM)
     }
 
     /** Trozos consecutivos de [text] por fuente: [wanted] donde puede dibujarlos, la normal donde no. */
@@ -436,6 +542,11 @@ object ReconstructionLayout {
     // ------------------------------------------------------------------------------------------------ tablas
 
     private fun planTable(b: LayoutBlock, map: ImageToPage, m: ReFontMetrics, bodySizePt: Float?, ops: MutableList<ReOp>) {
+        if (v2 && b.ruled != null && b.lines.isNotEmpty()) {
+            // Tabla con sus líneas reconocidas: texto donde estaba (el reglado, si lo hay, va en DocLayout.rules).
+            planTextBlock(b.copy(type = BlockType.TEXT, align = null), map, m, null, bodySizePt, ops)
+            return
+        }
         val cells = TableGrid.normalize(b.tableRows, b.tableCols, b.cells)
         val rows = max(b.tableRows, cells.maxOfOrNull { it.row + it.rowSpan } ?: 0)
         val cols = max(b.tableCols, cells.maxOfOrNull { it.col + it.colSpan } ?: 0)
