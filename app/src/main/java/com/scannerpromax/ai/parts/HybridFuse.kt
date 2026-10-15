@@ -123,7 +123,7 @@ object HybridFuse {
             }
         }
         // (las líneas de figuras/gráficos también reciben el texto de la nube en 1a: es su texto buscable)
-        val figIdx = blocks.indices.filter { (blocks[it].type == BlockType.FIGURE || blocks[it].type == BlockType.CHART) && blocks[it].lines.isNotEmpty() }
+        val figIdx = blocks.indices.filter { (blocks[it].type == BlockType.FIGURE || blocks[it].type == BlockType.CHART || blocks[it].type == BlockType.TABLE) && blocks[it].lines.isNotEmpty() }
         val ll = (tIdx + figIdx).flatMap { bi -> blocks[bi].lines.indices.map { li -> bi to li } }
         fun lbox(p: Pair<Int, Int>) = bb(blocks[p.first].lines[p.second].box)
         fun near(lb: FloatArray, cl: FloatArray, gy: Float, gx: Float): Boolean {
@@ -208,7 +208,7 @@ object HybridFuse {
                 val row = ll.indices.filter { it !in doneL }.filter { k ->
                     val p = ll[k]
                     val blk = blocks[p.first]
-                    if (blk.type !in TXT) return@filter false
+                    if (blk.type !in TXT && blk.type != BlockType.TABLE) return@filter false
                     if (hand || blk.type == BlockType.HANDWRITING) return@filter false
                     val lb = lbox(p); val lh = lb[3] - lb[1]
                     val cy = (lb[1] + lb[3]) / 2; val cx = (lb[0] + lb[2]) / 2
@@ -234,13 +234,34 @@ object HybridFuse {
             }
         }
 
-        // reconstruir bloques de texto con los textos nuevos
+        // Fragmentos sobrantes: línea local sin pareja cuyo texto ya está (entero) en una línea de su misma fila que
+        // recibió el texto de la nube (Paddle a veces da la fila entera Y sus trozos) → fuera.
+        val drop = HashSet<Pair<Int, Int>>()
+        val matched = ll.indices.filter { it in doneL }.map { ll[it] }
+        for (k in ll.indices) {
+            if (k in doneL) continue
+            val (bi, li) = ll[k]
+            if (blocks[bi].type == BlockType.TABLE) continue  // (las tablas se tratan por índice más abajo)
+            val t = TextSim.norm(texts[bi][li]).replace(" ", "")
+            if (t.isEmpty()) continue
+            val lb = lbox(ll[k])
+            val absorbed = matched.any { (mb, ml) ->
+                mb == bi && ml != li && TextSim.norm(texts[mb][ml]).replace(" ", "").contains(t) && run {
+                    val m = bb(blocks[mb].lines[ml].box)
+                    max(0f, min(lb[3], m[3]) - max(lb[1], m[1])) >= 0.5f * min(lb[3] - lb[1], m[3] - m[1])
+                }
+            }
+            if (absorbed) drop += bi to li
+        }
+
+        // reconstruir bloques con los textos nuevos
         for (bi in blocks.indices) {
             val b = blocks[bi]
-            if (b.lines.isEmpty() || texts[bi] == b.lines.map { it.text }) continue
-            val lines = b.lines.mapIndexed { li, l -> l.copy(text = texts[bi][li]) }
-            blocks[bi] = b.copy(lines = lines, text = if (b.type in TXT) lines.joinToString("\n") { it.text } else b.text,
-                role = b.role)
+            val anyDrop = drop.any { it.first == bi }
+            if (b.lines.isEmpty() || (!anyDrop && texts[bi] == b.lines.map { it.text })) continue
+            val lines = b.lines.mapIndexedNotNull { li, l -> if (bi to li in drop) null else l.copy(text = texts[bi][li]) }
+            val keepText = b.type in TXT || b.type == BlockType.FIGURE || b.type == BlockType.CHART
+            blocks[bi] = b.copy(lines = lines, text = if (keepText) lines.joinToString("\n") { it.text } else b.text)
         }
 
         // tablas
@@ -252,18 +273,21 @@ object HybridFuse {
             val cells = hosts.flatMap { cb[it].cells.filter { c -> c.text.isNotBlank() } }
             hosts.forEach { cUsed[it] = true }
             val lt = b.lines.map { it.text }.toMutableList()
+            val already = ll.indices.filter { it in doneL && ll[it].first == bi }.map { ll[it].second }.toSet()
             val usedC = HashSet<Int>(); val doneT = HashSet<Int>()
             val cands = ArrayList<Cand>()
             for (i in lt.indices) for (j in cells.indices) cands += Cand(sim(lt[i], cells[j].text), i, j)
             for (c in cands.sortedWith(compareByDescending<Cand> { it.s }.thenByDescending { it.i }.thenByDescending { it.j })) {
                 if (c.s < 0.35f) break
-                if (c.i in doneT || c.j in usedC) continue
+                if (c.i in doneT || c.j in usedC || c.i in already) continue
                 lt[c.i] = cells[c.j].text; doneT += c.i; usedC += c.j; st.tableLines++
             }
             var nb = b.copy(lines = b.lines.mapIndexed { i, l -> l.copy(text = lt[i]) })
             if (cells.isNotEmpty() && b.cells.isEmpty()) {
                 // celdas de la nube (de la tabla que más se solapa si hay varias, para que filas/columnas cuadren)
                 val main = hosts.maxByOrNull { inter(g, cbox[it]) }!!
+                // solo si esa tabla de la nube es ESTA tabla (cubre ≥ 50 % de la local), no una tablita dentro
+                if (inter(bb(b.box), cbox[main]) < 0.5f * area(bb(b.box))) { blocks[bi] = nb; continue }
                 val cc = cb[main].cells
                 nb = nb.copy(
                     cells = cc.map { TableCell(it.row, it.col, it.rowSpan, it.colSpan, it.text) },

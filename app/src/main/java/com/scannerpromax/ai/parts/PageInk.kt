@@ -243,8 +243,8 @@ object PageInk {
                 else floatArrayOf(c.x + c.w / 2f, c.y.toFloat(), c.x + c.w / 2f, (c.y + c.h).toFloat(), max(1, th).toFloat())
                 val bb = floatArrayOf(c.x.toFloat(), c.y.toFloat(), (c.x + c.w).toFloat(), (c.y + c.h).toFloat())
                 if (exclude.any { insideFrac(bb, it) > 0.5f }) continue
-                // (app) rayas pegadas al canto de la foto (borde del móvil/mesa, sombra del papel): no son del documento
-                val edge = 0.02f * max(w, h)
+                // (app) rayas a < 3,5 % del canto de la foto (borde del móvil/mesa, sombra del papel): no son del documento
+                val edge = 0.035f * max(w, h)
                 if (if (horiz) (seg[1] < edge || seg[1] > h - edge) else (seg[0] < edge || seg[0] > w - edge)) continue
                 out += seg
             }
@@ -288,13 +288,16 @@ object PageInk {
      * Máscara de tinta de la página SIN rayas largas (cuadrícula, renglones, reglado: van aparte). [lineLen] = longitud
      * a partir de la cual un tramo recto se toma por raya (por defecto ancho/25, mín. 25 px).
      */
-    fun inkMask(img: Rgb, lineLen: Int = max(25, img.w / 25), paperLevel: Double? = null): BooleanArray {
+    fun inkMask(img: Rgb, lineLen: Int = max(25, img.w / 25), paperLevel: Double? = null, rulesOnly: Boolean = false): BooleanArray {
         val w = img.w; val h = img.h
         val g = img.gray(); val sat = img.saturation()
         val paper = paperLevel ?: percentile(g, 90.0)
         val ink = BooleanArray(w * h) { g[it] < paper - 70 || (sat[it] > 90 && g[it] < paper - 35) }
-        val hr = longRuns(ink, w, h, lineLen, true)
-        val vr = longRuns(ink, w, h, lineLen, false)
+        // rulesOnly (app): solo se quitan los tramos que [detectRules] dibuja aparte (oscuros); los trazos rectos de un
+        // dibujo en bolígrafo de color (p. ej. una impresora dibujada) se quedan en el dibujo.
+        val src = if (!rulesOnly) ink else { val thr = min(150.0, paper - 70); BooleanArray(w * h) { g[it] < thr } }
+        val hr = longRuns(src, w, h, lineLen, true)
+        val vr = longRuns(src, w, h, lineLen, false)
         for (i in ink.indices) if (hr[i] || vr[i]) ink[i] = false
         return ink
     }
@@ -333,10 +336,20 @@ object PageInk {
             val area = c.w.toFloat() * c.h / (w.toFloat() * h)
             val m = 0.01f * big
             val border = (if (c.x <= m) 1 else 0) + (if (c.y <= m) 1 else 0) + (if (c.x + c.w >= w - m) 1 else 0) + (if (c.y + c.h >= h - m) 1 else 0)
-            if (border > 0 && area > 0.01f) continue            // fondo/mesa/borde de la foto pegado al canto
-            // (app) trozos de madera/tela pegados al canto: densos o con color de fondo, no trazos de bolígrafo
-            if (border > 0 && (inkn > 0.12f * c.w * c.h || area > 0.002f)) continue
+            if (border > 0) {
+                // Pegado al canto (app; el banco tiraba todo lo > 1 %, y se perdía p. ej. la impresora dibujada de cuaderno1
+                // que roza el borde): fuera si es denso (madera, tela, sombra: ≥ 8 % de tinta), una franja a lo largo del
+                // borde (mesa, canto del móvil) o enorme; un dibujo de trazos sueltos que solo roza el borde se queda.
+                val dens = inkn.toFloat() / (c.w * c.h)
+                val lr = c.x <= m || c.x + c.w >= w - m
+                val tb = c.y <= m || c.y + c.h >= h - m
+                val strip = (lr && c.w < 0.2f * w && c.h > 2.5f * c.w) || (tb && c.h < 0.2f * h && c.w > 2.5f * c.h)
+                if (dens >= 0.08f || strip || area > 0.15f) continue
+            }
             if (area > 0.06f && inkn > 0.2f * c.w * c.h) continue // textura (tela, madera), no trazos
+            // (app) textura más pequeña (madera/tela que asoma junto al borde, sombra con grano): trazos de bolígrafo no
+            // llenan > 10 % de una caja de > 1 % de la página (las palabras sin leer sí, pero son menores)
+            if (area > 0.01f && inkn > 0.1f * c.w * c.h) continue
             out += floatArrayOf(c.x.toFloat(), c.y.toFloat(), (c.x + c.w).toFloat(), (c.y + c.h).toFloat())
         }
         return out
@@ -344,11 +357,11 @@ object PageInk {
 
     /**
      * Recorte SOLO-TINTA: los píxeles que no son tinta (dilatada 3x3) pasan a blanco. [px] se modifica in situ.
-     * [lineLen] y [paperLevel] = los de la página (no los del recorte) para que la decisión sea la misma.
+     * [lineLen] (longitud de raya: 12 % del lado de la página) y [paperLevel] = los de la página, no los del recorte.
      */
     fun inkOnly(px: IntArray, w: Int, h: Int, lineLen: Int, paperLevel: Double? = null) {
         val img = Rgb(w, h, px)
-        val keep = dilateRect(inkMask(img, lineLen, paperLevel), w, h, 3, 3)
+        val keep = dilateRect(inkMask(img, lineLen, paperLevel, rulesOnly = true), w, h, 3, 3)
         for (i in 0 until w * h) if (!keep[i]) px[i] = -1
     }
 

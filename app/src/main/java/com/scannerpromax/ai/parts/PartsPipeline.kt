@@ -145,7 +145,14 @@ class PartsPipeline(private val reader: PartsReader) {
         // líneas sueltas: fuera las de 1–2 caracteres mucho más altas que el texto (dibujos leídos como letras)
         val hsAll = items.map { it.bx[3] - it.bx[1] }.sorted().ifEmpty { listOf(1f) }
         val hmed = hsAll[hsAll.size / 2]
-        val freeOk = free.filter { !(it.text.count { c -> c.isLetterOrDigit() } <= 2 && (it.bx[3] - it.bx[1]) > 2 * hmed) }
+        val ink = PageInk.inkMask(img, max(25, (0.12f * min(w, h)).toInt()), rulesOnly = true)
+        val partOfDrawing = drawingProbe(ink, w, h)
+        fun drawingLetter(it: Item) = it.text.count { c -> c.isLetterOrDigit() } <= 2 &&
+            ((it.bx[3] - it.bx[1]) > 2 * hmed || partOfDrawing(it.bx))
+        val freeOk = free.filter { !drawingLetter(it) }
+        // (app) también dentro de regiones de texto: un trozo de dibujo que Paddle leyó como "2" (la impresora dibujada de
+        // cuaderno1: su tinta sigue mucho más allá de la caja) se queda como dibujo solo-tinta, no como un número gigante.
+        for (r in regs) if (r.type in TEXT_TYPES) r.lines.removeAll { drawingLetter(it) }
         val extra = groupFree(freeOk, w, h)
 
         // ---- herramienta por región
@@ -199,7 +206,6 @@ class PartsPipeline(private val reader: PartsReader) {
         val assigned = regs.flatMap { it.lines }.toHashSet()
         val lb = items.filter { it in assigned || it in freeOk }.map { it.bx }
         val taken = blocks.filter { it.b.type in PICTURE_TYPES || it.b.type == BlockType.TABLE }.map { box(it.b.box) }
-        val ink = PageInk.inkMask(img)
         val drw = PageInk.drawings(img, lb, taken, ink0 = ink)
         for (d in drw) blocks += B(LayoutBlock(type = BlockType.FIGURE, box = lbox(d), role = ROLE_DRAWING), null)
         val ordered = orderBlocks(blocks)
@@ -452,6 +458,27 @@ class PartsPipeline(private val reader: PartsReader) {
                 bold = if (b.type == BlockType.TITLE) true else b.bold,
                 color = color ?: b.color,
             )
+        }
+
+        /**
+         * ¿La caja (de una "letra" suelta) es parte de un dibujo? La tinta conexa (dilatada 3 px) que la toca ocupa una
+         * caja ≥ 4 veces mayor que la propia.
+         */
+        fun drawingProbe(ink: BooleanArray, w: Int, h: Int): (Box) -> Boolean {
+            val dil by lazy { PageInk.dilateRect(ink, w, h, 3, 3) }
+            val cc by lazy { PageInk.components(dil, w, h) }
+            return { b ->
+                val (lab, comps) = cc
+                val seen = HashSet<Int>()
+                for (y in max(0, b[1].toInt()) until min(h, b[3].toInt())) for (x in max(0, b[0].toInt()) until min(w, b[2].toInt())) {
+                    val l = lab[y * w + x]; if (l > 0) seen += l
+                }
+                if (seen.isEmpty()) false else {
+                    val cs = seen.map { comps[it - 1] }
+                    val area = (cs.maxOf { it.x + it.w } - cs.minOf { it.x }).toFloat() * (cs.maxOf { it.y + it.h } - cs.minOf { it.y })
+                    area > 4f * max(1f, (b[2] - b[0]) * (b[3] - b[1]))
+                }
+            }
         }
 
         /** Zonas de Spotting de una tabla: bandas horizontales de ≤ 10 % del alto de la página. */

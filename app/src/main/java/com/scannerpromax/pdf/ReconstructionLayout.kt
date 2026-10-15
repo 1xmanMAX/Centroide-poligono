@@ -171,7 +171,7 @@ object ReconstructionLayout {
         }
         for (b in blocks) {
             when (b.type) {
-                BlockType.TABLE -> planTable(b, map, metrics, bodySizePt, ops)
+                BlockType.TABLE -> planTable(b, map, metrics, bodySizePt, ops, layout.rules)
                 BlockType.FIGURE, BlockType.CHART, BlockType.FORMULA -> planPicture(b, layout, map, metrics, ops)
                 else -> planTextBlock(b, map, metrics, bodyLineH, bodySizePt, ops)
             }
@@ -547,7 +547,7 @@ object ReconstructionLayout {
 
     // ------------------------------------------------------------------------------------------------ tablas
 
-    private fun planTable(b: LayoutBlock, map: ImageToPage, m: ReFontMetrics, bodySizePt: Float?, ops: MutableList<ReOp>) {
+    private fun planTable(b: LayoutBlock, map: ImageToPage, m: ReFontMetrics, bodySizePt: Float?, ops: MutableList<ReOp>, rules: List<List<Float>> = emptyList()) {
         if (v2 && b.ruled != null && b.lines.isNotEmpty() && linesCoverCells(b)) {
             // Tabla con sus líneas reconocidas: texto donde estaba (el reglado, si lo hay, va en DocLayout.rules).
             planTextBlock(b.copy(type = BlockType.TEXT, align = null), map, m, null, bodySizePt, ops)
@@ -567,6 +567,11 @@ object ReconstructionLayout {
         val xs = TableGrid.boundaries(b.box.left, b.box.right, colWeights)
         val ys = TableGrid.boundaries(b.box.top, b.box.bottom, FloatArray(rows) { 1f })
         TableGrid.refineFromLines(xs, ys, cells, b.lines)
+        if (v2 && b.ruled == true) {
+            // Con reglado real: las fronteras de filas/columnas sobre las rayas detectadas (si hay al menos una por frontera).
+            snapToRules(ys, rules.filter { it.size >= 5 && it[1] == it[3] && it[2] - it[0] >= 0.5f * b.box.width && it[1] >= b.box.top - 4 && it[1] <= b.box.bottom + 4 }.map { it[1] })
+            snapToRules(xs, rules.filter { it.size >= 5 && it[0] == it[2] && it[3] - it[1] >= 0.4f * b.box.height && it[0] >= b.box.left - 4 && it[0] <= b.box.right + 4 }.map { it[0] })
+        }
         val px = FloatArray(xs.size) { map.x(xs[it]) }
         val py = FloatArray(ys.size) { map.y(ys[it]) } // decreciente (y hacia arriba)
 
@@ -579,8 +584,9 @@ object ReconstructionLayout {
         for (s in TableGrid.verticalSegments(rows, cols, cells)) segs += Seg(px[s.fixed], py[s.from], px[s.fixed], py[s.to])
         for (s in TableGrid.horizontalSegments(rows, cols, cells)) segs += Seg(px[s.from], py[s.fixed], px[s.to], py[s.fixed])
         val lineW = (min(r.w, r.h) * 0.002f).coerceIn(0.4f, 1.0f)
-        // v2: rejilla solo si la tabla tiene reglado (o no se sabe); sin reglado (bandas de color, sin rayas) no se inventa.
-        if (!(v2 && b.ruled == false)) ops += ReOp.Lines(segs, lineW)
+        // v2: si se sabe si la tabla tiene reglado, la rejilla inventada sobra: con reglado se dibujan sus rayas reales
+        // (DocLayout.rules) y sin él (bandas de color, sin rayas) no se inventa ninguna.
+        if (!(v2 && b.ruled != null)) ops += ReOp.Lines(segs, lineW)
 
         // Texto de las celdas: un tamaño común (el que cabe en la mayoría) acotado por el de cada celda.
         val rowH = r.h / rows
@@ -600,15 +606,30 @@ object ReconstructionLayout {
     }
 
     /**
-     * ¿Las líneas de la tabla traen el texto de sus celdas? (≥ 60 % de las celdas con texto aparecen —casi— tal cual en alguna
+     * ¿Las líneas de la tabla traen el texto de sus celdas? (≥ 50 % de las celdas con texto aparecen —casi— tal cual en alguna
      * línea). Si no (p. ej. celdas de la nube sobre líneas mal leídas por el OCR básico) se dibuja la tabla por celdas.
      */
+    /**
+     * Ajusta las fronteras [bs] (n+1, px) a las posiciones de raya [pos]: rayas agrupadas (< 3 px); si hay al menos
+     * tantas como fronteras se toman las últimas n+1 (las de más arriba/izquierda suelen ser subrayas de la cabecera).
+     */
+    fun snapToRules(bs: FloatArray, pos: List<Float>) {
+        val g = ArrayList<Float>()
+        for (p in pos.sorted()) if (g.isEmpty() || p - g.last() >= 3f) g += p
+        if (g.size < bs.size) return
+        val take = g.takeLast(bs.size)
+        for (i in bs.indices) bs[i] = take[i]
+    }
+
     fun linesCoverCells(b: LayoutBlock): Boolean {
-        val cells = b.cells.map { norm(it.text) }.filter { it.isNotEmpty() }
-        if (cells.isEmpty()) return true
+        val all = b.cells.map { norm(it.text) }.filter { it.isNotEmpty() }
+        if (all.isEmpty()) return true
+        // muy pocas líneas para tantas celdas (Spotting incompleto de una tabla densa): por celdas
+        if (b.lines.size < 0.4f * all.size) return false
+        val cells = all.filter { it.length >= 3 }.ifEmpty { return true }
         val lines = b.lines.map { norm(it.text) }
-        val hit = cells.count { c -> lines.any { l -> l == c || (c.length >= 4 && l.contains(c)) || com.scannerpromax.ai.parts.TextSim.sim(l, c) >= 0.7f } }
-        return hit >= 0.6f * cells.size
+        val hit = cells.count { c -> lines.any { l -> l == c || (c.length >= 4 && l.contains(c)) || (l.length >= 4 && c.contains(l)) || com.scannerpromax.ai.parts.TextSim.sim(l, c) >= 0.8f } }
+        return hit >= 0.5f * cells.size
     }
 
     private fun norm(s: String) = s.lowercase().replace(Regex("\\s+"), " ").trim()

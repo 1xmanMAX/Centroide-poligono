@@ -95,7 +95,7 @@ class PdfReconstructor(private val context: Context) {
             val px = IntArray(small.width * small.height)
             small.getPixels(px, 0, small.width, 0, 0, small.width, small.height)
             val paper = com.scannerpromax.ai.parts.PageInk.percentile(IntArray(px.size) { com.scannerpromax.ai.parts.Rgb.lum(px[it]) }, 90.0)
-            return paper to (maxOf(25, layout.imageWidth / 25) * k).roundToInt().coerceAtLeast(8)
+            return paper to (maxOf(25f, 0.12f * minOf(layout.imageWidth, layout.imageHeight)) * k).roundToInt().coerceAtLeast(8)
         } finally {
             if (small !== src) small.recycle()
         }

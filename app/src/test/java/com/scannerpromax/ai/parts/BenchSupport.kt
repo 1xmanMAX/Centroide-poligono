@@ -173,7 +173,7 @@ object BenchSupport {
             val sx = page.w.toFloat() / layout.imageWidth; val sy = page.h.toFloat() / layout.imageHeight
             ReconstructionRenderer.render(doc, plan, m) { op: ReOp.Image ->
                 val c = page.crop((op.src.left * sx).toInt(), (op.src.top * sy).toInt(), (op.src.right * sx).roundToInt(), (op.src.bottom * sy).roundToInt())
-                if (op.inkOnly) PageInk.inkOnly(c.px, c.w, c.h, max(25, page.w / 25), PageInk.percentile(page.gray(), 90.0))
+                if (op.inkOnly) PageInk.inkOnly(c.px, c.w, c.h, max(25, (0.12f * min(page.w, page.h) * sx).toInt()), PageInk.percentile(page.gray(), 90.0))
                 val f = File.createTempFile("crop", ".jpg")
                 try {
                     TestImages.write(c, f, "jpg")
