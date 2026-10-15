@@ -6,6 +6,7 @@ import android.util.Log
 import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
+import com.scannerpromax.ai.cloud.CloudAlign
 import com.scannerpromax.ai.cloud.CloudException
 import com.scannerpromax.ai.cloud.CloudKeyStore
 import com.scannerpromax.ai.cloud.CloudNetwork
@@ -18,6 +19,14 @@ import androidx.work.WorkManager
 import com.scannerpromax.data.AppSettings
 import com.scannerpromax.data.DocumentRepository
 import com.scannerpromax.data.SettingsRepository
+import com.scannerpromax.ai.parts.DocOrientation
+import com.scannerpromax.ai.parts.LayoutEngine
+import com.scannerpromax.ai.parts.PartsPipeline
+import com.scannerpromax.domain.DocLayout
+import com.scannerpromax.domain.OcrRect
+import com.scannerpromax.domain.OcrResult
+import com.scannerpromax.domain.Page
+import com.scannerpromax.domain.PageEdits
 import com.scannerpromax.domain.Quad
 import com.scannerpromax.imaging.BitmapIO
 import com.scannerpromax.imaging.DeviceTier
@@ -106,6 +115,8 @@ class AiRecognitionQueue(
     private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val recognizer = AiRecognizer(llm)
+    /** Maquetación de páginas + orientación (descarga opcional; sin ella, todo como antes). */
+    private val layoutEngine = LayoutEngine(models, threads = if (tier.isLowRam) 2 else 4)
     private val file = File(appContext.filesDir, "ai/queue.json")
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
@@ -357,6 +368,7 @@ class AiRecognitionQueue(
         } finally {
             withContext(NonCancellable) {
                 runCatching { llm.unload() }
+                runCatching { layoutEngine.close() }
                 _overall.value = null
                 _status.update { m -> m.filterValues { it !is PageStatus.Running } }
             }
@@ -476,17 +488,21 @@ class AiRecognitionQueue(
         val page0 = repo.getPage(j.docId, j.pageId) ?: return
         if (!j.force && repo.hasAiLayout(j.docId, j.pageId)) return
         onProgress(AiRecognizer.Progress(0.01f, "Preparando"))
-        val processed = repo.processedFile(j.docId, page0)
-        val page = repo.getPage(j.docId, j.pageId) ?: return
-        val edits = page.edits
-        // OCR básico de la misma versión: POSICIONES fiables sobre las que se coloca el texto de la nube.
-        val mlkit = runCatching { repo.ensureOcr(j.docId, j.pageId) }.getOrNull()
-        val (fw, fh) = withContext(Dispatchers.IO) { BitmapIO.decodeBounds(processed.absolutePath) }
-        val bmp = withContext(Dispatchers.IO) { BitmapIO.decode(processed.absolutePath, CLOUD_DECODE_PIXELS) }
-        val fullW = if (fw > 0) fw else bmp.width
-        val fullH = if (fh > 0) fh else bmp.height
+        val prep = prepare(j, page0, CLOUD_DECODE_PIXELS, onProgress) ?: return
+        val edits = prep.edits
+        val bmp = prep.bmp
+        val fullW = prep.fullW
+        val fullH = prep.fullH
         val result = try {
-            cloud.read(id, bmp, fullW, fullH, mlkit, onProgress)
+            // OCR básico de la misma versión: POSICIONES fiables sobre las que se coloca el texto de la nube.
+            val mlkit = runCatching { repo.ensureOcr(j.docId, j.pageId) }.getOrNull()
+            // Maquetación LOCAL (regiones PP-DocLayoutV3 si están descargadas + líneas del OCR básico + rayas, fondos,
+            // dibujos y estilo): la geometría del modo híbrido. La nube solo pone el texto.
+            val local = withContext(Dispatchers.Default) {
+                runCatching { localLayoutForCloud(bmp, mlkit, fullW, fullH, prep.rotation, repo.aiDocType(j.docId, j.pageId)) }
+                    .onFailure { Log.w(TAG, "maquetación local para la nube", it) }.getOrNull()
+            }
+            cloud.read(id, bmp, fullW, fullH, mlkit, onProgress, local?.first, local?.second.orEmpty())
         } finally {
             bmp.recycle()
         }
@@ -584,20 +600,27 @@ class AiRecognitionQueue(
         val page0 = repo.getPage(j.docId, j.pageId) ?: return
         if (!j.force && repo.hasAiLayout(j.docId, j.pageId)) return
         onProgress(AiRecognizer.Progress(0.01f, "Preparando"))
-        val processed = repo.processedFile(j.docId, page0)
-        val page = repo.getPage(j.docId, j.pageId) ?: return
-        val edits = page.edits
-        // OCR básico de la misma versión (rápido): base para validar la IA, orientar tablas y alinear el texto de Qwen.
-        val mlkit = runCatching { repo.ensureOcr(j.docId, j.pageId) }.getOrNull()
-        val (fw, fh) = withContext(Dispatchers.IO) { BitmapIO.decodeBounds(processed.absolutePath) }
-        val bmp = withContext(Dispatchers.IO) { BitmapIO.decode(processed.absolutePath, decodePixels()) }
+        val prep = prepare(j, page0, decodePixels(), onProgress) ?: return
+        val edits = prep.edits
+        val bmp = prep.bmp
+        val fullW = prep.fullW
+        val fullH = prep.fullH
         val docType = AiEnhance.docTypeCode(repo.aiDocType(j.docId, j.pageId))
-        val fullW = if (fw > 0) fw else bmp.width
-        val fullH = if (fh > 0) fh else bmp.height
         val result = try {
+            // OCR básico de la misma versión (rápido): base para validar la IA, orientar tablas y alinear el texto de Qwen.
+            val mlkit = runCatching { repo.ensureOcr(j.docId, j.pageId) }.getOrNull()
             when (model.role) {
-                ModelRole.DOCUMENT_READER -> recognizer.readWithPaddle(bmp, fullW, fullH, mlkit, docType, onProgress)
+                ModelRole.DOCUMENT_READER -> {
+                    // Por partes si está la maquetación de páginas; si no (o no sale nada), la tubería de siempre.
+                    val analysis = if (layoutEngine.isReady()) withContext(Dispatchers.Default) { LayoutEngine.toRgb(bmp, LayoutEngine.ANALYSIS_SIDE) } else null
+                    val regions = analysis?.let { a -> withContext(Dispatchers.Default) { layoutEngine.regions(a) } }
+                    val parts = if (analysis != null && regions != null) {
+                        recognizer.readByParts(analysis, regions, fullW, fullH, mlkit, docType, prep.rotation, onProgress)
+                    } else null
+                    parts ?: recognizer.readWithPaddle(bmp, fullW, fullH, mlkit, docType, onProgress)
+                }
                 ModelRole.VISUAL_ASSISTANT -> recognizer.readWithQwen(bmp, fullW, fullH, mlkit, docType, onProgress)
+                ModelRole.PAGE_LAYOUT -> null  // no es un motor de lectura
             }
         } finally {
             bmp.recycle()
@@ -614,6 +637,75 @@ class AiRecognitionQueue(
     }
 
     private fun decodePixels(): Int = if (tier.isLowRam) 4_000_000 else 6_000_000
+
+    /** Página lista para leer: ediciones, procesado decodificado (DERECHO), tamaño completo y giro aplicado por la IA. */
+    private class Prepared(val edits: PageEdits, val bmp: Bitmap, val fullW: Int, val fullH: Int, val rotation: Int)
+
+    /**
+     * Decodifica el procesado de la página y, si está la "Maquetación de páginas", comprueba la ORIENTACIÓN
+     * (PP-LCNet doc_ori, voto de 5 recortes; 20–90 ms): una página girada se endereza en sus ediciones (giro horario
+     * tras el recorte), así la imagen procesada, la miniatura, el PDF y las coordenadas de la maquetación quedan
+     * derechos y coherentes. Se hace aquí (antes de la IA) y no en la tubería de página porque en fotos reales acierta
+     * el 82–94 %: un giro equivocado se nota mucho y solo compensa cuando la IA va a leer (Paddle lee en vertical
+     * inventando texto). Solo si la página no tiene ya un giro (respeta el del usuario y evita girar dos veces).
+     */
+    private suspend fun prepare(j: AiJob, page0: Page, decodePx: Int, onProgress: (AiRecognizer.Progress) -> Unit): Prepared? {
+        val repo = documents()
+        var processed = repo.processedFile(j.docId, page0)
+        var page = repo.getPage(j.docId, j.pageId) ?: return null
+        var bmp = withContext(Dispatchers.IO) { BitmapIO.decode(processed.absolutePath, decodePx) }
+        var rotation = 0
+        try {
+            if (page.edits.rotation == 0 && layoutEngine.isReady()) {
+                onProgress(AiRecognizer.Progress(0.02f, "Comprobando la orientación"))
+                val o = withContext(Dispatchers.Default) { layoutEngine.orientation(bmp) }
+                val ccw = o?.let { DocOrientation.correction(it) } ?: 0
+                Log.i(TAG, "${j.key}: orientación ${o?.angle}° (conf ${o?.confidence}) → giro $ccw°")
+                if (ccw != 0) {
+                    val newEdits = page.edits.copy(rotation = DocOrientation.clockwise(ccw))
+                    val updated = selfEdit(j) { repo.updateEdits(j.docId, j.pageId, newEdits) }
+                    if (updated != null && updated.edits == newEdits) {
+                        onProgress(AiRecognizer.Progress(0.03f, "Enderezando la página"))
+                        processed = repo.processedFile(j.docId, updated)
+                        page = repo.getPage(j.docId, j.pageId) ?: return null
+                        bmp.recycle()
+                        bmp = withContext(Dispatchers.IO) { BitmapIO.decode(processed.absolutePath, decodePx) }
+                        rotation = ccw
+                        _notices.tryEmit("Página ${pageNumber(j)} enderezada (estaba girada ${o!!.angle}°). Puedes deshacerlo en el editor.")
+                    }
+                }
+            }
+            val (fw, fh) = withContext(Dispatchers.IO) { BitmapIO.decodeBounds(processed.absolutePath) }
+            return Prepared(page.edits, bmp, if (fw > 0) fw else bmp.width, if (fh > 0) fh else bmp.height, rotation)
+        } catch (t: Throwable) {
+            bmp.recycle()
+            throw t
+        }
+    }
+
+    /**
+     * Maquetación local para el modo nube híbrido: regiones PP-DocLayoutV3 (si está la descarga) + líneas del OCR básico
+     * (posiciones fiables) + rayas, fondos, dibujos y estilo ([PartsPipeline] sin modelo de lectura). Devuelve la
+     * maquetación (px de la imagen completa) y las regiones para [CloudAlign.LocalRegion].
+     */
+    private suspend fun localLayoutForCloud(bmp: Bitmap, mlkit: OcrResult?, fullW: Int, fullH: Int, rotation: Int, aiDocType: String?): Pair<DocLayout, List<CloudAlign.LocalRegion>> {
+        val a = LayoutEngine.toRgb(bmp, LayoutEngine.ANALYSIS_SIDE)
+        val regions = if (layoutEngine.isReady()) layoutEngine.regions(a).orEmpty() else emptyList()
+        val sx = a.w.toFloat() / fullW; val sy = a.h.toFloat() / fullH
+        val lines = mlkit?.let { AiRecognizer.scaleOcr(it, fullW, fullH) }?.blocks?.flatMap { it.lines }.orEmpty()
+            .filter { it.text.isNotBlank() }
+            .map { l ->
+                val x0 = l.box.left * sx; val y0 = l.box.top * sy; val x1 = l.box.right * sx; val y1 = l.box.bottom * sy
+                PartsPipeline.Item(l.text, floatArrayOf(x0, y0, x1, y0, x1, y1, x0, y1), floatArrayOf(x0, y0, x1, y1))
+            }
+        val docType = AiEnhance.docTypeCode(aiDocType)
+        val out = PartsPipeline(PartsPipeline.NoReader).run(PartsPipeline.Input(a, regions, docType, ModelCatalog.PAGE_LAYOUT.id, rotation, presetLines = lines))
+        val layout = PartsPipeline.scaleLayout(out.layout, fullW, fullH)
+        val local = regions.map { r ->
+            CloudAlign.LocalRegion(r.type, OcrRect(r.box[0] / sx, r.box[1] / sy, r.box[2] / sx, r.box[3] / sy), r.score)
+        }
+        return layout to local
+    }
 
     companion object {
         private const val TAG = "AiRecognitionQueue"

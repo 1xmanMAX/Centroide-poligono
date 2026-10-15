@@ -31,6 +31,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CloudDownload
 import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Dashboard
 import androidx.compose.material.icons.rounded.DocumentScanner
 import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.PhotoLibrary
@@ -244,7 +245,7 @@ fun AiModelsScreen(container: AppContainer, onBack: () -> Unit) {
             val missing = ModelCatalog.all.filter { states[it.id] !is ModelState.Ready }
             if (missing.size > 1) {
                 GradientButton(
-                    text = "Descargar ambos (${formatBytes(missing.sumOf { it.totalDownloadBytes })})",
+                    text = (if (missing.size == 2) "Descargar ambos (" else "Descargar todos (") + "${formatBytes(missing.sumOf { it.totalDownloadBytes })})",
                     onClick = { missing.forEach { download(it) } },
                     icon = Icons.Rounded.CloudDownload,
                     modifier = Modifier.fillMaxWidth(),
@@ -309,7 +310,13 @@ private fun ModelCard(
     val brand = MaterialTheme.brand
     BrandCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            IconBadge(if (model.role == ModelRole.DOCUMENT_READER) Icons.Rounded.DocumentScanner else Icons.Rounded.Visibility)
+            IconBadge(
+                when (model.role) {
+                    ModelRole.DOCUMENT_READER -> Icons.Rounded.DocumentScanner
+                    ModelRole.PAGE_LAYOUT -> Icons.Rounded.Dashboard
+                    else -> Icons.Rounded.Visibility
+                },
+            )
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(model.name, style = MaterialTheme.typography.titleMedium)
@@ -410,7 +417,7 @@ private fun ProgressLine(done: Long, total: Long, label: String) {
 private fun TestSection(container: AppContainer, states: Map<String, ModelState>, available: Boolean) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val readyModels = ModelCatalog.all.filter { states[it.id] is ModelState.Ready }
+    val readyModels = ModelCatalog.all.filter { it.isLlm && states[it.id] is ModelState.Ready }
     var modelId by remember { mutableStateOf<String?>(null) }
     val model = readyModels.firstOrNull { it.id == modelId } ?: readyModels.firstOrNull()
     var taskPrompt by remember(model?.id) { mutableStateOf(model?.tasks?.firstOrNull()?.prompt ?: "") }

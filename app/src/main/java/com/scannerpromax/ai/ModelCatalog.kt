@@ -119,7 +119,52 @@ object ModelCatalog {
         ),
     )
 
-    val all: List<AiModel> = listOf(DOCUMENT_READER, VISUAL_ASSISTANT)
+    /**
+     * Maquetación de páginas: PP-DocLayoutV3 (detector RT-DETR con orden de lectura, Apache 2.0) + PP-LCNet doc_ori
+     * (orientación). No es un modelo de lenguaje: se ejecuta con ONNX Runtime / OpenCV DNN (incluidos en la app) en
+     * ~1–3 s por página. Banco recon2: bloques DocLayNet recall 0,72 frente a 0,34 de la maquetación clásica; páginas
+     * giradas 94/96. Variante fp32 oficial (la int8 total pierde 7 puntos de recall y la int8-MatMul no está publicada).
+     */
+    val PAGE_LAYOUT = AiModel(
+        id = "pp-doclayoutv3",
+        name = "Maquetación de páginas",
+        technicalName = "PP-DocLayoutV3 + PP-LCNet doc_ori (ONNX)",
+        license = "Apache 2.0",
+        purpose = "Reconstruye el documento POR PARTES: localiza títulos, párrafos, tablas, gráficos, fórmulas, imágenes, " +
+            "cabeceras y pies con su orden de lectura, y endereza las páginas giradas. Mejora mucho el PDF reconstruido " +
+            "con el Lector de documentos y con la IA en la nube.",
+        description = "Detector de maquetación de documentos (no lee texto): cada región va a la herramienta adecuada.",
+        role = ModelRole.PAGE_LAYOUT,
+        files = listOf(
+            ModelFile(
+                kind = FileKind.ONNX,
+                fileName = LAYOUT_FILE,
+                url = hf("PaddlePaddle/PP-DocLayoutV3_onnx", "inference.onnx"),
+                sizeBytes = 130_502_049L,
+                sha256 = "45bf71750b00739a41fc209f132eb104a4d6b5bb29483c9078164d8b87cf28ba",
+            ),
+            ModelFile(
+                kind = FileKind.ONNX,
+                fileName = ORIENTATION_FILE,
+                url = hf("PaddlePaddle/PP-LCNet_x1_0_doc_ori_onnx", "inference.onnx"),
+                sizeBytes = 6_788_069L,
+                sha256 = "af9a0a4f317ff0709ce752067807f819cb15d883f8ecad89f28df1c6ee2d9c92",
+            ),
+        ),
+        recommendedRamMb = 3072,
+        minRamMb = 2048,
+        onDeviceQuantization = null,
+        defaults = GenerationDefaults(
+            temperature = 0f, maxTokens = 0, contextSize = 0, maxImageTokens = 0, maxImageSide = 800,
+            repeatPenalty = 1f, useChatTemplate = false, enableThinking = false,
+        ),
+        tasks = emptyList(),
+    )
+
+    const val LAYOUT_FILE = "pp_doclayoutv3.onnx"
+    const val ORIENTATION_FILE = "pp_lcnet_doc_ori.onnx"
+
+    val all: List<AiModel> = listOf(DOCUMENT_READER, VISUAL_ASSISTANT, PAGE_LAYOUT)
 
     /** Píxeles máximos de imagen para Paddle (image_max_pixels del GGUF = 1280 tokens). */
     const val PADDLE_MAX_PIXELS = 1_003_520
@@ -148,9 +193,13 @@ object ModelCatalog {
         "https://huggingface.co/$repo/resolve/$revision/$file"
 }
 
-enum class ModelRole { DOCUMENT_READER, VISUAL_ASSISTANT }
+enum class ModelRole {
+    DOCUMENT_READER, VISUAL_ASSISTANT,
+    /** Detector de maquetación + orientación (ONNX, no es un LLM; no es un motor de reconocimiento por sí solo). */
+    PAGE_LAYOUT,
+}
 
-enum class FileKind { LLM, MMPROJ }
+enum class FileKind { LLM, MMPROJ, ONNX }
 
 /** Valores de llama_ftype de llama.cpp. */
 enum class QuantType(val ftype: Int, val label: String) {
@@ -222,6 +271,8 @@ data class AiModel(
 ) {
     val totalDownloadBytes: Long get() = files.sumOf { it.sizeBytes.coerceAtLeast(0) }
     val llmFile: ModelFile get() = files.first { it.kind == FileKind.LLM }
+    /** ¿Es un modelo de lenguaje (llama.cpp)? Los ONNX (maquetación) no se cargan en LlmEngine ni se prueban con prompts. */
+    val isLlm: Boolean get() = files.any { it.kind == FileKind.LLM }
     val mmprojFile: ModelFile? get() = files.firstOrNull { it.kind == FileKind.MMPROJ }
 
     fun task(id: String): ModelTask? = tasks.firstOrNull { it.id == id }

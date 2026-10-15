@@ -80,6 +80,8 @@ android {
             useLegacyPackaging = true
             // OpenCV trae su propio libc++_shared.so; el del NDK 27 (llama.cpp) es más nuevo y compatible hacia atrás.
             pickFirsts += setOf("**/libc++_shared.so")
+            // Sin x86 de 32 bits (como los splits): ONNX Runtime y OpenCV lo traen y engordaría el APK universal.
+            excludes += setOf("lib/x86/**")
         }
     }
 }
@@ -146,7 +148,13 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
 
+    // Maquetación de páginas (PP-DocLayoutV3, descarga opcional): OpenCV 4.10 no carga el modelo (Range/GridSample) y
+    // OpenCV 5 da otras detecciones (banco recon2_app) → ONNX Runtime (APK: +12,9 MB arm64 / +11,6 MB armeabi-v7a).
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.31.0")
+
     testImplementation("junit:junit:4.13.2")
+    // Tests JVM con los modelos ONNX del banco (si existen): misma API Java que la de Android.
+    testImplementation("com.microsoft.onnxruntime:onnxruntime:1.31.0")
 }
 
 // Tests JVM con pdfbox-android (PDF reconstruido): sus recursos (cmaps, glyphlist) van en los assets del AAR, que en
@@ -167,7 +175,11 @@ tasks.matching { it.name.startsWith("process") && it.name.endsWith("UnitTestJava
     .configureEach { dependsOn(unpackPdfboxTestAssets) }
 // Muestras del PDF reconstruido para revisarlas a ojo: ./gradlew testDebugUnitTest -PreconOut=DIR [-PreconImages=DIR]
 tasks.withType<Test>().configureEach {
-    listOf("reconOut" to "recon.out", "reconImages" to "recon.images").forEach { (p, sp) ->
+    listOf(
+        "reconOut" to "recon.out", "reconImages" to "recon.images",
+        // Banco recon2 en la app (Recon2AppBenchTest): salida, páginas, puerto de llama-server, etapas.
+        "r2appOut" to "r2app.out", "r2appOnly" to "r2app.only", "r2appPort" to "r2app.port", "r2appStage" to "r2app.stage",
+    ).forEach { (p, sp) ->
         (project.findProperty(p) as String?)?.let { systemProperty(sp, it) }
     }
 }

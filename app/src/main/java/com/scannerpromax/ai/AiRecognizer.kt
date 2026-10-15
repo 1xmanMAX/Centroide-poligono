@@ -9,6 +9,10 @@ import com.scannerpromax.ai.AiLayout.IRect
 import com.scannerpromax.ai.parse.IaParse
 import com.scannerpromax.ai.parse.IaText
 import com.scannerpromax.ai.parse.LoopGuard
+import com.scannerpromax.ai.parts.PartsPipeline
+import com.scannerpromax.ai.parts.PartsReader
+import com.scannerpromax.ai.parts.PpLayout
+import com.scannerpromax.ai.parts.Rgb
 import com.scannerpromax.domain.BlockType
 import com.scannerpromax.domain.DocLayout
 import com.scannerpromax.domain.LayoutBlock
@@ -166,7 +170,7 @@ class AiRecognizer(private val llm: LlmEngine) {
             )
             val crop = cropScaled(page, ext, rw, rh)
             val chart = try {
-                crop.use { generate(model, model.task("chart")!!, it, LoopGuard.Mode.TEXT, expectTokens = 150, stepProgress("Leyendo gráfico")) }
+                crop.use { generate(model, model.task("chart")!!, it, LoopGuard.Mode.TEXT, expectTokens = 150, onFraction = stepProgress("Leyendo gráfico")) }
             } catch (e: LlmException) { Log.w(TAG, "gráfico", e); null }
             step++
             val data = chart?.let { IaParse.parseChart(it.text) }?.takeIf { plausibleChart(it) }
@@ -204,7 +208,7 @@ class AiRecognizer(private val llm: LlmEngine) {
             if (r.w < 4 || r.h < 4) { step++; continue }
             val crop = cropScaled(page, r, rw, rh)
             val g = try {
-                crop.use { c -> generate(model, model.task("formula")!!, c, LoopGuard.Mode.TEXT, expectTokens = 60, stepProgress("Leyendo fórmula")) }
+                crop.use { c -> generate(model, model.task("formula")!!, c, LoopGuard.Mode.TEXT, expectTokens = 60, onFraction = stepProgress("Leyendo fórmula")) }
             } catch (e: LlmException) { Log.w(TAG, "fórmula", e); null }
             step++
             val f = g?.takeIf { !it.looped }?.let { IaParse.parseFormula(it.text) } ?: continue
@@ -325,6 +329,78 @@ class AiRecognizer(private val llm: LlmEngine) {
         return nums >= data.size * 0.5f
     }
 
+    // ------------------------------------------------------------------------------------------ por partes
+
+    /**
+     * Reconstrucción POR PARTES (banco recon2; [PartsPipeline]): regiones de PP-DocLayoutV3 ([regions], en px de
+     * [analysis]) → Spotting de página o por región → tabla/gráfico/fórmula por recorte → dibujos, rayas, fondos y
+     * estilo. [analysis] = página procesada (ya derecha) reducida a ≤ 1600 px, que es también lo que ve el modelo.
+     * Coordenadas de salida en [fullW] x [fullH]. null si no sale texto utilizable (el llamador prueba lo de siempre).
+     */
+    suspend fun readByParts(
+        analysis: Rgb,
+        regions: List<PpLayout.Region>,
+        fullW: Int,
+        fullH: Int,
+        mlkit: OcrResult?,
+        docType: String?,
+        rotation: Int,
+        onProgress: (Progress) -> Unit,
+    ): PageResult? {
+        val model = ModelCatalog.DOCUMENT_READER
+        val reader = PaddlePartsReader(analysis, model) { f, label -> onProgress(Progress(f, label)) }
+        val res = PartsPipeline(reader).run(
+            PartsPipeline.Input(analysis, regions, docType, model.id + "+" + ModelCatalog.PAGE_LAYOUT.id, rotation),
+        ) { f, label -> reader.base = f; onProgress(Progress(f, label)) }
+        val layout = PartsPipeline.scaleLayout(res.layout, fullW, fullH)
+        val ocr = PartsPipeline.ocrOf(layout)
+        val mlChars = mlkit?.let { AiLayout.letters(it.text) } ?: 0
+        if (AiLayout.isGarbage(AiLayout.letters(ocr.text), mlChars, looped = false)) return null
+        Log.i(TAG, "por partes: modo=${res.meta.mode} regiones=${res.meta.regions} libres=${res.meta.freeBlocks} rayas=${res.meta.rules} " +
+            "fondos=${res.meta.fills} dibujos=${res.meta.drawings} llamadas=${res.meta.calls}")
+        val warning = if (res.meta.pageLooped) "La IA se repetía al leer la página entera; se leyó por partes" else null
+        return PageResult(ocr, layout, warning)
+    }
+
+    /** [PartsReader] con PaddleOCR-VL (ya cargado): recortes de la imagen analizada. */
+    private inner class PaddlePartsReader(
+        private val img: Rgb,
+        private val model: AiModel,
+        private val progress: (Float, String) -> Unit,
+    ) : PartsReader {
+        @Volatile var base = 0f
+
+        private fun bitmapOf(b: FloatArray?): Bitmap {
+            val c = if (b == null) img else img.crop(b[0].toInt(), b[1].toInt(), kotlin.math.ceil(b[2]).toInt(), kotlin.math.ceil(b[3]).toInt())
+            return Bitmap.createBitmap(c.px, c.w, c.h, Bitmap.Config.ARGB_8888)
+        }
+
+        private suspend fun run(taskId: String, bmp: Bitmap, mode: LoopGuard.Mode, expect: Int, maxTokens: Int?, label: String): PartsReader.Out = try {
+            val g = generate(model, model.task(taskId)!!, bmp, mode, expect, maxTokens) { f -> progress(base, "$label ${(f * 100).toInt()} %") }
+            PartsReader.Out(g.text, g.looped || g.result.stopReason == StopReason.MAX_TOKENS)
+        } finally {
+            bmp.recycle()
+        }
+
+        override suspend fun spotting(crop: FloatArray?, maxTokens: Int): PartsReader.Out =
+            run("spotting", bitmapOf(crop), LoopGuard.Mode.SPOTTING, if (crop == null) 900 else maxTokens / 3, maxTokens, "Leyendo texto")
+
+        override suspend fun table(pieces: List<PartsReader.Piece>): PartsReader.Out {
+            val parts = pieces.map { bitmapOf(it.src) }
+            val w = pieces.indices.maxOf { (pieces[it].dstX + parts[it].width).toInt() }.coerceAtLeast(1)
+            val h = parts.maxOf { it.height }.coerceAtLeast(1)
+            val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            val c = Canvas(out)
+            c.drawColor(Color.WHITE)
+            parts.forEachIndexed { i, p -> c.drawBitmap(p, pieces[i].dstX, 0f, null); p.recycle() }
+            return run("table", out, LoopGuard.Mode.OTSL, 600, null, "Leyendo tabla")
+        }
+
+        override suspend fun chart(crop: FloatArray): PartsReader.Out = run("chart", bitmapOf(crop), LoopGuard.Mode.TEXT, 150, null, "Leyendo gráfico")
+
+        override suspend fun formula(crop: FloatArray): PartsReader.Out = run("formula", bitmapOf(crop), LoopGuard.Mode.TEXT, 60, null, "Leyendo fórmula")
+    }
+
     // ------------------------------------------------------------------------------------------ Qwen
 
     /**
@@ -376,6 +452,7 @@ class AiRecognizer(private val llm: LlmEngine) {
         image: Bitmap,
         mode: LoopGuard.Mode,
         expectTokens: Int,
+        maxTokensOverride: Int? = null,
         onFraction: (Float) -> Unit,
     ): Gen = coroutineScope {
         val d = model.defaults
@@ -400,7 +477,7 @@ class AiRecognizer(private val llm: LlmEngine) {
                 LlmRequest(
                     prompt = task.prompt,
                     images = listOf(image),
-                    maxTokens = if (task.maxTokens > 0) task.maxTokens else d.maxTokens,
+                    maxTokens = maxTokensOverride ?: if (task.maxTokens > 0) task.maxTokens else d.maxTokens,
                     temperature = d.temperature,
                     repeatPenalty = d.repeatPenalty,
                     presencePenalty = task.presencePenalty,

@@ -53,11 +53,15 @@ class ModelStorage(val root: File) {
 
     /** Rutas para cargar el modelo (prefiere el LLM cuantizado en el dispositivo si existe). */
     fun resolvePaths(model: AiModel): Pair<File, File?>? {
-        if (!isReady(model)) return null
+        if (!isReady(model) || !model.isLlm) return null
         val llm = quantizedFile(model)?.takeIf { hasQuantized(model) } ?: file(model, model.llmFile)
         val mm = model.mmprojFile?.let { file(model, it) }
         return llm to mm
     }
+
+    /** Archivo descargado [fileName] del modelo si está completo (modelos ONNX). */
+    fun readyFile(model: AiModel, fileName: String): File? =
+        model.files.firstOrNull { it.fileName == fileName }?.takeIf { isComplete(model, it) }?.let { file(model, it) }
 
     fun delete(model: AiModel): Boolean {
         val d = dir(model)

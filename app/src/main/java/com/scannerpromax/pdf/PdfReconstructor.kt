@@ -76,8 +76,10 @@ class PdfReconstructor(private val context: Context) {
             val source = bmp
             val k = if (source != null) source.width.toFloat() / layout.imageWidth else 1f
             val binary = binaryHint ?: false
+            // Recortes SOLO-TINTA (dibujos sueltos): papel y longitud de raya de la PÁGINA, no del recorte.
+            val ink = if (source != null && crops.any { it.inkOnly }) inkParams(source, layout, k) else null
             val page = ReconstructionRenderer.render(doc, plan, metrics) { op ->
-                source?.let { cropImage(doc, it, op, k, binary, options.quality) }
+                source?.let { cropImage(doc, it, op, k, binary, options.quality, ink) }
             }
             return page.mediaBox
         } finally {
@@ -85,12 +87,37 @@ class PdfReconstructor(private val context: Context) {
         }
     }
 
-    private fun cropImage(doc: PDDocument, src: Bitmap, op: ReOp.Image, k: Float, binary: Boolean, quality: ExportQuality): PDImageXObject? {
+    /** (nivel del papel, longitud mínima de raya en px de [src]) para los recortes solo-tinta. */
+    private fun inkParams(src: Bitmap, layout: DocLayout, k: Float): Pair<Double, Int> {
+        val s = minOf(1f, 400f / maxOf(src.width, src.height))
+        val small = if (s < 1f) Bitmap.createScaledBitmap(src, maxOf(1, (src.width * s).roundToInt()), maxOf(1, (src.height * s).roundToInt()), true) else src
+        try {
+            val px = IntArray(small.width * small.height)
+            small.getPixels(px, 0, small.width, 0, 0, small.width, small.height)
+            val paper = com.scannerpromax.ai.parts.PageInk.percentile(IntArray(px.size) { com.scannerpromax.ai.parts.Rgb.lum(px[it]) }, 90.0)
+            return paper to (maxOf(25, layout.imageWidth / 25) * k).roundToInt().coerceAtLeast(8)
+        } finally {
+            if (small !== src) small.recycle()
+        }
+    }
+
+    private fun cropImage(
+        doc: PDDocument, src: Bitmap, op: ReOp.Image, k: Float, binary: Boolean, quality: ExportQuality,
+        ink: Pair<Double, Int>? = null,
+    ): PDImageXObject? {
         val l = (op.src.left * k).roundToInt().coerceIn(0, src.width - 1)
         val t = (op.src.top * k).roundToInt().coerceIn(0, src.height - 1)
         val r = (op.src.right * k).roundToInt().coerceIn(l + 1, src.width)
         val b = (op.src.bottom * k).roundToInt().coerceIn(t + 1, src.height)
-        val crop = Bitmap.createBitmap(src, l, t, r - l, b - t)
+        val crop0 = Bitmap.createBitmap(src, l, t, r - l, b - t)
+        val crop = if (op.inkOnly && ink != null) {
+            val w = crop0.width; val h = crop0.height
+            val px = IntArray(w * h)
+            crop0.getPixels(px, 0, w, 0, 0, w, h)
+            com.scannerpromax.ai.parts.PageInk.inkOnly(px, w, h, ink.second, ink.first)
+            if (crop0 !== src) crop0.recycle()
+            Bitmap.createBitmap(px, w, h, Bitmap.Config.ARGB_8888)
+        } else crop0
         return try {
             if (binary) PdfSupport.binaryImage(doc, crop) else PdfSupport.jpegImage(doc, crop, quality.jpegQuality)
         } catch (e: Exception) {

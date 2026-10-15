@@ -56,7 +56,11 @@ sealed class ReOp {
     ) : ReOp()
 
     /** Recorte [src] (px de la imagen del DocLayout) de la imagen procesada, dibujado en ([x], [y], [w], [h]). */
-    data class Image(val src: PxRect, val x: Float, val y: Float, val w: Float, val h: Float, val kind: BlockType) : ReOp()
+    data class Image(
+        val src: PxRect, val x: Float, val y: Float, val w: Float, val h: Float, val kind: BlockType,
+        /** Recorte SOLO-TINTA (dibujo/trazo suelto): el fondo del recorte se pinta de blanco (sin bordes ni texturas). */
+        val inkOnly: Boolean = false,
+    ) : ReOp()
 
     /** Segmentos rectos (rejilla de tabla). */
     data class Lines(val segments: List<Seg>, val width: Float, val rgb: Int = 0x000000) : ReOp()
@@ -107,6 +111,8 @@ object ReconstructionLayout {
     const val MIN_ANGLE_DEG = 0.35f
 
     private const val BLACK = 0x000000
+    /** LayoutBlock.role de los trazos sueltos (tubería por partes): recorte solo-tinta. */
+    const val DRAWING_ROLE = "dibujo"
 
     /** Maquetación v2 (recon2): tamaño común por párrafo, sin estirar letras, alineación, rayas y fondos. */
     @JvmStatic @Volatile var enableV2: Boolean = true
@@ -517,7 +523,7 @@ object ReconstructionLayout {
         )
         if (src.width < 2 || src.height < 2) return
         val r = pageRect(LayoutBox(src.left.toFloat(), src.top.toFloat(), src.right.toFloat(), src.bottom.toFloat()), map)
-        ops += ReOp.Image(src, r.x, r.y, r.w, r.h, b.type)
+        ops += ReOp.Image(src, r.x, r.y, r.w, r.h, b.type, inkOnly = b.role == DRAWING_ROLE)
         // Datos buscables (invisibles) sobre el recorte: no se dibuja nada inventado.
         val hidden = when (b.type) {
             BlockType.FORMULA -> b.latex?.takeIf { it.isNotBlank() } ?: b.text
@@ -542,7 +548,7 @@ object ReconstructionLayout {
     // ------------------------------------------------------------------------------------------------ tablas
 
     private fun planTable(b: LayoutBlock, map: ImageToPage, m: ReFontMetrics, bodySizePt: Float?, ops: MutableList<ReOp>) {
-        if (v2 && b.ruled != null && b.lines.isNotEmpty()) {
+        if (v2 && b.ruled != null && b.lines.isNotEmpty() && linesCoverCells(b)) {
             // Tabla con sus líneas reconocidas: texto donde estaba (el reglado, si lo hay, va en DocLayout.rules).
             planTextBlock(b.copy(type = BlockType.TEXT, align = null), map, m, null, bodySizePt, ops)
             return
@@ -573,7 +579,8 @@ object ReconstructionLayout {
         for (s in TableGrid.verticalSegments(rows, cols, cells)) segs += Seg(px[s.fixed], py[s.from], px[s.fixed], py[s.to])
         for (s in TableGrid.horizontalSegments(rows, cols, cells)) segs += Seg(px[s.from], py[s.fixed], px[s.to], py[s.fixed])
         val lineW = (min(r.w, r.h) * 0.002f).coerceIn(0.4f, 1.0f)
-        ops += ReOp.Lines(segs, lineW)
+        // v2: rejilla solo si la tabla tiene reglado (o no se sabe); sin reglado (bandas de color, sin rayas) no se inventa.
+        if (!(v2 && b.ruled == false)) ops += ReOp.Lines(segs, lineW)
 
         // Texto de las celdas: un tamaño común (el que cabe en la mayoría) acotado por el de cada celda.
         val rowH = r.h / rows
@@ -591,6 +598,20 @@ object ReconstructionLayout {
             ops += fitParagraph(c.text, ReFont.REGULAR, rr, m, min(common, maxSize), visible = true, alignRight = numeric, centerVertically = true)
         }
     }
+
+    /**
+     * ¿Las líneas de la tabla traen el texto de sus celdas? (≥ 60 % de las celdas con texto aparecen tal cual en alguna
+     * línea). Si no (p. ej. celdas de la nube sobre líneas mal leídas por el OCR básico) se dibuja la tabla por celdas.
+     */
+    fun linesCoverCells(b: LayoutBlock): Boolean {
+        val cells = b.cells.map { norm(it.text) }.filter { it.isNotEmpty() }
+        if (cells.isEmpty()) return true
+        val lines = b.lines.map { norm(it.text) }
+        val hit = cells.count { c -> lines.any { l -> l == c || (c.length >= 4 && l.contains(c)) } }
+        return hit >= 0.6f * cells.size
+    }
+
+    private fun norm(s: String) = s.lowercase().replace(Regex("\\s+"), " ").trim()
 
     private fun isNumeric(s: String): Boolean {
         val t = s.trim()

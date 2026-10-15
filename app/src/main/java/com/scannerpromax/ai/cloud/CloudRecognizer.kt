@@ -5,6 +5,8 @@ import android.util.Log
 import com.scannerpromax.ai.AiEnhance
 import com.scannerpromax.ai.AiLayout
 import com.scannerpromax.ai.AiRecognizer
+import com.scannerpromax.ai.parts.HybridFuse
+import com.scannerpromax.domain.DocLayout
 import com.scannerpromax.domain.OcrResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -46,6 +48,8 @@ class CloudRecognizer(private val keys: CloudKeyStore, private val usage: CloudU
         fullH: Int,
         mlkit: OcrResult?,
         onProgress: (AiRecognizer.Progress) -> Unit,
+        local: DocLayout? = null,
+        localRegions: List<CloudAlign.LocalRegion> = emptyList(),
     ): AiRecognizer.PageResult? {
         val provider = provider(id)
         onProgress(AiRecognizer.Progress(0.05f, "Preparando la imagen"))
@@ -54,6 +58,8 @@ class CloudRecognizer(private val keys: CloudKeyStore, private val usage: CloudU
             provider, req, fullW, fullH, mlkit,
             record = { t -> usage.record(id, t, page = true) },
             onProgress = onProgress,
+            local = local,
+            localRegions = localRegions,
         )
     }
 
@@ -127,6 +133,9 @@ object CloudPipeline {
         record: (CloudUsageTokens) -> Unit,
         onProgress: (AiRecognizer.Progress) -> Unit,
         sleep: suspend (Long) -> Unit = { delay(it) },
+        /** Maquetación LOCAL (px de fullW x fullH) para el modo híbrido: geometría local + texto de la nube. */
+        local: DocLayout? = null,
+        localRegions: List<CloudAlign.LocalRegion> = emptyList(),
     ): AiRecognizer.PageResult? {
         val name = provider.id.company
         onProgress(AiRecognizer.Progress(0.15f, "Enviando a $name"))
@@ -143,11 +152,20 @@ object CloudPipeline {
         val mlChars = mlkit?.let { AiLayout.letters(it.text) } ?: 0
         if (AiLayout.isGarbage(AiLayout.letters(page.text), mlChars, looped = false)) return null
         val docType = AiEnhance.docTypeCode(page.docType)
-        val r = CloudAlign.align(page, fullW, fullH, mlkit, docType, engine = "nube:" + provider.id.model)
+        val engine = "nube:" + provider.id.model
+        val r = CloudAlign.align(page, fullW, fullH, mlkit, docType, engine = engine, local = localRegions)
+        // Híbrido (banco recon2): posiciones, rayas, fondos, dibujos y estilo locales + texto/celdas de la nube. La capa de
+        // texto (OCR) sigue siendo la de CloudAlign: texto de la nube sobre las palabras del OCR básico.
+        val layout = local?.let { loc ->
+            runCatching {
+                val cloudPx = HybridFuse.cloudLayout(page, fullW, fullH).copy(engine = engine)
+                HybridFuse.fuse(loc.copy(docType = loc.docType ?: docType), cloudPx).first
+            }.getOrNull()?.takeIf { it.blocks.isNotEmpty() }
+        } ?: r.layout
         onProgress(AiRecognizer.Progress(1f, "Listo"))
         val warning = r.warning ?: page.rotation.takeIf { it != 0 }?.let {
             "La IA cree que la página está girada ($it°); gírala en el editor y vuelve a leerla"
         }
-        return AiRecognizer.PageResult(r.ocr, r.layout, warning)
+        return AiRecognizer.PageResult(r.ocr, layout, warning)
     }
 }
