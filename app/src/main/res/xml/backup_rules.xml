@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Copia de seguridad automática (Android 6–11): todo salvo las claves de API de la IA en la nube (cifradas con el
+     Keystore de ESTE teléfono: en otro no servirían y no deben salir del dispositivo). -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="cloud_secrets.xml" />
+</full-backup-content>

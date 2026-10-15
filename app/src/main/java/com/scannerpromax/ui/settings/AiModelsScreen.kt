@@ -182,12 +182,17 @@ fun AiModelsScreen(container: AppContainer, onBack: () -> Unit) {
             BrandCard(contentPadding = PaddingValues(vertical = 4.dp)) {
                 RecognitionEngine.entries.forEach { engine ->
                     val model = engine.role?.let { ModelCatalog.forRole(it) }
-                    val ready = model == null || states[model.id] is ModelState.Ready
+                    val cloudOk = engine.cloud?.let { container.cloudKeys.has(it) && settings.cloudConsent(it) }
+                    val ready = cloudOk ?: (model == null || states[model.id] is ModelState.Ready)
                     EngineRow(
                         engine = engine,
                         selected = settings.recognitionEngine == engine,
                         enabled = ready,
-                        hint = if (ready) engine.description else "Descarga primero el modelo",
+                        hint = when {
+                            ready -> engine.description
+                            engine.cloud != null -> "Configura tu clave en Ajustes → IA en la nube"
+                            else -> "Descarga primero el modelo"
+                        },
                         onSelect = { update { it.copy(recognitionEngine = engine) } },
                     )
                 }

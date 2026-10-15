@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+: copia en la nube y transferencia entre dispositivos sin las claves de API de la IA en la nube. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="cloud_secrets.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="cloud_secrets.xml" />
+    </device-transfer>
+</data-extraction-rules>

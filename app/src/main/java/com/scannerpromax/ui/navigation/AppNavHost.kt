@@ -46,6 +46,7 @@ import com.scannerpromax.ui.home.HomeScreen
 import com.scannerpromax.ui.ocr.OcrScreen
 import com.scannerpromax.ui.review.ReviewScreen
 import com.scannerpromax.ui.settings.AiModelsScreen
+import com.scannerpromax.ui.settings.CloudAiScreen
 import com.scannerpromax.ui.settings.SettingsScreen
 import com.scannerpromax.ui.theme.LocalPerf
 import com.scannerpromax.ui.tools.CompressPdfScreen
@@ -302,11 +303,19 @@ fun AppNavHost(
                     container = container,
                     onBack = { entry.ifActive(nav) { nav.popBackStack() } },
                     onOpenAiModels = { entry.ifActive(nav) { nav.navigate(Routes.AI_MODELS) { launchSingleTop = true } } },
+                    onOpenCloudAi = { entry.ifActive(nav) { nav.navigate(Routes.CLOUD_AI) { launchSingleTop = true } } },
                 )
             }
 
             composable(Routes.AI_MODELS) { entry ->
                 AiModelsScreen(
+                    container = container,
+                    onBack = { entry.ifActive(nav) { nav.popBackStack() } },
+                )
+            }
+
+            composable(Routes.CLOUD_AI) { entry ->
+                CloudAiScreen(
                     container = container,
                     onBack = { entry.ifActive(nav) { nav.popBackStack() } },
                 )
