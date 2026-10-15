@@ -282,7 +282,14 @@ object HybridFuse {
                 if (c.i in doneT || c.j in usedC || c.i in already) continue
                 lt[c.i] = cells[c.j].text; doneT += c.i; usedC += c.j; st.tableLines++
             }
-            var nb = b.copy(lines = b.lines.mapIndexed { i, l -> l.copy(text = lt[i]) })
+            // (una celda más corta que el texto local que sustituye encoge la caja, para no estirar/agrandar la letra)
+            var nb = b.copy(lines = b.lines.mapIndexed { i, l ->
+                val old = l.text
+                if (i in doneT && old.length >= 4 && lt[i].length < 0.6f * old.length) {
+                    val f = (lt[i].length + 1f) / (old.length + 1f)
+                    l.copy(text = lt[i], box = l.box.copy(right = l.box.left + l.box.width * f), quad = emptyList())
+                } else l.copy(text = lt[i])
+            })
             if (cells.isNotEmpty() && b.cells.isEmpty()) {
                 // celdas de la nube (de la tabla que más se solapa si hay varias, para que filas/columnas cuadren)
                 val main = hosts.maxByOrNull { inter(g, cbox[it]) }!!
@@ -327,7 +334,11 @@ object HybridFuse {
             if (best != null && inter(g, cbox[best]) > 0.5f * area(g)) out[i] = b.copy(style = cb[best].style)
         }
         // texto de la nube sin pareja (y que no cae sobre nada local): se añade con su caja
-        val occupied = out.map { bb(it.box) }
+        // ocupado = texto local; de tablas/figuras solo sus líneas (una región que cubre la página no tapa lo que no leyó)
+        val occupied = out.flatMap { o ->
+            if (o.type == BlockType.TABLE || o.type == BlockType.FIGURE && o.role != PartsPipeline.ROLE_DRAWING && o.lines.isNotEmpty() && o.box.width * o.box.height > 0.25f * w * h)
+                o.lines.map { bb(it.box) } else listOf(bb(o.box))
+        }
         for ((ci, c) in cb.withIndex()) {
             if (cUsed[ci] || c.type !in TXT || c.text.isBlank()) continue
             val g = cbox[ci]

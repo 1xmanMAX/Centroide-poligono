@@ -113,6 +113,7 @@ object ReconstructionLayout {
     private const val BLACK = 0x000000
     /** LayoutBlock.role de los trazos sueltos (tubería por partes): recorte solo-tinta. */
     const val DRAWING_ROLE = "dibujo"
+    private const val TABLE_ROLE = "__tabla"
 
     /** Maquetación v2 (recon2): tamaño común por párrafo, sin estirar letras, alineación, rayas y fondos. */
     @JvmStatic @Volatile var enableV2: Boolean = true
@@ -241,6 +242,7 @@ object ReconstructionLayout {
                     val size = when {
                         med <= 0f -> sz
                         b.type == BlockType.HANDWRITING -> sz.coerceIn(med * 0.85f, med * 1.2f)
+                        b.role == TABLE_ROLE -> min(sz, med)  // celdas: un tamaño (cajas altas del OCR no agrandan)
                         sz > med * 1.35f || sz < med * 0.7f -> sz
                         else -> med
                     }
@@ -550,7 +552,7 @@ object ReconstructionLayout {
     private fun planTable(b: LayoutBlock, map: ImageToPage, m: ReFontMetrics, bodySizePt: Float?, ops: MutableList<ReOp>, rules: List<List<Float>> = emptyList()) {
         if (v2 && b.ruled != null && b.lines.isNotEmpty() && linesCoverCells(b)) {
             // Tabla con sus líneas reconocidas: texto donde estaba (el reglado, si lo hay, va en DocLayout.rules).
-            planTextBlock(b.copy(type = BlockType.TEXT, align = null), map, m, null, bodySizePt, ops)
+            planTextBlock(b.copy(type = BlockType.TEXT, align = null, role = TABLE_ROLE), map, m, null, bodySizePt, ops)
             return
         }
         val cells = TableGrid.normalize(b.tableRows, b.tableCols, b.cells)
