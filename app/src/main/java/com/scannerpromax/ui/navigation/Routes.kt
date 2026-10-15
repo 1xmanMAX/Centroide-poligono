@@ -13,6 +13,7 @@ object Routes {
     const val COMPRESS = "compress"
     const val SETTINGS = "settings"
     const val AI_MODELS = "settings/ai-models"
+    const val CLOUD_AI = "settings/cloud-ai"
 
     /** [docId] null = documento nuevo. */
     fun camera(mode: ScanMode = ScanMode.DOCUMENT, docId: String? = null) =

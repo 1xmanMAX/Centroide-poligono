@@ -66,4 +66,19 @@ data class LayoutBlock(
     val latex: String? = null,
     /** Orden de lectura (0 = primero). */
     val order: Int = 0,
+    /**
+     * Estilo visto por la IA en la nube (opcional; null = desconocido). Añadido por el modo nube: la reconstrucción
+     * puede usarlo (negrita/cursiva/alineación/tamaño relativo); los motores locales no lo rellenan.
+     */
+    val style: BlockStyle? = null,
+)
+
+/** Estilo de un bloque según la IA en la nube. [size] relativo al cuerpo del texto: small | normal | large | xlarge. */
+@Serializable
+data class BlockStyle(
+    val bold: Boolean = false,
+    val italic: Boolean = false,
+    /** left | center | right | justify (null = desconocida). */
+    val align: String? = null,
+    val size: String? = null,
 )

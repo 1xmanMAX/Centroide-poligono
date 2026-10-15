@@ -29,6 +29,7 @@ import androidx.compose.material.icons.rounded.AutoFixHigh
 import androidx.compose.material.icons.rounded.BrightnessAuto
 import androidx.compose.material.icons.rounded.CameraAlt
 import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.DarkMode
 import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.HighQuality
@@ -92,7 +93,12 @@ private enum class Picker { FILTER, PAGE_SIZE, QUALITY, PDF_TEXT }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(container: AppContainer, onBack: () -> Unit, onOpenAiModels: () -> Unit = {}) {
+fun SettingsScreen(
+    container: AppContainer,
+    onBack: () -> Unit,
+    onOpenAiModels: () -> Unit = {},
+    onOpenCloudAi: () -> Unit = {},
+) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     // Flow recordado: SettingsRepository.settings devuelve un Flow nuevo en cada acceso y collectAsState
@@ -159,6 +165,13 @@ fun SettingsScreen(container: AppContainer, onBack: () -> Unit, onOpenAiModels: 
                     title = "Modelos IA",
                     value = "Motor: " + settings.recognitionEngine.label,
                     onClick = onOpenAiModels,
+                )
+                GroupDivider()
+                ValueRow(
+                    icon = Icons.Rounded.Cloud,
+                    title = "IA en la nube (opcional)",
+                    value = settings.recognitionEngine.cloud?.let { "En uso: " + it.label } ?: "DeepSeek o Claude Haiku con tu clave",
+                    onClick = onOpenCloudAi,
                 )
             }
 

@@ -84,7 +84,7 @@ object TextAligner {
     }
 
     /** Subsecuencia común más larga: pares (índice viejo, índice nuevo) en orden. */
-    private fun lcs(a: List<String>, b: List<String>): List<Pair<Int, Int>> {
+    internal fun lcs(a: List<String>, b: List<String>): List<Pair<Int, Int>> {
         val n = a.size
         val m = b.size
         // Tabla de longitudes con sufijos: dp[i][j] = LCS(a[i..], b[j..]) (acotada por MAX_LCS_CELLS).

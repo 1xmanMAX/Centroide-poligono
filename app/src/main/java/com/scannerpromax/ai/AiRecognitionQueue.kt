@@ -3,7 +3,15 @@ package com.scannerpromax.ai
 import android.content.Context
 import android.graphics.Bitmap
 import android.util.Log
+import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import com.scannerpromax.ai.cloud.CloudException
+import com.scannerpromax.ai.cloud.CloudKeyStore
+import com.scannerpromax.ai.cloud.CloudNetwork
+import com.scannerpromax.ai.cloud.CloudProviderId
+import com.scannerpromax.ai.cloud.CloudRecognizer
+import com.scannerpromax.ai.cloud.CloudUsageStore
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkManager
@@ -61,6 +69,10 @@ class AiRecognitionQueue(
     private val documents: () -> DocumentRepository,
     private val detector: () -> DocumentDetector,
     private val tier: DeviceTier,
+    /** IA en la nube (opcional): lectura con la clave del usuario, sin modelo local. */
+    private val cloud: CloudRecognizer,
+    private val cloudKeys: CloudKeyStore,
+    private val cloudUsage: CloudUsageStore,
 ) : DocumentRepository.AiHook {
 
     @Serializable
@@ -81,6 +93,8 @@ class AiRecognitionQueue(
     /** Estado visible de una página. */
     sealed interface PageStatus {
         data object Queued : PageStatus
+        /** IA en la nube: sin conexión (o sin Wi-Fi si se pidió); se lee sola al volver la red. */
+        data object WaitingNetwork : PageStatus
         data class Running(val fraction: Float, val label: String) : PageStatus {
             val percent: Int get() = (fraction * 100).toInt().coerceIn(0, 99)
         }
@@ -128,6 +142,11 @@ class AiRecognitionQueue(
     /** Botón "Volver a leer con IA". Devuelve un mensaje de error en español si no se puede (modelo no listo…). */
     suspend fun reread(docId: String, pageId: String): String? {
         val s = settings.settings.first()
+        s.recognitionEngine.cloud?.let { id ->
+            cloudProblem(s, id)?.let { return it }
+            add(AiJob(docId, pageId, force = true))
+            return null
+        }
         val model = s.recognitionEngine.role?.let { ModelCatalog.forRole(it) }
             ?: return "Elige un motor de IA en Ajustes → Modelos IA"
         if (!models.isReady(model)) return "Descarga primero el ${model.name} en Ajustes → Modelos IA"
@@ -175,7 +194,15 @@ class AiRecognitionQueue(
 
     // ------------------------------------------------------------------------------------------ cola
 
+    /** Mensaje en español si la IA en la nube [id] no se puede usar (sin clave o sin consentimiento), o null. */
+    private fun cloudProblem(s: AppSettings, id: CloudProviderId): String? = when {
+        !cloudKeys.has(id) -> "Guarda tu clave de ${id.company} en Ajustes → IA en la nube"
+        !s.cloudConsent(id) -> "Acepta el aviso de privacidad de ${id.company} en Ajustes → IA en la nube"
+        else -> null
+    }
+
     private fun wantsAny(s: AppSettings, rescue: Boolean): Boolean {
+        if (s.recognitionEngine.cloud?.let { cloudProblem(s, it) == null } == true) return true
         if (!llm.isAvailable) return false
         val rec = s.recognitionEngine.role?.let { ModelCatalog.forRole(it) }?.let { models.isReady(it) } == true
         val qwen = models.isReady(ModelCatalog.VISUAL_ASSISTANT) && (s.aiAutoEnhance || (rescue && s.aiFrameRescue))
@@ -241,6 +268,19 @@ class AiRecognitionQueue(
         }
     }
 
+    /** Vuelve a lanzar la cola cuando haya red (Wi-Fi/no medida si se pidió). */
+    private fun kickWhenNetwork(unmetered: Boolean) {
+        try {
+            val req = OneTimeWorkRequestBuilder<AiRecognitionWorker>()
+                .setConstraints(Constraints.Builder().setRequiredNetworkType(if (unmetered) NetworkType.UNMETERED else NetworkType.CONNECTED).build())
+                .addTag(AiRecognitionWorker.TAG_WORK)
+                .build()
+            WorkManager.getInstance(appContext).enqueueUniqueWork(AiRecognitionWorker.WORK_NAME_NETWORK, ExistingWorkPolicy.REPLACE, req)
+        } catch (t: Throwable) {
+            Log.w(TAG, "WorkManager no disponible para esperar la red", t)
+        }
+    }
+
     // ------------------------------------------------------------------------------------------ proceso
 
     /**
@@ -274,6 +314,13 @@ class AiRecognitionQueue(
                 // ---- Fase 2: lectura con el motor elegido
                 val recJobs = snapshot().filter { it.qwenDone }
                 if (recJobs.isEmpty()) continue
+                val cloudId = s.recognitionEngine.cloud
+                if (cloudId != null) {
+                    when (drainCloud(recJobs, s, cloudId, done, onOverall)) {
+                        CloudOutcome.Done -> { done += recJobs.size; continue }
+                        CloudOutcome.WaitNetwork -> break
+                    }
+                }
                 val recModel = s.recognitionEngine.role?.let { ModelCatalog.forRole(it) }
                 if (recModel == null) {
                     // Motor básico: la cola solo hacía la fase de Qwen.
@@ -348,6 +395,109 @@ class AiRecognitionQueue(
             Log.w(TAG, "carga ${m.id}", e)
             false
         }
+    }
+
+    // ------------------------------------------------------------------------------------------ nube
+
+    private enum class CloudOutcome {
+        /** Tanda terminada (leída, con fallback a ML Kit o descartada por error de cuenta). */
+        Done,
+        /** Sin red: las páginas siguen en la cola ("esperando red") y se relanza al volver la conexión. */
+        WaitNetwork,
+    }
+
+    /**
+     * Lee [jobs] con la IA en la nube [id]: sin red -> espera; clave/saldo rechazados -> aviso claro y se vacía la cola
+     * (las páginas se quedan con ML Kit); otros fallos -> esa página con ML Kit y se sigue.
+     */
+    private suspend fun drainCloud(jobs: List<AiJob>, s: AppSettings, id: CloudProviderId, done0: Int, onOverall: (Overall) -> Unit): CloudOutcome {
+        cloudProblem(s, id)?.let { msg ->
+            _notices.tryEmit("Lectura en la nube no disponible: $msg. Se usa el OCR básico.")
+            jobs.forEach { remove(it.key) }
+            return CloudOutcome.Done
+        }
+        var done = done0
+        for (j in jobs) {
+            if (snapshot().none { it.key == j.key }) continue
+            if (!CloudNetwork.isAvailable(appContext, s.cloudWifiOnly)) return waitForNetwork(s)
+            val total = done + snapshot().size
+            var failure: CloudException? = null
+            runGuarded(j) {
+                try {
+                    recognizeCloud(j, id) { p ->
+                        _status.update { it + (j.key to PageStatus.Running(p.fraction, p.label)) }
+                        val o = Overall(done, total, p.fraction, p.label)
+                        _overall.value = o
+                        onOverall(o)
+                    }
+                } catch (e: CloudException) {
+                    failure = e
+                }
+            }
+            val f = failure
+            when {
+                f == null -> Unit
+                f.stopsQueue -> {
+                    val msg = when (f) {
+                        is CloudException.Billing -> "${id.company}: la cuenta no tiene saldo. Recárgala y usa «Volver a leer con IA»."
+                        else -> "${id.company} rechazó la clave de API (${f.message}). Revísala en Ajustes → IA en la nube."
+                    }
+                    cloudUsage.setError(id, msg)
+                    _notices.tryEmit("$msg Las páginas se quedan con el OCR básico.")
+                    snapshot().forEach { remove(it.key) }
+                    return CloudOutcome.Done
+                }
+                f is CloudException.Network -> return waitForNetwork(s)
+                else -> {
+                    _notices.tryEmit("Página ${pageNumber(j)}: la IA en la nube no pudo leerla (${f.message}); se mantiene el OCR básico.")
+                }
+            }
+            remove(j.key)
+            done++
+        }
+        return CloudOutcome.Done
+    }
+
+    private fun waitForNetwork(s: AppSettings): CloudOutcome {
+        val keys = snapshot().map { it.key }
+        _status.update { m -> m + keys.associateWith { PageStatus.WaitingNetwork } }
+        _notices.tryEmit(
+            if (s.cloudWifiOnly) "Lectura en la nube en pausa: esperando Wi-Fi (${keys.size} pág.)."
+            else "Lectura en la nube en pausa: sin conexión (${keys.size} pág.). Seguirá sola al volver la red.",
+        )
+        kickWhenNetwork(s.cloudWifiOnly)
+        return CloudOutcome.WaitNetwork
+    }
+
+    private suspend fun pageNumber(j: AiJob): Int = (documents().get(j.docId)?.pages?.indexOfFirst { it.id == j.pageId } ?: -1) + 1
+
+    private suspend fun recognizeCloud(j: AiJob, id: CloudProviderId, onProgress: (AiRecognizer.Progress) -> Unit) {
+        val repo = documents()
+        val page0 = repo.getPage(j.docId, j.pageId) ?: return
+        if (!j.force && repo.hasAiLayout(j.docId, j.pageId)) return
+        onProgress(AiRecognizer.Progress(0.01f, "Preparando"))
+        val processed = repo.processedFile(j.docId, page0)
+        val page = repo.getPage(j.docId, j.pageId) ?: return
+        val edits = page.edits
+        // OCR básico de la misma versión: POSICIONES fiables sobre las que se coloca el texto de la nube.
+        val mlkit = runCatching { repo.ensureOcr(j.docId, j.pageId) }.getOrNull()
+        val (fw, fh) = withContext(Dispatchers.IO) { BitmapIO.decodeBounds(processed.absolutePath) }
+        val bmp = withContext(Dispatchers.IO) { BitmapIO.decode(processed.absolutePath, CLOUD_DECODE_PIXELS) }
+        val fullW = if (fw > 0) fw else bmp.width
+        val fullH = if (fh > 0) fh else bmp.height
+        val result = try {
+            cloud.read(id, bmp, fullW, fullH, mlkit, onProgress)
+        } finally {
+            bmp.recycle()
+        }
+        val number = pageNumber(j)
+        if (result == null) {
+            _notices.tryEmit("Página $number: la IA en la nube devolvió muy poco texto; se mantiene el OCR básico.")
+            return
+        }
+        val saved = repo.saveAiResult(j.docId, j.pageId, edits, result.ocr, result.layout)
+        if (!saved) Log.i(TAG, "${j.key}: la página cambió mientras se leía en la nube; resultado descartado")
+        result.warning?.let { _notices.tryEmit("Página $number: $it") }
     }
 
     // ------------------------------------------------------------------------------------------ fase Qwen
@@ -470,5 +620,7 @@ class AiRecognitionQueue(
         private const val CLASSIFY_SIDE = 512
         private const val DOCBOX_SIDE = 896
         private const val RESCUE_PIXELS = 3_000_000
+        /** La nube recibe como mucho ~2,5 MP (Claude 1568 px de lado): no hace falta decodificar más. */
+        private const val CLOUD_DECODE_PIXELS = 3_000_000
     }
 }

@@ -102,6 +102,8 @@ class AiRecognitionWorker(context: Context, params: WorkerParameters) : Coroutin
     companion object {
         private const val TAG = "AiRecognitionWorker"
         const val WORK_NAME = "ai-recognition"
+        /** Relanzamiento de la cola en cuanto haya red (IA en la nube en pausa por falta de conexión). */
+        const val WORK_NAME_NETWORK = "ai-recognition-network"
         const val TAG_WORK = "ai-recognition"
         const val CHANNEL_ID = "ai_recognition"
         private const val NOTIFICATION_ID = 0x4E01
