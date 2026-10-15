@@ -20,7 +20,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlin.random.Random
 
-/** Extracción de una entrada de un AAR (zip de prueba con la misma estructura jni/<abi>/*.so) por rangos o en flujo. */
+/** Extracción de una entrada de un AAR (zip de prueba con la misma estructura jni/ABI/libX.so) por rangos o en flujo. */
 class ZipEntryFetcherTest {
     private lateinit var dir: File
     private lateinit var zip: ByteArray
@@ -155,6 +155,27 @@ class ZipEntryFetcherTest {
         assertArrayEquals(v7a, dest.readBytes())
         // El AAR completo no se guarda en disco: solo la .so.
         assertEquals(listOf("libonnxruntime.so"), dest.parentFile!!.list()!!.toList())
+    }
+
+    /**
+     * Contra el AAR REAL de Maven Central (solo con -PortReal=DIR; necesita red): baja por rango la .so de cada ABI
+     * del catálogo y comprueba tamaño y sha256 del catálogo (y que se baja ~lo comprimido, no los 55 MB del AAR).
+     */
+    @Test fun aarRealDeMavenCentral() {
+        val out = System.getProperty("ort.real")
+        org.junit.Assume.assumeTrue("sin -PortReal", !out.isNullOrBlank())
+        val pkg = ModelCatalog.ORT_NATIVE
+        for (lib in pkg.libs) {
+            val dest = File(out, "lib/${lib.abi}/${lib.fileName}")
+            dest.delete()
+            val t0 = System.nanoTime()
+            var last = 0L
+            fetcher.fetch(fetcher.http(pkg.url), lib.entryName, dest, lib.sizeBytes, lib.sha256) { d, _ -> last = d }
+            assertEquals(lib.sizeBytes, dest.length())
+            assertEquals(lib.compressedBytes, last)
+            println("ORT real ${lib.abi}: ${dest.length()} B (bajados $last B comprimidos) en ${(System.nanoTime() - t0) / 1_000_000} ms")
+        }
+        assertEquals(pkg.archiveSize, fetcher.http(pkg.url).length())
     }
 
     @Test fun porHttpConRangosYSinRangos() {

@@ -186,6 +186,8 @@ tasks.withType<Test>().configureEach {
         "reconOut" to "recon.out", "reconImages" to "recon.images",
         // Banco recon2 en la app (Recon2AppBenchTest): salida, páginas, puerto de llama-server, etapas.
         "r2appOut" to "r2app.out", "r2appOnly" to "r2app.only", "r2appPort" to "r2app.port", "r2appStage" to "r2app.stage",
+        // ZipEntryFetcherTest contra el AAR real de Maven Central (red): -PortReal=DIR
+        "ortReal" to "ort.real",
     ).forEach { (p, sp) ->
         (project.findProperty(p) as String?)?.let { systemProperty(sp, it) }
     }
