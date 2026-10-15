@@ -600,14 +600,14 @@ object ReconstructionLayout {
     }
 
     /**
-     * ¿Las líneas de la tabla traen el texto de sus celdas? (≥ 60 % de las celdas con texto aparecen tal cual en alguna
+     * ¿Las líneas de la tabla traen el texto de sus celdas? (≥ 60 % de las celdas con texto aparecen —casi— tal cual en alguna
      * línea). Si no (p. ej. celdas de la nube sobre líneas mal leídas por el OCR básico) se dibuja la tabla por celdas.
      */
     fun linesCoverCells(b: LayoutBlock): Boolean {
         val cells = b.cells.map { norm(it.text) }.filter { it.isNotEmpty() }
         if (cells.isEmpty()) return true
         val lines = b.lines.map { norm(it.text) }
-        val hit = cells.count { c -> lines.any { l -> l == c || (c.length >= 4 && l.contains(c)) } }
+        val hit = cells.count { c -> lines.any { l -> l == c || (c.length >= 4 && l.contains(c)) || com.scannerpromax.ai.parts.TextSim.sim(l, c) >= 0.7f } }
         return hit >= 0.6f * cells.size
     }
 

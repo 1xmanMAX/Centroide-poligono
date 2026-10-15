@@ -243,6 +243,9 @@ object PageInk {
                 else floatArrayOf(c.x + c.w / 2f, c.y.toFloat(), c.x + c.w / 2f, (c.y + c.h).toFloat(), max(1, th).toFloat())
                 val bb = floatArrayOf(c.x.toFloat(), c.y.toFloat(), (c.x + c.w).toFloat(), (c.y + c.h).toFloat())
                 if (exclude.any { insideFrac(bb, it) > 0.5f }) continue
+                // (app) rayas pegadas al canto de la foto (borde del móvil/mesa, sombra del papel): no son del documento
+                val edge = 0.02f * max(w, h)
+                if (if (horiz) (seg[1] < edge || seg[1] > h - edge) else (seg[0] < edge || seg[0] > w - edge)) continue
                 out += seg
             }
         }
@@ -331,6 +334,8 @@ object PageInk {
             val m = 0.01f * big
             val border = (if (c.x <= m) 1 else 0) + (if (c.y <= m) 1 else 0) + (if (c.x + c.w >= w - m) 1 else 0) + (if (c.y + c.h >= h - m) 1 else 0)
             if (border > 0 && area > 0.01f) continue            // fondo/mesa/borde de la foto pegado al canto
+            // (app) trozos de madera/tela pegados al canto: densos o con color de fondo, no trazos de bolígrafo
+            if (border > 0 && (inkn > 0.12f * c.w * c.h || area > 0.002f)) continue
             if (area > 0.06f && inkn > 0.2f * c.w * c.h) continue // textura (tela, madera), no trazos
             out += floatArrayOf(c.x.toFloat(), c.y.toFloat(), (c.x + c.w).toFloat(), (c.y + c.h).toFloat())
         }

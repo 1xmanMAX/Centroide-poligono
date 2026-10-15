@@ -12,7 +12,7 @@ class ModelCatalogTest {
     }
 
     @Test fun cadaModeloTieneLlmYMmproj() {
-        for (m in ModelCatalog.all) {
+        for (m in ModelCatalog.all.filter { it.isLlm }) {
             assertEquals(1, m.files.count { it.kind == FileKind.LLM })
             assertEquals(1, m.files.count { it.kind == FileKind.MMPROJ })
             assertTrue(m.totalDownloadBytes > 100_000_000)
@@ -24,9 +24,18 @@ class ModelCatalogTest {
     @Test fun urlsDeHuggingFaceBienFormadas() {
         for (m in ModelCatalog.all) for (f in m.files) {
             assertTrue(f.url, f.url.matches(Regex("https://huggingface\\.co/[^/]+/[^/]+/resolve/[^/]+/.+")))
-            assertTrue(f.url.endsWith("/" + f.fileName))
+            // (los ONNX de la maquetación se llaman inference.onnx en sus repos: se guardan con nombre propio)
+            if (f.kind != FileKind.ONNX) assertTrue(f.url.endsWith("/" + f.fileName))
             f.sha256?.let { assertTrue(it.matches(Regex("[0-9a-f]{64}"))) }
         }
+    }
+
+    @Test fun maquetacionDePaginasEsOnnx() {
+        val m = ModelCatalog.PAGE_LAYOUT
+        assertTrue(!m.isLlm)
+        assertEquals(2, m.files.count { it.kind == FileKind.ONNX })
+        assertEquals(setOf(ModelCatalog.LAYOUT_FILE, ModelCatalog.ORIENTATION_FILE), m.files.map { it.fileName }.toSet())
+        assertTrue(m.totalDownloadBytes in 130_000_000L..140_000_000L)
     }
 
     @Test fun prefijosDePaddle() {

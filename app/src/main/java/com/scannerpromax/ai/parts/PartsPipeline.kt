@@ -112,7 +112,8 @@ class PartsPipeline(private val reader: PartsReader) {
             if (regional || pageLooped || items.isEmpty() || letters < 10) {
                 mode = "regiones"
                 items = ArrayList()
-                val zones = regs.filter { it.type in SPOT_TYPES }.map { it.box }.toMutableList()
+                // (app) tablas altas en bandas horizontales: el Spotting de una tabla densa entera hace bucle (tabla1)
+                val zones = regs.filter { it.type in SPOT_TYPES }.flatMap { if (it.type == BlockType.TABLE) tableBandsZones(it.box, h) else listOf(it.box) }.toMutableList()
                 zones += PageInk.uncoveredZones(img, regs.map { it.box })
                 zones.forEachIndexed { i, z ->
                     progress(0.05f + 0.55f * i / zones.size.coerceAtLeast(1), "Leyendo texto por partes")
@@ -120,7 +121,7 @@ class PartsPipeline(private val reader: PartsReader) {
                 }
             }
         }
-        items = dedupeItems(items).toMutableList()
+        items = dedupeItems(items.filter { it.bx[2] - it.bx[0] >= 2f && it.bx[3] - it.bx[1] >= 2f }).toMutableList()
 
         // ---- líneas a regiones
         val free = ArrayList<Item>()
@@ -152,8 +153,7 @@ class PartsPipeline(private val reader: PartsReader) {
         val blocks = ArrayList<B>()
         for (r in regs) {
             val bx = r.box
-            val lines = r.lines.sortedWith(compareBy({ ((it.bx[1]) / max(1f, (it.bx[3] - it.bx[1]) * 0.6f)).roundToInt() }, { it.bx[0] }))
-                .map { line(it, img) }
+            val lines = readingSort(r.lines) { it.bx }.map { line(it, img) }
             when (r.type) {
                 BlockType.TEXT, BlockType.TITLE, BlockType.HEADER, BlockType.FOOTER -> {
                     if (lines.isEmpty()) continue
@@ -281,8 +281,9 @@ class PartsPipeline(private val reader: PartsReader) {
             val t = IaParse.parseOtsl(out.text)
             if (t.nRows >= 1 && t.nCols >= 1) cells = t
         }
-        if (cells == null && available && r.lines.size >= 6) {
-            cells = tableBands(bx, r.lines, PER_BAND) ?: tableBands(bx, r.lines, PER_BAND_RETRY)
+        if (cells == null && available) {
+            // columnas por huecos del Spotting (o de la tinta si la tabla casi no tiene líneas leídas)
+            cells = tableBands(bx, r.lines, PER_BAND, img) ?: tableBands(bx, r.lines, PER_BAND_RETRY, img)
         }
         if (cells != null) {
             b = b.copy(
@@ -304,8 +305,8 @@ class PartsPipeline(private val reader: PartsReader) {
      * Columnas por huecos verticales de las líneas del Spotting dentro de la tabla ([separators]) y lectura por bandas
      * de ≤ [per] columnas repitiendo la primera (clave). null si hay < 3 columnas o alguna banda hace bucle.
      */
-    private suspend fun tableBands(bx: Box, items: List<Item>, per: Int): IaParse.OtslTable? {
-        val seps = separators(bx, items) ?: return null
+    private suspend fun tableBands(bx: Box, items: List<Item>, per: Int, img: Rgb): IaParse.OtslTable? {
+        val seps = (if (items.size >= 6) separators(bx, items) else null)?.takeIf { it.size >= 4 } ?: inkSeparators(bx, img) ?: return null
         val ncol = seps.size - 1
         if (ncol < 3) return null
         val bands = bands(ncol, per)
@@ -386,7 +387,7 @@ class PartsPipeline(private val reader: PartsReader) {
         fun dedupeItems(items: List<Item>): List<Item> {
             val out = ArrayList<Item>()
             for (it in items.sortedByDescending { (it.bx[2] - it.bx[0]) * (it.bx[3] - it.bx[1]) }) {
-                if (out.any { o -> PageInk.insideFrac(it.bx, o.bx) > 0.7f && (o.text.contains(it.text) || it.text.contains(o.text)) }) continue
+                if (out.any { o -> PageInk.insideFrac(it.bx, o.bx) > 0.7f && (o.text.contains(it.text) || it.text.contains(o.text) || TextSim.sim(o.text, it.text) >= 0.6f) }) continue
                 out += it
             }
             return out
@@ -453,6 +454,50 @@ class PartsPipeline(private val reader: PartsReader) {
             )
         }
 
+        /** Zonas de Spotting de una tabla: bandas horizontales de ≤ 10 % del alto de la página. */
+        fun tableBandsZones(b: Box, pageH: Int): List<Box> {
+            val n = max(1, ceil((b[3] - b[1]) / (0.1f * pageH)).toInt())
+            return (0 until n).map { k -> floatArrayOf(b[0], b[1] + k * (b[3] - b[1]) / n, b[2], b[1] + (k + 1) * (b[3] - b[1]) / n) }
+        }
+
+        /**
+         * Separadores de columna por huecos verticales de la TINTA de la tabla (sin rayas largas) cuando el Spotting no
+         * dio líneas: columnas de píxeles casi sin tinta de ancho ≥ 0,4 % de la página. null si salen < 3 columnas.
+         */
+        fun inkSeparators(bx: Box, img: Rgb): List<Int>? {
+            val x0 = max(0, bx[0].toInt()); val x1 = min(img.w, bx[2].toInt())
+            val y0 = max(0, bx[1].toInt()); val y1 = min(img.h, bx[3].toInt())
+            if (x1 - x0 < 30 || y1 - y0 < 10) return null
+            val crop = img.crop(x0, y0, x1, y1)
+            val paper = PageInk.percentile(img.gray(), 90.0)
+            val ink = PageInk.inkMask(crop, max(25, img.w / 25), paper)
+            // franjas de ~1 renglón: una columna de píxeles es hueco si está libre en ≥ 85 % de las franjas (los
+            // títulos que cruzan varias columnas no tapan los huecos)
+            val strip = max(8, img.h / 100)
+            val nStrips = max(1, crop.h / strip)
+            val busy = IntArray(crop.w)
+            for (k in 0 until nStrips) {
+                val ya = k * strip; val yb = if (k == nStrips - 1) crop.h else ya + strip
+                for (x in 0 until crop.w) {
+                    var any = false
+                    for (y in ya until yb) if (ink[y * crop.w + x]) { any = true; break }
+                    if (any) busy[x]++
+                }
+            }
+            val tol = (0.15f * nStrips).toInt()
+            val minGap = max(4, (0.004f * img.w).toInt())
+            val seps = arrayListOf(0)
+            var run = 0
+            for ((i, v) in busy.withIndex()) {
+                if (v <= tol) run++ else {
+                    if (run >= minGap && i - run > 0) seps += i - run / 2
+                    run = 0
+                }
+            }
+            seps += busy.size
+            return seps.takeIf { it.size >= 4 }
+        }
+
         /** Separadores de columna (px relativos al borde izquierdo de [bx]) por huecos verticales de las líneas. */
         fun separators(bx: Box, items: List<Item>): List<Int>? {
             if (items.isEmpty()) return null
@@ -474,6 +519,25 @@ class PartsPipeline(private val reader: PartsReader) {
             }
             seps += occ.size
             return seps
+        }
+
+        /**
+         * Orden de lectura de líneas: por filas (centros a menos de media altura mediana de la fila en curso) y, dentro
+         * de la fila, de izquierda a derecha. (El banco ordenaba por arriba/(0,6·alto propio), que desordena líneas de
+         * alturas distintas, p. ej. las del OCR básico.)
+         */
+        fun <T> readingSort(items: List<T>, box: (T) -> Box): List<T> {
+            if (items.size < 2) return items
+            val hs = items.map { max(1f, box(it)[3] - box(it)[1]) }.sorted()
+            val hmed = hs[hs.size / 2]
+            val byY = items.sortedBy { (box(it)[1] + box(it)[3]) / 2 }
+            val rows = ArrayList<MutableList<T>>()
+            var rowCy = Float.NEGATIVE_INFINITY
+            for (it in byY) {
+                val cy = (box(it)[1] + box(it)[3]) / 2
+                if (rows.isEmpty() || cy - rowCy > 0.5f * hmed) { rows += mutableListOf(it); rowCy = cy } else rows.last() += it
+            }
+            return rows.flatMap { r -> r.sortedBy { box(it)[0] } }
         }
 
         /** Maquetación hecha sobre la imagen analizada → píxeles de la imagen completa [w] x [h]. */

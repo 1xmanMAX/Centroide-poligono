@@ -17,7 +17,7 @@ import kotlin.math.abs
 import kotlin.math.atan2
 
 /** Fuente ficticia: cada carácter mide 0,5 em; la negrita y la manuscrita solo tienen latín básico + Latin-1. */
-private object FakeMetrics : ReFontMetrics {
+internal object FakeMetrics : ReFontMetrics {
     override fun widthEm(font: ReFont, text: String) = text.length * 0.5f
     override fun capHeight(font: ReFont) = 0.7f
     override fun xHeight(font: ReFont) = 0.5f

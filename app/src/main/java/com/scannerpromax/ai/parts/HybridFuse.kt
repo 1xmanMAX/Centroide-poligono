@@ -122,7 +122,9 @@ object HybridFuse {
                 tl.forEachIndexed { i, t -> clines += CLine(t, floatArrayOf(bx[0], bx[1] + i * hh, bx[2], bx[1] + (i + 1) * hh), ci) }
             }
         }
-        val ll = tIdx.flatMap { bi -> blocks[bi].lines.indices.map { li -> bi to li } }
+        // (las líneas de figuras/gráficos también reciben el texto de la nube en 1a: es su texto buscable)
+        val figIdx = blocks.indices.filter { (blocks[it].type == BlockType.FIGURE || blocks[it].type == BlockType.CHART) && blocks[it].lines.isNotEmpty() }
+        val ll = (tIdx + figIdx).flatMap { bi -> blocks[bi].lines.indices.map { li -> bi to li } }
         fun lbox(p: Pair<Int, Int>) = bb(blocks[p.first].lines[p.second].box)
         fun near(lb: FloatArray, cl: FloatArray, gy: Float, gx: Float): Boolean {
             val g = floatArrayOf(lb[0] - gx * w, lb[1] - gy * h, lb[2] + gx * w, lb[3] + gy * h)
@@ -161,7 +163,7 @@ object HybridFuse {
             if (!(hand || blocks[bi].type == BlockType.HANDWRITING)) {
                 // impreso: solo si una ventana de líneas de la nube cercanas se parece MUCHO al texto local
                 val g = grow(env, w, h, 0.05f)
-                val mine = clines.filter { !it.used && inter(g, it.b) > 0.3f * area(it.b) }.sortedWith(compareBy({ rowKey(it.b) }, { it.b[0] }))
+                val mine = clines.filter { !it.used && inter(g, it.b) > 0.3f * area(it.b) }.let { m -> PartsPipeline.readingSort(m) { it.b } }
                 val localText = lines.joinToString(" ") { texts[it.first][it.second] }
                 var best = 0.6f; var bw: Pair<Int, Int>? = null
                 for (i0 in mine.indices) for (i1 in (i0 + 1)..min(mine.size, i0 + 2 * lines.size + 2)) {
@@ -180,7 +182,7 @@ object HybridFuse {
             val g = grow(env, w, h, 0.01f)
             val mine = clines.filter { !it.used && inter(g, it.b) > 0.5f * area(it.b) }
             if (mine.isEmpty()) continue
-            val sorted = mine.sortedWith(compareBy({ rowKey(it.b) }, { it.b[0] }))
+            val sorted = mine.let { m -> PartsPipeline.readingSort(m) { it.b } }
             val words = sorted.flatMap { it.text.split(Regex("\\s+")).filter { s -> s.isNotEmpty() } }
             sorted.forEach { it.used = true; cUsed[it.src] = true }
             splitWords(words, lines.map { texts[it.first][it.second] }).forEachIndexed { k, t -> if (t.isNotBlank()) texts[lines[k].first][lines[k].second] = t }
@@ -206,6 +208,7 @@ object HybridFuse {
                 val row = ll.indices.filter { it !in doneL }.filter { k ->
                     val p = ll[k]
                     val blk = blocks[p.first]
+                    if (blk.type !in TXT) return@filter false
                     if (hand || blk.type == BlockType.HANDWRITING) return@filter false
                     val lb = lbox(p); val lh = lb[3] - lb[1]
                     val cy = (lb[1] + lb[3]) / 2; val cx = (lb[0] + lb[2]) / 2
