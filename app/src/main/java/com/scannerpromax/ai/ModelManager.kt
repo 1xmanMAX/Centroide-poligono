@@ -37,7 +37,8 @@ sealed interface ModelState {
     }
     data class Verifying(val fileName: String) : ModelState
     data object Quantizing : ModelState
-    data class Ready(val diskBytes: Long, val quantized: Boolean) : ModelState
+    /** [warning]: listo en disco pero con un problema al usarlo (p. ej. ONNX Runtime no carga en este teléfono). */
+    data class Ready(val diskBytes: Long, val quantized: Boolean, val warning: String? = null) : ModelState
     data class Failed(val message: String, val downloaded: Long, val total: Long) : ModelState
 }
 
@@ -51,6 +52,7 @@ class ModelManager(context: Context, private val engineProvider: () -> LlmEngine
     val storage = ModelStorage(File(appContext.filesDir, "models"))
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val downloader = ResumableDownloader()
+    private val zipFetcher = ZipEntryFetcher()
 
     /** Estado transitorio publicado por el worker en curso (mismo proceso). */
     private val live = ConcurrentHashMap<String, ModelState>()
@@ -110,7 +112,7 @@ class ModelManager(context: Context, private val engineProvider: () -> LlmEngine
 
     private fun computeState(m: AiModel): ModelState {
         live[m.id]?.let { return it }
-        val total = m.totalDownloadBytes
+        val total = storage.totalBytes(m)
         val done = storage.downloadedBytes(m)
         return when (workStates[m.id]) {
             WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED -> ModelState.Queued(done, total, waitingForNetwork = true)
@@ -125,7 +127,13 @@ class ModelManager(context: Context, private val engineProvider: () -> LlmEngine
         }
     }
 
-    private fun readyState(m: AiModel) = ModelState.Ready(storage.diskUsage(m), storage.hasQuantized(m))
+    private fun readyState(m: AiModel) = ModelState.Ready(
+        storage.diskUsage(m), storage.hasQuantized(m),
+        warning = if (m.nativeLibs != null) com.scannerpromax.ai.parts.OrtNative.lastError else null,
+    )
+
+    /** Bytes a bajar de [model] en este teléfono (incluye las librerías nativas de su ABI). */
+    fun downloadSize(model: AiModel): Long = storage.totalBytes(model)
 
     private fun publishLive(id: String, s: ModelState?) {
         if (s == null) live.remove(id) else live[id] = s
@@ -140,6 +148,9 @@ class ModelManager(context: Context, private val engineProvider: () -> LlmEngine
      * (p. ej. sin espacio), o null si quedó en cola.
      */
     fun enqueueDownload(model: AiModel, wifiOnly: Boolean, quantize: Boolean): String? {
+        if (storage.nativeLibs(model) == null) {
+            return "Tu procesador (${storage.abi ?: "desconocido"}) no es compatible con ${model.name}"
+        }
         val need = requiredFreeBytes(model, quantize)
         val free = freeBytes()
         if (need > free) return "Espacio insuficiente: hacen falta ${formatBytes(need)} y hay ${formatBytes(free)} libres"
@@ -158,7 +169,7 @@ class ModelManager(context: Context, private val engineProvider: () -> LlmEngine
             .build()
         WorkManager.getInstance(appContext).enqueueUniqueWork(workName(model), ExistingWorkPolicy.KEEP, req)
         publishLive(model.id, null)
-        _states.update { it + (model.id to ModelState.Queued(storage.downloadedBytes(model), model.totalDownloadBytes, wifiOnly)) }
+        _states.update { it + (model.id to ModelState.Queued(storage.downloadedBytes(model), storage.totalBytes(model), wifiOnly)) }
         return null
     }
 
@@ -195,7 +206,7 @@ class ModelManager(context: Context, private val engineProvider: () -> LlmEngine
             val free = freeBytes()
             if (need > free) throw ModelDownloadException("Espacio insuficiente: hacen falta ${formatBytes(need)} y hay ${formatBytes(free)} libres")
             storage.dir(model).mkdirs()
-            val total = model.totalDownloadBytes
+            val total = storage.totalBytes(model)
             val skipSource = model.onDeviceQuantization?.sourceFileName?.takeIf { storage.hasQuantized(model) }
             var speedT0 = System.nanoTime()
             var speedB0 = storage.downloadedBytes(model)
@@ -239,10 +250,52 @@ class ModelManager(context: Context, private val engineProvider: () -> LlmEngine
                     throw ModelDownloadException("Fallo de red al descargar ${f.fileName}: ${e.message ?: e.javaClass.simpleName}", e)
                 }
             }
+            downloadNativeLibs(model, total, isCancelled, onProgress)
             if (quantize) quantizeIfNeeded(model, onProgress)
         } finally {
             publishLive(model.id, null)
         }
+    }
+
+    /**
+     * Librerías nativas del modelo (ONNX Runtime de la maquetación): de [AiModel.nativeLibs] solo las de la ABI de este
+     * proceso, extraídas del AAR remoto por rango (sin bajar el AAR entero) a `<id>/lib/<abi>/` y verificadas.
+     */
+    private fun downloadNativeLibs(
+        model: AiModel,
+        total: Long,
+        isCancelled: () -> Boolean,
+        onProgress: (Long, Long, String) -> Unit,
+    ) {
+        val pkg = model.nativeLibs ?: return
+        val libs = storage.nativeLibs(model)
+            ?: throw ModelDownloadException("Tu procesador (${storage.abi ?: "desconocido"}) no es compatible con ${model.name}")
+        val source = zipFetcher.http(pkg.url)
+        for (lib in libs) {
+            if (storage.isNativeLibComplete(model, lib)) continue
+            val before = total - libs.filterNot { storage.isNativeLibComplete(model, it) }.sumOf { it.compressedBytes }
+            try {
+                zipFetcher.fetch(
+                    source = source,
+                    entryName = lib.entryName,
+                    dest = storage.nativeLibFile(model, lib),
+                    expectedSize = lib.sizeBytes,
+                    sha256 = lib.sha256,
+                    isCancelled = isCancelled,
+                ) { done, _ ->
+                    val overall = before + done
+                    publishLive(model.id, ModelState.Downloading(overall, total, 0, "ONNX Runtime ${pkg.version} (${lib.abi})"))
+                    onProgress(overall, total, "Descargando motor ONNX Runtime")
+                }
+            } catch (e: ResumableDownloader.CancelledException) {
+                throw e
+            } catch (e: ResumableDownloader.VerificationException) {
+                throw ModelDownloadException("Verificación fallida de ${lib.fileName}: ${e.message}", e)
+            } catch (e: java.io.IOException) {
+                throw ModelDownloadException("Fallo de red al descargar ${lib.fileName}: ${e.message ?: e.javaClass.simpleName}", e)
+            }
+        }
+        com.scannerpromax.ai.parts.OrtNative.resetError()
     }
 
     /**
@@ -273,7 +326,8 @@ class ModelManager(context: Context, private val engineProvider: () -> LlmEngine
         val quant = if (quantize && model.onDeviceQuantization != null && !storage.hasQuantized(model)) {
             (model.llmFile.sizeBytes * 0.6).toLong()  // Q8_0 ≈ 53 % de F16 (+ margen)
         } else 0L
-        return remaining + quant + SAFETY_MARGIN_BYTES
+        // Librerías nativas: se guardan comprimidas (.zpart) y además descomprimidas.
+        return remaining + quant + storage.nativeUnpackedRemaining(model) + SAFETY_MARGIN_BYTES
     }
 
     fun freeBytes(): Long = runCatching {

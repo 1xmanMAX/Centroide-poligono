@@ -373,6 +373,9 @@ private fun ModelCard(
                     style = MaterialTheme.typography.bodyMedium,
                     color = brand.accent,
                 )
+                state.warning?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (canQuantize && !state.quantized) {

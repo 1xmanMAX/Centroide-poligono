@@ -120,8 +120,34 @@ object ModelCatalog {
     )
 
     /**
+     * ONNX Runtime nativo (libonnxruntime.so, ~13 MB comprimido por ABI) FUERA del APK: se baja con la maquetación
+     * desde el AAR oficial de Maven Central, solo la entrada de la ABI del proceso (petición HTTP Range sobre el ZIP,
+     * ~12–15 MB en vez de los 55 MB del AAR). La API Java de ORT y su puente JNI pequeño (libonnxruntime4j_jni.so,
+     * ~36 KB) siguen en el APK: en Android OnnxRuntime.init() hace System.loadLibrary("onnxruntime4j_jni") e ignora
+     * "onnxruntime.native.path"; precargando antes libonnxruntime.so con System.load el enlazador resuelve la
+     * dependencia por su soname (ver parts/OrtNative). La versión DEBE coincidir con la dependencia de Gradle
+     * (onnxruntime-android) — lo comprueba ModelCatalogTest. Tamaños/sha256 verificados con curl el 2026-10-15
+     * (AAR: 55 138 854 B, sha256 72683787…40a7, sha1 09e43472…091e = .sha1 de Maven Central).
+     */
+    val ORT_NATIVE = NativeLibs(
+        version = ORT_VERSION,
+        url = "https://repo1.maven.org/maven2/com/microsoft/onnxruntime/onnxruntime-android/$ORT_VERSION/" +
+            "onnxruntime-android-$ORT_VERSION.aar",
+        archiveSize = 55_138_854L,
+        archiveSha256 = "72683787a80d0608a3121b967d8e1239aef48286826661c953211626690540a7",
+        libs = listOf(
+            NativeLib("arm64-v8a", "libonnxruntime.so", 34_208_680L, 12_887_720L,
+                "8005a741e57117b4d7b476417706c0e9af13cf1b89db47e60f0cbc56e1af91e0"),
+            NativeLib("armeabi-v7a", "libonnxruntime.so", 24_182_012L, 11_639_973L,
+                "2a63f9a56b211511209dbf4b5bc143f18d0b365977dd7a0afd57d95c85479af6"),
+            NativeLib("x86_64", "libonnxruntime.so", 40_827_944L, 14_993_057L,
+                "068896846a7fe679cf780c1c532745286d9ef2e469f3dbde5bb9cf2c02095b18"),
+        ),
+    )
+
+    /**
      * Maquetación de páginas: PP-DocLayoutV3 (detector RT-DETR con orden de lectura, Apache 2.0) + PP-LCNet doc_ori
-     * (orientación). No es un modelo de lenguaje: se ejecuta con ONNX Runtime / OpenCV DNN (incluidos en la app) en
+     * (orientación). No es un modelo de lenguaje: se ejecuta con ONNX Runtime (su librería nativa se baja con el modelo: [ORT_NATIVE]) / OpenCV DNN en
      * ~1–3 s por página. Banco recon2: bloques DocLayNet recall 0,72 frente a 0,34 de la maquetación clásica; páginas
      * giradas 94/96. Variante fp32 oficial (la int8 total pierde 7 puntos de recall y la int8-MatMul no está publicada).
      */
@@ -133,7 +159,8 @@ object ModelCatalog {
         purpose = "Reconstruye el documento POR PARTES: localiza títulos, párrafos, tablas, gráficos, fórmulas, imágenes, " +
             "cabeceras y pies con su orden de lectura, y endereza las páginas giradas. Mejora mucho el PDF reconstruido " +
             "con el Lector de documentos y con la IA en la nube.",
-        description = "Detector de maquetación de documentos (no lee texto): cada región va a la herramienta adecuada.",
+        description = "Detector de maquetación de documentos (no lee texto): cada región va a la herramienta adecuada. " +
+            "Incluye el motor ONNX Runtime para tu procesador (~13 MB).",
         role = ModelRole.PAGE_LAYOUT,
         files = listOf(
             ModelFile(
@@ -159,7 +186,10 @@ object ModelCatalog {
             repeatPenalty = 1f, useChatTemplate = false, enableThinking = false,
         ),
         tasks = emptyList(),
+        nativeLibs = ORT_NATIVE,
     )
+
+    const val ORT_VERSION = "1.31.0"
 
     const val LAYOUT_FILE = "pp_doclayoutv3.onnx"
     const val ORIENTATION_FILE = "pp_lcnet_doc_ori.onnx"
@@ -218,6 +248,32 @@ data class ModelFile(
     val sha256: String? = null,
 )
 
+/**
+ * Librerías nativas dentro de un ZIP/AAR remoto ([url]): cada una es la entrada `jni/<abi>/<fileName>` y se guarda en
+ * `<modelo>/lib/<abi>/<fileName>`. [NativeLib.sizeBytes]/[NativeLib.sha256] = archivo descomprimido;
+ * [NativeLib.compressedBytes] = lo que se baja.
+ */
+data class NativeLibs(
+    val version: String,
+    val url: String,
+    val archiveSize: Long,
+    val archiveSha256: String,
+    val libs: List<NativeLib>,
+) {
+    fun forAbi(abi: String?): List<NativeLib>? = libs.filter { it.abi == abi }.takeIf { it.isNotEmpty() }
+    val abis: List<String> get() = libs.map { it.abi }.distinct()
+}
+
+data class NativeLib(
+    val abi: String,
+    val fileName: String,
+    val sizeBytes: Long,
+    val compressedBytes: Long,
+    val sha256: String,
+) {
+    val entryName: String get() = "jni/$abi/$fileName"
+}
+
 data class OnDeviceQuantization(
     val sourceFileName: String,
     val outputFileName: String,
@@ -268,8 +324,14 @@ data class AiModel(
     val onDeviceQuantization: OnDeviceQuantization?,
     val defaults: GenerationDefaults,
     val tasks: List<ModelTask>,
+    /** Librerías nativas que se bajan con el modelo (solo las de la ABI del dispositivo), o null. */
+    val nativeLibs: NativeLibs? = null,
 ) {
-    val totalDownloadBytes: Long get() = files.sumOf { it.sizeBytes.coerceAtLeast(0) }
+    /** Bytes a bajar en este dispositivo: archivos + librerías nativas comprimidas de su ABI ([NativeAbi.current]). */
+    val totalDownloadBytes: Long get() = downloadBytes(NativeAbi.current)
+
+    fun downloadBytes(abi: String?): Long =
+        files.sumOf { it.sizeBytes.coerceAtLeast(0) } + (nativeLibs?.forAbi(abi)?.sumOf { it.compressedBytes } ?: 0L)
     val llmFile: ModelFile get() = files.first { it.kind == FileKind.LLM }
     /** ¿Es un modelo de lenguaje (llama.cpp)? Los ONNX (maquetación) no se cargan en LlmEngine ni se prueban con prompts. */
     val isLlm: Boolean get() = files.any { it.kind == FileKind.LLM }
