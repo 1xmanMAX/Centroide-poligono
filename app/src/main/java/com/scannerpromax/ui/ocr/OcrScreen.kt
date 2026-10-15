@@ -997,6 +997,10 @@ private fun AiReadRow(
                 Text("En cola para leer con IA", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
                 TextButton(onClick = onCancel) { Text("Cancelar") }
             }
+            AiRecognitionQueue.PageStatus.WaitingNetwork -> {
+                Text("Esperando conexión para leer con IA en la nube", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                TextButton(onClick = onCancel) { Text("Cancelar") }
+            }
             null -> {
                 Text(
                     if (readByAi) "Texto leído con IA" else "Texto del OCR básico",

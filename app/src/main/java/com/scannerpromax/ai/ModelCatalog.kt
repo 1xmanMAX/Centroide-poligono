@@ -227,8 +227,16 @@ data class AiModel(
     fun task(id: String): ModelTask? = tasks.firstOrNull { it.id == id }
 }
 
-/** Motor de reconocimiento principal elegido por el usuario (Ajustes > Modelos IA). */
-enum class RecognitionEngine(val label: String, val description: String, val role: ModelRole?) {
+/**
+ * Motor de reconocimiento principal elegido por el usuario (Ajustes > Modelos IA / IA en la nube). [role] = modelo
+ * local descargable; [cloud] = proveedor en la nube con la clave del usuario; ambos null = Básico (ML Kit).
+ */
+enum class RecognitionEngine(
+    val label: String,
+    val description: String,
+    val role: ModelRole?,
+    val cloud: com.scannerpromax.ai.cloud.CloudProviderId? = null,
+) {
     DOCUMENT_READER(
         "Lector de documentos (PaddleOCR-VL)",
         "Máxima precisión en texto, tablas y fórmulas. Requiere descargar el modelo.",
@@ -239,9 +247,24 @@ enum class RecognitionEngine(val label: String, val description: String, val rol
         "Entiende y reescribe la página. Requiere descargar el modelo.",
         ModelRole.VISUAL_ASSISTANT,
     ),
+    NUBE_DEEPSEEK(
+        "IA en la nube: DeepSeek",
+        "Envía cada página a DeepSeek (servidores en China) con tu clave de API. Requiere internet.",
+        null,
+        com.scannerpromax.ai.cloud.CloudProviderId.DEEPSEEK,
+    ),
+    NUBE_CLAUDE_HAIKU(
+        "IA en la nube: Claude Haiku 5.5",
+        "Envía cada página a Anthropic (servidores en EE. UU.) con tu clave de API. Requiere internet.",
+        null,
+        com.scannerpromax.ai.cloud.CloudProviderId.CLAUDE_HAIKU,
+    ),
     BASIC(
         "Básico sin descarga (ML Kit)",
         "Reconocimiento rápido incluido en la app, menos preciso.",
         null,
     ),
+    ;
+
+    val isLocalModel: Boolean get() = role != null
 }

@@ -59,6 +59,9 @@ class SettingsRepository(private val context: Context) {
             prefs[Keys.AI_QUANTIZE_ON_DEVICE] = updated.aiQuantizeOnDevice
             prefs[Keys.AI_AUTO_ENHANCE] = updated.aiAutoEnhance
             prefs[Keys.AI_FRAME_RESCUE] = updated.aiFrameRescue
+            prefs[Keys.CLOUD_WIFI_ONLY] = updated.cloudWifiOnly
+            prefs[Keys.CLOUD_CONSENT_DEEPSEEK] = updated.cloudConsentDeepSeek
+            prefs[Keys.CLOUD_CONSENT_CLAUDE] = updated.cloudConsentClaude
         }
     }
 
@@ -92,6 +95,9 @@ class SettingsRepository(private val context: Context) {
             aiQuantizeOnDevice = this[Keys.AI_QUANTIZE_ON_DEVICE] ?: d.aiQuantizeOnDevice,
             aiAutoEnhance = this[Keys.AI_AUTO_ENHANCE] ?: d.aiAutoEnhance,
             aiFrameRescue = this[Keys.AI_FRAME_RESCUE] ?: d.aiFrameRescue,
+            cloudWifiOnly = this[Keys.CLOUD_WIFI_ONLY] ?: d.cloudWifiOnly,
+            cloudConsentDeepSeek = this[Keys.CLOUD_CONSENT_DEEPSEEK] ?: d.cloudConsentDeepSeek,
+            cloudConsentClaude = this[Keys.CLOUD_CONSENT_CLAUDE] ?: d.cloudConsentClaude,
         )
     }
 
@@ -117,6 +123,9 @@ class SettingsRepository(private val context: Context) {
         val AI_QUANTIZE_ON_DEVICE = booleanPreferencesKey("ai_quantize_on_device")
         val AI_AUTO_ENHANCE = booleanPreferencesKey("ai_auto_enhance")
         val AI_FRAME_RESCUE = booleanPreferencesKey("ai_frame_rescue")
+        val CLOUD_WIFI_ONLY = booleanPreferencesKey("cloud_wifi_only")
+        val CLOUD_CONSENT_DEEPSEEK = booleanPreferencesKey("cloud_consent_deepseek")
+        val CLOUD_CONSENT_CLAUDE = booleanPreferencesKey("cloud_consent_claude")
     }
 
     private companion object {
@@ -160,4 +169,19 @@ data class AppSettings(
     val aiAutoEnhance: Boolean = true,
     /** Con el Asistente visual descargado: si no se detectan los bordes, pedirle dónde está el documento. */
     val aiFrameRescue: Boolean = true,
-)
+    /** IA en la nube: enviar páginas solo con Wi-Fi / red no medida (si no, esperan en la cola). */
+    val cloudWifiOnly: Boolean = false,
+    /** Consentimiento explícito (una vez por proveedor) para enviar páginas a sus servidores. */
+    val cloudConsentDeepSeek: Boolean = false,
+    val cloudConsentClaude: Boolean = false,
+) {
+    fun cloudConsent(id: com.scannerpromax.ai.cloud.CloudProviderId): Boolean = when (id) {
+        com.scannerpromax.ai.cloud.CloudProviderId.DEEPSEEK -> cloudConsentDeepSeek
+        com.scannerpromax.ai.cloud.CloudProviderId.CLAUDE_HAIKU -> cloudConsentClaude
+    }
+
+    fun withCloudConsent(id: com.scannerpromax.ai.cloud.CloudProviderId, v: Boolean): AppSettings = when (id) {
+        com.scannerpromax.ai.cloud.CloudProviderId.DEEPSEEK -> copy(cloudConsentDeepSeek = v)
+        com.scannerpromax.ai.cloud.CloudProviderId.CLAUDE_HAIKU -> copy(cloudConsentClaude = v)
+    }
+}

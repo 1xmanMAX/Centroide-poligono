@@ -72,7 +72,21 @@ class AppContainer(context: Context) {
             documents = { documents },
             detector = { pageProcessor.detector },
             tier = deviceTier,
+            cloud = cloudRecognizer,
+            cloudKeys = cloudKeys,
+            cloudUsage = cloudUsage,
         )
+    }
+
+    /** IA en la nube (opcional): claves cifradas con el Keystore, contadores de uso y lector. */
+    val cloudKeys: com.scannerpromax.ai.cloud.CloudKeyStore by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        com.scannerpromax.ai.cloud.CloudKeyStore(appContext)
+    }
+    val cloudUsage: com.scannerpromax.ai.cloud.CloudUsageStore by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        com.scannerpromax.ai.cloud.CloudUsageStore(appContext)
+    }
+    val cloudRecognizer: com.scannerpromax.ai.cloud.CloudRecognizer by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        com.scannerpromax.ai.cloud.CloudRecognizer(cloudKeys, cloudUsage)
     }
 
     /** El procesador solo si ya existe (para liberar cachés sin crearlo por accidente). */
