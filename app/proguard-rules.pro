@@ -35,3 +35,7 @@
 -keep class com.scannerpromax.ai.LlmNative { *; }
 -keep interface com.scannerpromax.ai.LlmNative$TextCallback { *; }
 -keep class * implements com.scannerpromax.ai.LlmNative$TextCallback { boolean onText(java.lang.String); }
+
+# ONNX Runtime (maquetación de páginas): el código nativo busca por nombre las clases Java (OnnxTensor, OrtSession$Result,
+# OrtException...). Sin esto R8 las renombra y la carga del modelo falla en la release.
+-keep class ai.onnxruntime.** { *; }
