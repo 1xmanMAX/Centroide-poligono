@@ -848,10 +848,13 @@ internal fun OcrContent(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                PrimaryCapsuleButton("Copiar", onClick = onCopy, icon = AppIcons.Copy, enabled = hasText, tonal = true, height = 48.dp, modifier = Modifier.weight(1f))
-                PrimaryCapsuleButton("Compartir", onClick = onShare, icon = AppIcons.Share, enabled = hasText, tonal = true, height = 48.dp, modifier = Modifier.weight(1f))
+                // Copiar y Compartir como botones redondos (con su nombre accesible); Guardar, la cápsula principal.
+                IconCircleButton(AppIcons.Copy, "Copiar texto", onCopy, size = 48.dp, containerColor = ui.fill, contentColor = ui.label, elevation = 0.dp, enabled = hasText)
+                IconCircleButton(AppIcons.Share, "Compartir texto", onShare, size = 48.dp, containerColor = ui.fill, contentColor = ui.label, elevation = 0.dp, enabled = hasText)
                 if (showSave) {
-                    PrimaryCapsuleButton("Guardar", onClick = onSave, enabled = saveEnabled, height = 48.dp, modifier = Modifier.weight(1f))
+                    PrimaryCapsuleButton("Guardar corrección", onClick = onSave, enabled = saveEnabled, height = 48.dp, modifier = Modifier.weight(1f))
+                } else {
+                    PrimaryCapsuleButton("Copiar todo", onClick = onCopy, enabled = hasText, tonal = true, height = 48.dp, modifier = Modifier.weight(1f))
                 }
             }
         }

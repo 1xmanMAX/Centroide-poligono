@@ -137,7 +137,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
-private enum class EditorTool(val label: String, val icon: ImageVector) {
+internal enum class EditorTool(val label: String, val icon: ImageVector) {
     CROP("Recortar", AppIcons.Crop),
     FILTERS("Filtros", AppIcons.Filters),
     CLEAN("Limpiar", AppIcons.Clean),
@@ -709,7 +709,7 @@ private fun ProcessingBadge(session: EditorSession, hidden: Boolean, modifier: M
 
 /** Herramienta de la barra inferior: icono 24 + etiqueta 11; la activa en blanco, el resto al 60 %. */
 @Composable
-private fun ToolTab(tool: EditorTool, selected: Boolean, enabled: Boolean, onClick: () -> Unit) {
+internal fun ToolTab(tool: EditorTool, selected: Boolean, enabled: Boolean, onClick: () -> Unit) {
     val fg by animateColorAsState(if (selected) Color.White else Dim, label = "tabFg")
     Column(
         Modifier
@@ -749,7 +749,7 @@ private fun PanelButton(icon: ImageVector, label: String, modifier: Modifier = M
 
 /** Acción de texto discreta ("Ajustes finos", "Aplicar a todas"). */
 @Composable
-private fun TextAction(label: String, onClick: () -> Unit, highlighted: Boolean = false) {
+internal fun TextAction(label: String, onClick: () -> Unit, highlighted: Boolean = false) {
     Text(
         label,
         color = if (highlighted) Color.White else Color.White.copy(alpha = 0.7f),

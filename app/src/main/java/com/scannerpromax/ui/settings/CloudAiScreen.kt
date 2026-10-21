@@ -360,7 +360,7 @@ private fun ProviderCard(
                             Text("En uso como motor de reconocimiento", style = MaterialTheme.typography.titleSmall, color = ui.label)
                         }
                     } else {
-                        CardButton("Usar como motor de reconocimiento", onUse, Modifier.fillMaxWidth())
+                        CardButton("Usar como motor", onUse, Modifier.fillMaxWidth())
                     }
                 } else {
                     Box(Modifier.clip(RoundedCornerShape(10.dp)).background(ui.groupedBackground)) {
