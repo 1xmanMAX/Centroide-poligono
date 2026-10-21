@@ -173,9 +173,12 @@ import com.scannerpromax.domain.ScanMode
 import com.scannerpromax.imaging.Cv
 import com.scannerpromax.imaging.HeavyWork
 import com.scannerpromax.imaging.MultiFrameFusion
-import com.scannerpromax.ui.components.GradientButton
-import com.scannerpromax.ui.components.LoadingOverlay
-import com.scannerpromax.ui.theme.brand
+import com.scannerpromax.ui.theme.ui
+import com.scannerpromax.ui.components.AlertAction
+import com.scannerpromax.ui.components.AppIcons
+import com.scannerpromax.ui.components.IosAlert
+import com.scannerpromax.ui.components.MoreMenuItem
+import com.scannerpromax.ui.components.ProgressHud
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -276,123 +279,19 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
     else -> null
 }
 
-@Composable
-private fun PermissionScreen(
-    permanentlyDenied: Boolean,
-    onRequest: () -> Unit,
-    onOpenSettings: () -> Unit,
-    onBack: () -> Unit,
-) {
-    BackHandler(onBack = onBack)
-    val brand = MaterialTheme.brand
-    val pulse = rememberInfiniteTransition(label = "pulse")
-    val glow by pulse.animateFloat(
-        initialValue = 0.85f, targetValue = 1.08f,
-        animationSpec = infiniteRepeatable(tween(1400, easing = FastOutSlowInEasing), RepeatMode.Reverse),
-        label = "glow",
-    )
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .background(brand.backdrop)
-            .statusBarsPadding()
-            .navigationBarsPadding(),
-    ) {
-        RoundIconButton(Icons.Filled.Close, "Cerrar", onBack, Modifier.padding(12.dp), dark = false)
-        Column(
-            Modifier.fillMaxSize().padding(horizontal = 28.dp),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                Box(
-                    Modifier
-                        .size(150.dp)
-                        .graphicsLayer { scaleX = glow; scaleY = glow; alpha = 0.35f }
-                        .clip(CircleShape)
-                        .background(Brush.radialGradient(listOf(brand.gradientStart, Color.Transparent))),
-                )
-                Box(
-                    Modifier
-                        .size(104.dp)
-                        .shadow(18.dp, CircleShape, ambientColor = brand.glow, spotColor = brand.glow)
-                        .clip(CircleShape)
-                        .background(brand.gradient),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(Icons.Filled.CameraAlt, null, tint = Color.White, modifier = Modifier.size(48.dp))
-                }
-            }
-            Spacer(Modifier.height(32.dp))
-            Text(
-                "Activa la cámara para escanear",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
-                textAlign = TextAlign.Center,
-                color = MaterialTheme.colorScheme.onBackground,
-            )
-            Spacer(Modifier.height(12.dp))
-            Text(
-                "ESCÁNER PRO MAX necesita la cámara para detectar los bordes del documento en tiempo real y capturarlo con la máxima calidad.",
-                style = MaterialTheme.typography.bodyLarge,
-                textAlign = TextAlign.Center,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(24.dp))
-            PermissionBullet(Icons.Filled.AutoAwesome, "Detección automática de bordes y mejora mágica")
-            PermissionBullet(Icons.Filled.Lock, "Todo se procesa en tu teléfono: nada se sube a internet")
-            PermissionBullet(Icons.Filled.TouchApp, "Toca la pantalla para enfocar y usa el flash con poca luz")
-            Spacer(Modifier.height(32.dp))
-            GradientButton(
-                text = if (permanentlyDenied) "Abrir ajustes" else "Permitir cámara",
-                icon = Icons.Filled.CameraAlt,
-                onClick = if (permanentlyDenied) onOpenSettings else onRequest,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            if (permanentlyDenied) {
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    "El permiso fue denegado. Actívalo en Ajustes > Permisos > Cámara.",
-                    style = MaterialTheme.typography.bodySmall,
-                    textAlign = TextAlign.Center,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun PermissionBullet(icon: ImageVector, text: String) {
-    Row(
-        Modifier.fillMaxWidth().padding(vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            Modifier.size(34.dp).clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
-            contentAlignment = Alignment.Center,
-        ) { Icon(icon, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp)) }
-        Spacer(Modifier.width(12.dp))
-        Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
-    }
-}
-
 // =================================================================================================
 // Cámara
 // =================================================================================================
 
-/** Alto reservado para los controles bajo la vista previa (modos + obturador). */
-private val CONTROLS_HEIGHT = 178.dp
 
 /**
  * Modo poca luz / anti-reflejos (ráfaga + fusión multi-cuadro). AUTO: se activa solo cuando el análisis en vivo
  * detecta oscuridad o reflejos.
  */
-private enum class LowLightSetting(val label: String) {
-    AUTO("Poca luz / anti-reflejos: automático"),
-    ON("Poca luz / anti-reflejos: activado"),
-    OFF("Poca luz / anti-reflejos: desactivado"),
+private enum class LowLightSetting(val label: String, val menuLabel: String) {
+    AUTO("Poca luz / anti-reflejos: automático", "Poca luz: automático"),
+    ON("Poca luz / anti-reflejos: activado", "Poca luz: activado"),
+    OFF("Poca luz / anti-reflejos: desactivado", "Poca luz: desactivado"),
 }
 
 @Composable
@@ -408,9 +307,7 @@ private fun CameraContent(
     val lifecycleOwner = LocalLifecycleOwner.current
     val haptics = LocalHapticFeedback.current
     val density = LocalDensity.current
-    val brand = MaterialTheme.brand
-    val gradStart = brand.gradientStart
-    val gradEnd = brand.gradientEnd
+    val accent = MaterialTheme.ui.accent
 
     val settingsFlow = remember(container) { container.settings.settings }
     val settings by settingsFlow.collectAsState(initial = AppSettings())
@@ -854,14 +751,6 @@ private fun CameraContent(
 
     val hintArea: @Composable () -> Unit = {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            if (zoom.supported && ready) {
-                ZoomSelector(
-                    ratio = zoom.ratio,
-                    max = zoom.max,
-                    onSelect = { engine.setZoom(it) },
-                )
-                Spacer(Modifier.height(8.dp))
-            }
             AnimatedContent(
                 targetState = hint,
                 transitionSpec = { (fadeIn(tween(220)) + slideInVertically { it / 3 }) togetherWith fadeOut(tween(150)) },
@@ -882,263 +771,194 @@ private fun CameraContent(
                 )
             }
             AnimatedVisibility(visible = mode == ScanMode.ID_CARD && idFront != null) {
-                TextButton(onClick = { skipBack() }, modifier = Modifier.heightIn(min = 48.dp)) {
-                    Icon(Icons.Filled.SkipNext, null, tint = Color.White, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Omitir reverso (solo una cara)", color = Color.White)
-                }
+                SkipBackButton(onClick = { skipBack() })
             }
         }
     }
 
-    val controls: @Composable () -> Unit = {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            ModeSelector(selected = mode, onSelect = { changeMode(it) })
-            Spacer(Modifier.height(14.dp))
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 24.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
+    // Menú ••• de la cámara: poca luz / anti-reflejos (3 estados), cámara del teléfono y resolución (detalles).
+    val menuGroups = listOf(
+        LowLightSetting.entries.map { s ->
+            MoreMenuItem(s.menuLabel, icon = if (s == lowLight) AppIcons.Check else null) {
+                lowLight = s
+                toast(s.label)
+            }
+        },
+        listOf(MoreMenuItem("Cámara del teléfono", AppIcons.Phone) { launchSystemCamera() }),
+        listOf(
+            MoreMenuItem(
+                captureInfo?.let { "Resolución: ${it.chipLabel}" } ?: "Resolución: —",
+                AppIcons.Resolution,
+                enabled = captureInfo != null,
+            ) { captureInfo?.let { Toast.makeText(appContext, it.details, Toast.LENGTH_LONG).show() } },
+        ),
+    )
+
+    CameraScaffold(
+        topBar = {
+            CameraTopBar(
+                onClose = { requestClose() },
+                showAutoToggle = mode != ScanMode.PHOTO,
+                autoCapture = settings.autoCapture,
+                onAutoCapture = { newValue ->
+                    workScope.launch { container.settings.update { it.copy(autoCapture = newValue) } }
+                    toast(if (newValue) "Captura automática activada" else "Captura automática desactivada")
+                },
+                hasFlash = hasFlash,
+                flash = flash,
+                onFlash = {
+                    flash = FlashSetting.entries[(flash.ordinal + 1) % FlashSetting.entries.size]
+                    toast(flash.label)
+                },
+                lowLightActive = burstWanted(),
+                menuGroups = menuGroups,
+            )
+        },
+        preview = {
+            AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .onSizeChanged { viewSize = it }
+                    .pointerInput(Unit) {
+                        // Pellizco = zoom. Se procesa en la pasada inicial y consume los eventos con 2+ dedos
+                        // para que no cuenten como toque (enfoque) ni como deslizamiento (cambio de modo).
+                        awaitEachGesture {
+                            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                            do {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                val pressed = event.changes.count { it.pressed }
+                                if (pressed >= 2) {
+                                    val factor = event.calculateZoom()
+                                    if (factor != 1f && factor.isFinite()) {
+                                        engine.setZoom(engine.zoom.value.ratio * factor)
+                                    }
+                                    event.changes.forEach { it.consume() }
+                                }
+                            } while (event.changes.any { it.pressed })
+                        }
+                    }
+                    .pointerInput(Unit) {
+                        detectTapGestures { off ->
+                            engine.focusAt(previewView, off.x, off.y)
+                            focusPoint = off
+                            focusKey++
+                        }
+                    }
+                    .pointerInput(Unit) {
+                        // Deslizar horizontalmente sobre la vista previa cambia de modo, en el orden del selector
+                        // (desactivado mientras hay un anverso de DNI pendiente).
+                        var total = 0f
+                        val threshold = with(density) { 70.dp.toPx() }
+                        detectHorizontalDragGestures(
+                            onDragStart = { total = 0f },
+                            onHorizontalDrag = { change, amount -> total += amount; change.consume() },
+                            onDragEnd = {
+                                val modes = CameraModeOrder
+                                val idx = modes.indexOf(modeState)
+                                if (abs(total) > threshold && idFront == null) {
+                                    val next = if (total < 0) idx + 1 else idx - 1
+                                    if (next in modes.indices) changeMode(modes[next])
+                                }
+                            },
+                        )
+                    },
             ) {
-                Box(Modifier.width(76.dp), contentAlignment = Alignment.CenterStart) {
-                    RoundIconButton(
-                        Icons.Filled.PhotoLibrary, "Importar de la galería", size = 52.dp,
-                        onClick = {
-                            runCatching {
-                                galleryLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                            }.onFailure { toast("No hay una galería disponible") }
-                        },
+                DetectionOverlay(smoothed, mode, { stableProgress }, accent, accent)
+                FocusRing(focusPoint, focusKey, CameraYellow)
+            }
+            ShutterFlashOverlay { shutterFlash.value }
+            // Resolución REAL de la foto: si es baja en un equipo de gama alta, se avisa (tocar = detalles;
+            // conviene usar la cámara del teléfono). Siempre consultable en el menú •••.
+            captureInfo?.let { info ->
+                val low = info.megapixels < 7.5 && (info.maxWidth ?: 0).toLong() * (info.maxHeight ?: 0) > 8_000_000L
+                if (low) {
+                    ResolutionWarningChip(
+                        info.chipLabel,
+                        onClick = { Toast.makeText(appContext, info.details, Toast.LENGTH_LONG).show() },
+                        modifier = Modifier.align(Alignment.TopCenter).padding(top = 10.dp),
                     )
                 }
-                ShutterButton(
-                    enabled = ready && !capturing && !finishing,
-                    progress = { stableProgress },
-                    busy = capturing,
-                    onClick = { captureNow() },
-                )
-                Box(Modifier.width(76.dp), contentAlignment = Alignment.CenterEnd) {
-                    BatchThumbnail(
-                        container = container,
-                        doc = doc,
+            }
+        },
+        hintArea = hintArea,
+        controls = {
+            Box(Modifier.height(40.dp), contentAlignment = Alignment.Center) {
+                if (zoom.supported && ready) {
+                    ZoomPills(ratio = zoom.ratio, min = zoom.min, max = zoom.max, onSelect = { engine.setZoom(it) })
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            ModeTextSelector(selected = mode, onSelect = { changeMode(it) })
+            Spacer(Modifier.height(8.dp))
+            CameraBottomRow(
+                gallery = {
+                    GalleryButton(onClick = {
+                        runCatching {
+                            galleryLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                        }.onFailure { toast("No hay una galería disponible") }
+                    })
+                },
+                shutter = {
+                    ShutterButton(
+                        enabled = ready && !capturing && !finishing,
+                        progress = { stableProgress },
+                        busy = capturing,
+                        onClick = { captureNow() },
+                    )
+                },
+                batch = {
+                    BatchButton(
+                        count = pageCount,
                         processing = pendingJobs > 0 || idFront != null,
                         onDone = { finish() },
-                    )
-                }
+                    ) { LastPageThumbnail(container, doc) }
+                },
+            )
+        },
+        overlays = {
+            if (cameraError != null) {
+                CameraErrorCard(cameraError ?: "", Modifier.align(Alignment.Center))
             }
-        }
-    }
-
-    BoxWithConstraints(Modifier.fillMaxSize().background(Color.Black)) {
-        val topInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
-        val bottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-        // Vista previa 3:4 (lo que se ve = lo que se captura) arriba y los controles en la franja de abajo.
-        // Si la pantalla es demasiado baja, la vista previa ocupa todo y los controles van superpuestos.
-        val availableH = maxHeight - topInset - bottomInset - CONTROLS_HEIGHT
-        val stacked = availableH >= maxWidth * 0.95f
-        val previewH: Dp = if (stacked) min(maxWidth * 4f / 3f, availableH) else maxHeight
-        val previewW: Dp = if (stacked) min(maxWidth, previewH * 3f / 4f) else maxWidth
-
-        Column(Modifier.fillMaxSize()) {
-            if (stacked) Spacer(Modifier.height(topInset))
-            Box(Modifier.fillMaxWidth().height(previewH), contentAlignment = Alignment.TopCenter) {
-                Box(
-                    Modifier
-                        .width(previewW)
-                        .height(previewH)
-                        .clip(if (stacked) RoundedCornerShape(bottomStart = 22.dp, bottomEnd = 22.dp) else RoundedCornerShape(0.dp)),
-                ) {
-                    AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
-                    Box(
-                        Modifier
-                            .fillMaxSize()
-                            .onSizeChanged { viewSize = it }
-                            .pointerInput(Unit) {
-                                // Pellizco = zoom. Se procesa en la pasada inicial y consume los eventos con 2+ dedos
-                                // para que no cuenten como toque (enfoque) ni como deslizamiento (cambio de modo).
-                                awaitEachGesture {
-                                    awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-                                    do {
-                                        val event = awaitPointerEvent(PointerEventPass.Initial)
-                                        val pressed = event.changes.count { it.pressed }
-                                        if (pressed >= 2) {
-                                            val factor = event.calculateZoom()
-                                            if (factor != 1f && factor.isFinite()) {
-                                                engine.setZoom(engine.zoom.value.ratio * factor)
-                                            }
-                                            event.changes.forEach { it.consume() }
-                                        }
-                                    } while (event.changes.any { it.pressed })
-                                }
-                            }
-                            .pointerInput(Unit) {
-                                detectTapGestures { off ->
-                                    engine.focusAt(previewView, off.x, off.y)
-                                    focusPoint = off
-                                    focusKey++
-                                }
-                            }
-                            .pointerInput(Unit) {
-                                // Deslizar horizontalmente sobre la vista previa cambia de modo
-                                // (desactivado mientras hay un anverso de DNI pendiente).
-                                var total = 0f
-                                val threshold = with(density) { 70.dp.toPx() }
-                                detectHorizontalDragGestures(
-                                    onDragStart = { total = 0f },
-                                    onHorizontalDrag = { change, amount -> total += amount; change.consume() },
-                                    onDragEnd = {
-                                        val modes = ScanMode.entries
-                                        val idx = modes.indexOf(modeState)
-                                        if (abs(total) > threshold && idFront == null) {
-                                            val next = if (total < 0) idx + 1 else idx - 1
-                                            if (next in modes.indices) changeMode(modes[next])
-                                        }
-                                    },
-                                )
-                            },
-                    ) {
-                        DetectionOverlay(smoothed, mode, { stableProgress }, gradStart, gradEnd)
-                        FocusRing(focusPoint, focusKey, gradEnd)
-                    }
-                    ShutterFlashOverlay { shutterFlash.value }
-                    if (stacked) {
-                        Box(Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp, start = 12.dp, end = 12.dp)) { hintArea() }
-                    }
-                }
-            }
-            if (stacked) {
-                Box(
-                    Modifier.fillMaxWidth().weight(1f).padding(bottom = bottomInset),
-                    contentAlignment = Alignment.Center,
-                ) { controls() }
-            }
-        }
-
-        if (!stacked) {
-            Column(
-                Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.55f), Color.Black.copy(alpha = 0.85f))))
-                    .navigationBarsPadding()
-                    .padding(bottom = 12.dp, top = 28.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                hintArea()
-                Spacer(Modifier.height(10.dp))
-                controls()
-            }
-        }
-
-        // ------------------------------------------------ barra superior (sobre la vista previa)
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.55f), Color.Transparent)))
-                .statusBarsPadding()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-        ) {
-            Row(
-                Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                RoundIconButton(Icons.Filled.Close, "Cerrar", onClick = { requestClose() })
-                Spacer(Modifier.weight(1f))
-                RoundIconButton(
-                    Icons.Filled.PhotoCamera, "Cámara del teléfono",
-                    onClick = { launchSystemCamera() },
-                )
-                Spacer(Modifier.width(8.dp))
-                LowLightToggle(
-                    setting = lowLight,
-                    active = burstWanted(),
-                    onClick = {
-                        lowLight = LowLightSetting.entries[(lowLight.ordinal + 1) % LowLightSetting.entries.size]
-                        toast(lowLight.label)
-                    },
-                )
-                Spacer(Modifier.width(8.dp))
-                AutoCaptureToggle(
-                    enabled = settings.autoCapture,
-                    visible = mode != ScanMode.PHOTO,
-                    onToggle = {
-                        val newValue = !settings.autoCapture
-                        workScope.launch { container.settings.update { it.copy(autoCapture = newValue) } }
-                        toast(if (newValue) "Captura automática activada" else "Captura automática desactivada")
-                    },
-                )
-                Spacer(Modifier.width(8.dp))
-                if (hasFlash) {
-                    val icon = when (flash) {
-                        FlashSetting.OFF -> Icons.Filled.FlashOff
-                        FlashSetting.AUTO -> Icons.Filled.FlashAuto
-                        FlashSetting.ON -> Icons.Filled.FlashOn
-                        FlashSetting.TORCH -> Icons.Filled.FlashlightOn
-                    }
-                    RoundIconButton(
-                        icon, flash.label,
-                        highlighted = flash != FlashSetting.OFF,
-                        onClick = {
-                            flash = FlashSetting.entries[(flash.ordinal + 1) % FlashSetting.entries.size]
-                            toast(flash.label)
-                        },
-                    )
-                }
-            }
-            // Resolución REAL de la foto (tócala para ver detalles): si aquí no pone ~12 MP en un equipo de gama alta,
-            // la foto sale pequeña y conviene usar la cámara del teléfono.
-            captureInfo?.let { info ->
-                ResolutionChip(
-                    info,
-                    onClick = { Toast.makeText(appContext, info.details, Toast.LENGTH_LONG).show() },
-                    modifier = Modifier.padding(top = 6.dp),
-                )
-            }
-        }
-
-        if (cameraError != null) {
-            Column(
-                Modifier.align(Alignment.Center).padding(32.dp).clip(RoundedCornerShape(20.dp))
-                    .background(Color.Black.copy(alpha = 0.75f)).padding(24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Icon(Icons.Filled.CameraAlt, null, tint = Color.White, modifier = Modifier.size(40.dp))
-                Spacer(Modifier.height(12.dp))
-                Text(cameraError ?: "", color = Color.White, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    "Puedes usar la cámara del teléfono o importar imágenes desde la galería.",
-                    color = Color.White.copy(alpha = 0.8f),
-                    style = MaterialTheme.typography.bodyMedium,
-                    textAlign = TextAlign.Center,
-                )
-            }
-        }
-
-        LoadingOverlay(
-            visible = finishing,
-            message = if (pendingJobs > 0) "Mejorando $pendingJobs ${if (pendingJobs == 1) "captura" else "capturas"}…" else "Preparando documento…",
-            modifier = Modifier.fillMaxSize(),
-        )
-    }
+            ProgressHud(
+                visible = finishing,
+                message = if (pendingJobs > 0) "Mejorando $pendingJobs ${if (pendingJobs == 1) "captura" else "capturas"}…" else "Preparando documento…",
+                modifier = Modifier.fillMaxSize(),
+            )
+        },
+    )
 
     if (showDiscard) {
-        AlertDialog(
-            onDismissRequest = { showDiscard = false },
-            title = { Text("¿Guardar el escaneo?") },
-            text = { Text("Tienes páginas capturadas. Puedes guardarlas en un documento o descartarlas.") },
-            confirmButton = {
-                TextButton(onClick = { showDiscard = false; finish() }) { Text("Guardar") }
-            },
-            dismissButton = {
-                Row {
-                    TextButton(onClick = { showDiscard = false; discard() }) {
-                        Text("Descartar", color = MaterialTheme.colorScheme.error)
-                    }
-                    TextButton(onClick = { showDiscard = false }) { Text("Seguir") }
-                }
-            },
-            shape = MaterialTheme.shapes.extraLarge,
+        IosAlert(
+            title = "¿Guardar el escaneo?",
+            message = "Tienes páginas capturadas. Puedes guardarlas en un documento o descartarlas.",
+            onDismiss = { showDiscard = false },
+            actions = listOf(
+                AlertAction("Guardar", bold = true) { finish() },
+                AlertAction("Descartar", destructive = true) { discard() },
+                AlertAction("Seguir escaneando") { },
+            ),
         )
+    }
+}
+
+/** Última página del lote (miniatura del cuadrado de 36 dp de [BatchButton]). */
+@Composable
+private fun LastPageThumbnail(container: AppContainer, doc: Document?) {
+    val last = doc?.pages?.lastOrNull() ?: return
+    // El archivo se resuelve en IO y sólo cuando cambia la página (thumbFile consulta el disco).
+    val ctx = LocalContext.current
+    val file by produceState<File?>(null, doc.id, last.id, last.thumbFile, last.processedFile) {
+        value = withContext(Dispatchers.IO) {
+            container.documents.thumbFile(doc.id, last) ?: container.documents.originalFile(doc.id, last)
+        }
+    }
+    val thumbPx = with(LocalDensity.current) { 36.dp.roundToPx() }.coerceAtMost(160)
+    val request = remember(file, thumbPx) {
+        file?.let { ImageRequest.Builder(ctx).data(it).size(thumbPx).precision(Precision.INEXACT).build() }
+    }
+    if (request != null) {
+        AsyncImage(model = request, contentDescription = "Última página", contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
     }
 }
 
@@ -1173,359 +993,3 @@ private fun modeHint(mode: ScanMode) = when (mode) {
     ScanMode.PHOTO -> "Foto a color, sin recorte automático"
 }
 
-private fun modeShortLabel(mode: ScanMode) = when (mode) {
-    ScanMode.DOCUMENT -> "Documento"
-    ScanMode.BOOK -> "Libro"
-    ScanMode.ID_CARD -> "DNI"
-    ScanMode.RECEIPT -> "Recibo"
-    ScanMode.WHITEBOARD -> "Pizarra"
-    ScanMode.PHOTO -> "Foto"
-}
-
-private fun modeIcon(mode: ScanMode): ImageVector = when (mode) {
-    ScanMode.DOCUMENT -> Icons.Filled.Description
-    ScanMode.BOOK -> Icons.AutoMirrored.Filled.MenuBook
-    ScanMode.ID_CARD -> Icons.Filled.Badge
-    ScanMode.RECEIPT -> Icons.AutoMirrored.Filled.ReceiptLong
-    ScanMode.WHITEBOARD -> Icons.Filled.Slideshow
-    ScanMode.PHOTO -> Icons.Filled.Photo
-}
-
-// =================================================================================================
-// Componentes privados
-// =================================================================================================
-
-private fun zoomLabel(r: Float): String =
-    if (abs(r - r.toInt()) < 0.05f) "${r.toInt()}x" else "%.1fx".format(r)
-
-/** Chip discreto con la resolución REAL de la foto ("12 MP · HDR"). */
-@Composable
-private fun ResolutionChip(info: CaptureInfo, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    val low = info.megapixels < 7.5 && (info.maxWidth ?: 0).toLong() * (info.maxHeight ?: 0) > 8_000_000L
-    Row(
-        modifier
-            .clip(RoundedCornerShape(50))
-            .background(if (low) Color(0xFFFFB547).copy(alpha = 0.92f) else Color.Black.copy(alpha = 0.45f))
-            .clickable(onClickLabel = "Ver detalles de la resolución", onClick = onClick)
-            .semantics { contentDescription = "Resolución de la foto: ${info.width} por ${info.height}" }
-            .padding(horizontal = 10.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(Icons.Filled.HighQuality, null, tint = if (low) Color.Black else Color.White, modifier = Modifier.size(14.dp))
-        Spacer(Modifier.width(4.dp))
-        Text(info.chipLabel, color = if (low) Color.Black else Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-    }
-}
-
-/** Botones de zoom 1x / 2x (y el valor actual si se pellizcó a otro). */
-@Composable
-private fun ZoomSelector(ratio: Float, max: Float, onSelect: (Float) -> Unit) {
-    val presets = listOf(1f, 2f).filter { it <= max + 0.01f }
-    Row(
-        Modifier.clip(RoundedCornerShape(50)).background(Color.Black.copy(alpha = 0.45f)).padding(3.dp),
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        presets.forEach { p ->
-            val nearest = presets.minByOrNull { abs(it - ratio) } == p
-            val selected = nearest && abs(ratio - p) < 0.05f
-            val label = if (nearest && !selected) zoomLabel(ratio) else zoomLabel(p)
-            Box(
-                Modifier
-                    .size(40.dp)
-                    .clip(CircleShape)
-                    .background(if (nearest) Color.White.copy(alpha = 0.22f) else Color.Transparent)
-                    .clickable(role = Role.Button, onClickLabel = "Zoom ${zoomLabel(p)}") { onSelect(p) },
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(label, color = if (nearest) Color(0xFFFFD54F) else Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-            }
-        }
-    }
-}
-
-@Composable
-private fun ModeSelector(selected: ScanMode, onSelect: (ScanMode) -> Unit) {
-    val modes = ScanMode.entries
-    val listState = rememberLazyListState()
-    LaunchedEffect(selected) {
-        listState.animateScrollToItem(max(0, modes.indexOf(selected) - 1))
-    }
-    LazyRow(
-        state = listState,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        contentPadding = PaddingValues(horizontal = 16.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        items(modes, key = { it.name }) { m ->
-            ModePill(m, m == selected) { onSelect(m) }
-        }
-    }
-}
-
-@Composable
-private fun ModePill(mode: ScanMode, selected: Boolean, onClick: () -> Unit) {
-    val brandGradient = MaterialTheme.brand.horizontalGradient
-    val scale by animateFloatAsState(if (selected) 1.06f else 1f, spring(dampingRatio = Spring.DampingRatioMediumBouncy), label = "pill")
-    val textColor by animateColorAsState(if (selected) Color.White else Color.White.copy(alpha = 0.78f), label = "pillText")
-    val shape = RoundedCornerShape(50)
-    Row(
-        Modifier
-            .graphicsLayer { scaleX = scale; scaleY = scale }
-            .clip(shape)
-            .then(
-                if (selected) Modifier.background(brandGradient)
-                else Modifier.background(Color.White.copy(alpha = 0.10f)).border(1.dp, Color.White.copy(alpha = 0.16f), shape),
-            )
-            .clickable(role = Role.Tab, onClick = onClick)
-            .semantics { stateDescription = if (selected) "Seleccionado" else "" }
-            .heightIn(min = 40.dp)
-            .padding(horizontal = 14.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(modeIcon(mode), null, tint = textColor, modifier = Modifier.size(16.dp))
-        Spacer(Modifier.width(6.dp))
-        Text(modeShortLabel(mode), color = textColor, fontSize = 14.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium)
-    }
-}
-
-@Composable
-private fun ShutterButton(enabled: Boolean, progress: () -> Float, busy: Boolean, onClick: () -> Unit) {
-    val primary = MaterialTheme.brand.gradientStart
-    val secondary = MaterialTheme.brand.gradientEnd
-    val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
-    val scale by animateFloatAsState(
-        if (pressed) 0.86f else 1f,
-        spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
-        label = "shutter",
-    )
-    // El progreso se anima y se lee SÓLO en la fase de dibujo (sin recomponer el botón ni la pantalla).
-    val animProgress = remember { Animatable(0f) }
-    LaunchedEffect(Unit) {
-        snapshotFlow { progress() }.collectLatest { animProgress.animateTo(it, tween(180)) }
-    }
-    val inner by animateFloatAsState(if (busy) 0.55f else 1f, tween(160), label = "inner")
-    Box(
-        Modifier
-            .size(86.dp)
-            .graphicsLayer { scaleX = scale; scaleY = scale; alpha = if (enabled) 1f else 0.6f }
-            .semantics { contentDescription = "Capturar"; role = Role.Button }
-            .clickable(interactionSource = interaction, indication = null, enabled = enabled, role = Role.Button, onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Canvas(Modifier.fillMaxSize()) {
-            val stroke = 4.dp.toPx()
-            val r = size.minDimension / 2f - stroke
-            drawCircle(
-                brush = Brush.sweepGradient(listOf(primary, secondary, primary)),
-                radius = r,
-                style = Stroke(width = stroke),
-            )
-            val ap = animProgress.value
-            if (ap > 0.001f) {
-                val pr = r
-                drawArc(
-                    color = Color.White,
-                    startAngle = -90f,
-                    sweepAngle = 360f * ap,
-                    useCenter = false,
-                    topLeft = Offset(center.x - pr, center.y - pr),
-                    size = Size(pr * 2, pr * 2),
-                    style = Stroke(width = stroke * 1.6f, cap = StrokeCap.Round),
-                )
-            }
-        }
-        Box(
-            Modifier
-                .size(66.dp)
-                .graphicsLayer { scaleX = inner; scaleY = inner }
-                .clip(CircleShape)
-                .background(Color.White),
-        )
-        if (busy) CircularProgressIndicator(Modifier.size(28.dp), color = primary, strokeWidth = 3.dp)
-    }
-}
-
-@Composable
-private fun BatchThumbnail(container: AppContainer, doc: Document?, processing: Boolean, onDone: () -> Unit) {
-    val last = doc?.pages?.lastOrNull()
-    val count = doc?.pages?.size ?: 0
-    val visible = count > 0 || processing
-    AnimatedVisibility(visible = visible, enter = scaleIn() + fadeIn(), exit = scaleOut() + fadeOut()) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(contentAlignment = Alignment.TopEnd) {
-                Box(
-                    Modifier
-                        .size(54.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .border(2.dp, Color.White, RoundedCornerShape(12.dp))
-                        .background(Color.DarkGray)
-                        .clickable(onClickLabel = "Terminar y revisar", onClick = onDone),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    if (last != null && doc != null) {
-                        // El archivo se resuelve en IO y sólo cuando cambia la página (thumbFile consulta el disco).
-                        val ctx = LocalContext.current
-                        val file by produceState<File?>(null, doc.id, last.id, last.thumbFile, last.processedFile) {
-                            value = withContext(Dispatchers.IO) {
-                                container.documents.thumbFile(doc.id, last) ?: container.documents.originalFile(doc.id, last)
-                            }
-                        }
-                        val thumbPx = with(LocalDensity.current) { 54.dp.roundToPx() }.coerceAtMost(160)
-                        val request = remember(file, thumbPx) {
-                            file?.let {
-                                ImageRequest.Builder(ctx).data(it).size(thumbPx).precision(Precision.INEXACT).build()
-                            }
-                        }
-                        if (request != null) AsyncImage(
-                            model = request,
-                            contentDescription = "Última página",
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize(),
-                        )
-                    }
-                    if (processing) {
-                        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.45f)), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 2.5.dp)
-                        }
-                    }
-                }
-                if (count > 0) {
-                    Box(
-                        Modifier
-                            .offset(x = 6.dp, y = (-6).dp)
-                            .size(22.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.brand.gradient)
-                            .semantics { contentDescription = "$count páginas" },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text("$count", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                    }
-                }
-            }
-            Row(
-                Modifier
-                    .minimumInteractiveComponentSize()
-                    .clip(RoundedCornerShape(50))
-                    .background(Color.White)
-                    .clickable(role = Role.Button, onClick = onDone)
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("Listo", color = Color.Black, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.width(2.dp))
-                Icon(Icons.Filled.Check, null, tint = Color.Black, modifier = Modifier.size(14.dp))
-            }
-        }
-    }
-}
-
-/** Destello de obturador: el alfa se lee en la capa gráfica (no recompone la pantalla durante la animación). */
-@Composable
-private fun ShutterFlashOverlay(alpha: () -> Float) {
-    Box(
-        Modifier
-            .fillMaxSize()
-            .graphicsLayer { this.alpha = alpha() }
-            .background(Color.White),
-    )
-}
-
-@Composable
-private fun HintPill(text: String, icon: ImageVector?, warning: Boolean, onClick: (() -> Unit)?) {
-    val bg = if (warning) Color(0xFFFFB547).copy(alpha = 0.92f) else Color.Black.copy(alpha = 0.55f)
-    val fg = if (warning) Color.Black else Color.White
-    Row(
-        Modifier
-            .widthIn(max = 340.dp)
-            .clip(RoundedCornerShape(50))
-            .background(bg)
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        if (icon != null) {
-            Icon(icon, null, tint = fg, modifier = Modifier.size(16.dp))
-            Spacer(Modifier.width(6.dp))
-        }
-        Text(text, color = fg, style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.Center)
-    }
-}
-
-@Composable
-private fun AutoCaptureToggle(enabled: Boolean, visible: Boolean, onToggle: () -> Unit) {
-    if (!visible) return
-    val brandGradient = MaterialTheme.brand.horizontalGradient
-    Row(
-        Modifier
-            .heightIn(min = 48.dp)
-            .clip(RoundedCornerShape(50))
-            .then(
-                if (enabled) Modifier.background(brandGradient)
-                else Modifier.background(Color.Black.copy(alpha = 0.45f)),
-            )
-            .semantics { stateDescription = if (enabled) "Captura automática activada" else "Captura manual" }
-            .clickable(role = Role.Switch, onClick = onToggle)
-            .padding(horizontal = 14.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(Icons.Filled.AutoAwesome, null, tint = Color.White, modifier = Modifier.size(16.dp))
-        Spacer(Modifier.width(6.dp))
-        Text(if (enabled) "Auto" else "Manual", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-    }
-}
-
-/** Interruptor del modo poca luz / anti-reflejos: resaltado si la ráfaga está activa; "A" = automático. */
-@Composable
-private fun LowLightToggle(setting: LowLightSetting, active: Boolean, onClick: () -> Unit) {
-    Box(contentAlignment = Alignment.Center) {
-        RoundIconButton(
-            Icons.Filled.NightsStay, setting.label,
-            highlighted = active,
-            onClick = onClick,
-            modifier = Modifier.graphicsLayer { alpha = if (setting == LowLightSetting.OFF) 0.6f else 1f },
-        )
-        if (setting == LowLightSetting.AUTO) {
-            Box(
-                Modifier
-                    .align(Alignment.BottomEnd)
-                    .size(18.dp)
-                    .clip(CircleShape)
-                    .background(Color.White),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text("A", color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-            }
-        }
-    }
-}
-
-@Composable
-private fun RoundIconButton(
-    icon: ImageVector,
-    description: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    size: Dp = 48.dp,
-    highlighted: Boolean = false,
-    dark: Boolean = true,
-) {
-    val bg = when {
-        highlighted -> MaterialTheme.brand.gradientStart
-        dark -> Color.Black.copy(alpha = 0.45f)
-        else -> MaterialTheme.colorScheme.surfaceContainerHigh
-    }
-    val fg = if (dark || highlighted) Color.White else MaterialTheme.colorScheme.onSurface
-    Box(
-        modifier
-            .size(size)
-            .clip(CircleShape)
-            .background(bg)
-            .clickable(role = Role.Button, onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(icon, contentDescription = description, tint = fg, modifier = Modifier.size(size * 0.5f))
-    }
-}
