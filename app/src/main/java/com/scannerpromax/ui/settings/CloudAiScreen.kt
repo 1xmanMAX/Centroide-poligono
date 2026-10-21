@@ -108,7 +108,6 @@ fun CloudAiScreen(container: AppContainer, onBack: () -> Unit) {
     val settingsFlow = remember(container) { container.settings.settings }
     val settings by settingsFlow.collectAsStateWithLifecycle(initialValue = AppSettings())
     val usage by container.cloudUsage.usage.collectAsStateWithLifecycle()
-    val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
     // Estado de la clave por proveedor (se relee tras guardar/borrar).
     var keyVersion by remember { mutableStateOf(0) }
     val saved = remember(keyVersion) { CloudProviderId.entries.associateWith { id -> keys.get(id)?.let { CloudKeyStore.masked(it) } } }

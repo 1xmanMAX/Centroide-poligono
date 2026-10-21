@@ -39,7 +39,7 @@ import androidx.navigation.navArgument
 import com.scannerpromax.di.AppContainer
 import com.scannerpromax.domain.ScanMode
 import com.scannerpromax.ui.camera.CameraScreen
-import com.scannerpromax.ui.components.LoadingOverlay
+import com.scannerpromax.ui.components.ProgressHud
 import com.scannerpromax.ui.editor.EditorScreen
 import com.scannerpromax.ui.export.ExportScreen
 import com.scannerpromax.ui.home.HomeScreen
@@ -322,7 +322,7 @@ fun AppNavHost(
             }
         }
 
-        LoadingOverlay(
+        ProgressHud(
             visible = importing,
             message = importMessage.ifEmpty { "Preparando importación…" },
             progress = importProgress,

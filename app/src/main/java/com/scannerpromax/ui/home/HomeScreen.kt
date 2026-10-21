@@ -66,7 +66,7 @@ import com.scannerpromax.ui.components.FloatingBarContentPadding
 import com.scannerpromax.ui.components.IconCircleButton
 import com.scannerpromax.ui.components.LargeTitleHeader
 import com.scannerpromax.ui.components.ListPosition
-import com.scannerpromax.ui.components.LoadingOverlay
+import com.scannerpromax.ui.components.ProgressHud
 import com.scannerpromax.ui.components.MenuScrim
 import com.scannerpromax.ui.components.MoreMenu
 import com.scannerpromax.ui.components.MoreMenuItem
@@ -214,7 +214,7 @@ fun HomeScreen(
             onSettings = onSettings,
             snackbar = snackbar,
         )
-        LoadingOverlay(
+        ProgressHud(
             visible = busyMessage != null,
             message = busyMessage.orEmpty(),
             progress = busyProgress.takeIf { it >= 0f },

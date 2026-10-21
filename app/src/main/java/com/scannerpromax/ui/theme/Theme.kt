@@ -111,57 +111,6 @@ val MaterialTheme.ui: UiColors
     @Composable @ReadOnlyComposable get() = LocalUiColors.current
 
 /**
- * Colores "de marca" de la versión anterior, que siguen usando las pantallas aún no rediseñadas (fase 2).
- * Ahora derivan del acento único: los "degradados" son de un solo color (sin violeta→turquesa) y sin halos.
- * Acceso: `MaterialTheme.brand`.
- */
-@Immutable
-data class BrandColors(
-    val gradientStart: Color,
-    val gradientEnd: Color,
-    val accent: Color,
-    val glow: Color,
-    val success: Color,
-    val warning: Color,
-    val danger: Color,
-    /** Borde fino para tarjetas / superficies elevadas. */
-    val cardBorder: Color,
-    /** Fondo de tarjeta. */
-    val card: Color,
-    val isDark: Boolean,
-) {
-    // Los pinceles se crean UNA vez por tema (no en cada recomposición).
-
-    /** Antes degradado violeta→turquesa; ahora color sólido del acento. */
-    val gradient: Brush = Brush.linearGradient(listOf(gradientStart, gradientEnd))
-
-    /** Igual que [gradient], en horizontal (textos / barras). */
-    val horizontalGradient: Brush = Brush.horizontalGradient(listOf(gradientStart, gradientEnd))
-
-    /** Antes halo de cabecera; ahora transparente (sin adornos). */
-    val backdrop: Brush = Brush.verticalGradient(listOf(Color.Transparent, Color.Transparent))
-}
-
-private fun brandFrom(ui: UiColors) = BrandColors(
-    gradientStart = ui.accent,
-    gradientEnd = ui.accent,
-    accent = ui.accent,
-    glow = Color.Transparent,
-    success = ui.green,
-    warning = if (ui.isDark) Color(0xFFFF9F0A) else Color(0xFFC77700),
-    danger = ui.red,
-    cardBorder = ui.separator.copy(alpha = if (ui.isDark) 0.7f else 0.8f),
-    card = ui.card,
-    isDark = ui.isDark,
-)
-
-val LocalBrandColors = staticCompositionLocalOf { brandFrom(LightUi) }
-
-/** Colores de marca del tema actual (compatibilidad). */
-val MaterialTheme.brand: BrandColors
-    @Composable @ReadOnlyComposable get() = LocalBrandColors.current
-
-/**
  * Tema de la app.
  * @param darkTheme null = seguir el sistema.
  * @param dynamicColor Android 12+: el acento viene del sistema (Material You); los neutros no cambian.
@@ -199,7 +148,6 @@ fun EscanerTheme(darkTheme: Boolean? = null, dynamicColor: Boolean = false, cont
         val u = if (dark) DarkUi else LightUi
         u.copy(accent = scheme.primary, onAccent = scheme.onPrimary)
     }
-    val brand = remember(ui) { brandFrom(ui) }
 
     // Iconos de barras de sistema acordes al tema elegido en la app (no solo al del sistema).
     val view = LocalView.current
@@ -213,7 +161,7 @@ fun EscanerTheme(darkTheme: Boolean? = null, dynamicColor: Boolean = false, cont
         }
     }
 
-    CompositionLocalProvider(LocalBrandColors provides brand, LocalUiColors provides ui) {
+    CompositionLocalProvider(LocalUiColors provides ui) {
         MaterialTheme(
             colorScheme = scheme,
             typography = AppTypography,
@@ -234,7 +182,6 @@ fun ForcedDarkTheme(content: @Composable () -> Unit) {
     val accent = if (current.isDark || current.accent != AccentIndigo) current.accent else AccentIndigoDark
     val ui = remember(accent) { DarkUi.copy(accent = accent, onAccent = Color.White) }
     val scheme = remember(accent) { DarkScheme.copy(primary = accent, onPrimary = Color.White) }
-    val brand = remember(ui) { brandFrom(ui) }
     val view = LocalView.current
     val context = LocalContext.current
     if (!view.isInEditMode) {
@@ -251,7 +198,7 @@ fun ForcedDarkTheme(content: @Composable () -> Unit) {
             }
         }
     }
-    CompositionLocalProvider(LocalBrandColors provides brand, LocalUiColors provides ui) {
+    CompositionLocalProvider(LocalUiColors provides ui) {
         MaterialTheme(colorScheme = scheme, typography = AppTypography, shapes = AppShapes, content = content)
     }
 }

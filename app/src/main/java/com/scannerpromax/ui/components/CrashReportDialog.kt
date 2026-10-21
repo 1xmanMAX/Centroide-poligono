@@ -9,7 +9,11 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import com.scannerpromax.ui.theme.ui
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -41,36 +45,39 @@ fun CrashReportDialog() {
         CrashReporter.clear(context)
         report = null
     }
-    AlertDialog(
-        onDismissRequest = ::dismiss,
-        title = { Text("La app se cerró inesperadamente") },
-        text = {
-            SelectionContainer {
-                Text(
-                    "Copia este informe y envíalo para poder corregir el problema:\n\n$text",
-                    modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()),
-                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontSize = 11.sp),
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = {
+    IosAlert(
+        title = "La app se cerró inesperadamente",
+        message = "Copia este informe y envíalo para poder corregir el problema:",
+        onDismiss = ::dismiss,
+        actions = listOf(
+            AlertAction("Compartir", bold = true) {
                 val send = Intent(Intent.ACTION_SEND).apply {
                     type = "text/plain"
                     putExtra(Intent.EXTRA_SUBJECT, "Informe de error - ESCÁNER PRO MAX")
                     putExtra(Intent.EXTRA_TEXT, text)
                 }
                 context.startActivity(Intent.createChooser(send, "Compartir informe").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                dismiss()
-            }) { Text("Compartir") }
-        },
-        dismissButton = {
-            TextButton(onClick = {
+            },
+            AlertAction("Copiar") {
                 val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 cm.setPrimaryClip(ClipData.newPlainText("Informe de error", text))
                 Toast.makeText(context, "Informe copiado", Toast.LENGTH_SHORT).show()
-                dismiss()
-            }) { Text("Copiar") }
-        },
-    )
+            },
+            AlertAction("Cerrar") { },
+        ),
+    ) {
+        SelectionContainer {
+            Text(
+                text,
+                modifier = Modifier
+                    .heightIn(max = 300.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.ui.card)
+                    .verticalScroll(rememberScrollState())
+                    .padding(10.dp),
+                color = MaterialTheme.ui.label,
+                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontSize = 11.sp),
+            )
+        }
+    }
 }

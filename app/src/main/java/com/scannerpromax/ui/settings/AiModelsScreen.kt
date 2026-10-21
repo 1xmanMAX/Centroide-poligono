@@ -141,7 +141,6 @@ fun AiModelsScreen(container: AppContainer, onBack: () -> Unit) {
     val settingsFlow = remember(container) { container.settings.settings }
     val settings by settingsFlow.collectAsStateWithLifecycle(initialValue = AppSettings())
     val states by manager.states.collectAsStateWithLifecycle()
-    val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
     var message by remember { mutableStateOf<String?>(null) }
     var confirmDelete by remember { mutableStateOf<AiModel?>(null) }
 
