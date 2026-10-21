@@ -115,14 +115,44 @@ import com.scannerpromax.domain.FilterType
 import com.scannerpromax.domain.Page
 import com.scannerpromax.domain.ScanMode
 import com.scannerpromax.ui.camera.CaptureProcessor
-import com.scannerpromax.ui.components.AppTopBar
 import com.scannerpromax.ui.components.ConfirmDialog
-import com.scannerpromax.ui.components.GradientButton
-import com.scannerpromax.ui.components.LoadingOverlay
 import com.scannerpromax.ui.components.RenameDialog
-import com.scannerpromax.ui.components.SoftButton
 import com.scannerpromax.ui.components.pagesLabel
-import com.scannerpromax.ui.theme.brand
+import com.scannerpromax.ui.components.AppIcons
+import com.scannerpromax.ui.components.CheckRow
+import com.scannerpromax.ui.components.EmptyMessage
+import com.scannerpromax.ui.components.FloatingBar
+import com.scannerpromax.ui.components.FloatingBarContentPadding
+import com.scannerpromax.ui.components.FloatingBarItem
+import com.scannerpromax.ui.components.GroupArrangement
+import com.scannerpromax.ui.components.IconCircleButton
+import com.scannerpromax.ui.components.InsetGroup
+import com.scannerpromax.ui.components.IosSheet
+import com.scannerpromax.ui.components.LargeTitleHeader
+import com.scannerpromax.ui.components.MoreMenu
+import com.scannerpromax.ui.components.MoreMenuItem
+import com.scannerpromax.ui.components.NavigationRow
+import com.scannerpromax.ui.components.PrimaryCapsuleButton
+import com.scannerpromax.ui.components.ProgressHud
+import com.scannerpromax.ui.components.SeparatorInsetIcon
+import com.scannerpromax.ui.components.SeparatorInsetPlain
+import com.scannerpromax.ui.components.SheetHeader
+import com.scannerpromax.ui.components.ToggleRow
+import com.scannerpromax.ui.theme.PillShape
+import com.scannerpromax.ui.theme.ui
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarData
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.Dp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -383,190 +413,80 @@ fun ReviewScreen(
 
     BackHandler(enabled = importing) { importJob?.cancel() }
 
-    val brand = MaterialTheme.brand
     val d = doc
 
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        Column(Modifier.fillMaxSize()) {
-            // ------------------------------------------------ barra superior
-            AppTopBar(
-                title = d?.title ?: "Cargando…",
-                subtitle = d?.let { "${pagesLabel(order.size)} · ${it.mode.label}" },
-                onBack = onBack,
-                actions = {
-                    IconButton(onClick = { renaming = true }, enabled = d != null) {
-                        Icon(Icons.Filled.Edit, "Renombrar")
+    val docMenuGroups = listOf(
+        listOf(MoreMenuItem("Renombrar", AppIcons.Rename, enabled = d != null) { renaming = true }),
+        listOf(
+            MoreMenuItem("Filtro para todas las páginas", AppIcons.Wand, enabled = order.isNotEmpty()) { showApplyAll = true },
+            MoreMenuItem("Unir con otro documento…", AppIcons.Duplicate, enabled = d != null) { showMerge = true },
+        ),
+    )
+
+    ReviewContent(
+        title = d?.title,
+        subtitle = d?.let { reviewSubtitle(order, it.mode) },
+        pages = order,
+        loading = d == null || !loaded,
+        showEmpty = order.isEmpty() && pendingDeletes.isEmpty(),
+        gridState = gridState,
+        draggingKey = reorder.draggingKey,
+        displacementFor = { reorder.displacementFor(it) },
+        gridGestures = Modifier.pointerInput(reorder) {
+            detectDragGesturesAfterLongPress(
+                onDragStart = { pos ->
+                    reorder.pointer = pos
+                    if (reorder.start(pos)) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                },
+                onDrag = { change, amount ->
+                    if (reorder.draggingKey != null) {
+                        change.consume()
+                        reorder.pointer = change.position
+                        reorder.drag(amount)
                     }
-                    Box {
-                        IconButton(onClick = { moreMenu = true }, enabled = d != null) {
-                            Icon(Icons.Filled.MoreVert, "Más opciones")
-                        }
-                        DropdownMenu(expanded = moreMenu, onDismissRequest = { moreMenu = false }) {
-                            DropdownMenuItem(
-                                text = { Text("Filtro para todas las páginas") },
-                                leadingIcon = { Icon(Icons.Filled.AutoFixHigh, null) },
-                                enabled = order.isNotEmpty(),
-                                onClick = { moreMenu = false; showApplyAll = true },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Unir con otro documento…") },
-                                leadingIcon = { Icon(Icons.Filled.CallMerge, null) },
-                                onClick = { moreMenu = false; showMerge = true },
-                            )
-                        }
+                },
+                onDragEnd = {
+                    if (reorder.draggingKey != null) {
+                        reorder.end()
+                        commitOrder(order.map { it.id })
+                    }
+                },
+                onDragCancel = {
+                    if (reorder.draggingKey != null) {
+                        reorder.end()
+                        commitOrder(order.map { it.id })
                     }
                 },
             )
-
-            when {
-                d == null || !loaded -> Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = brand.gradientStart)
-                }
-                order.isEmpty() && pendingDeletes.isEmpty() -> EmptyPages(
-                    modifier = Modifier.weight(1f),
-                    onCamera = { onAddPages(d.mode) },
-                    onGallery = { openGallery() },
-                )
-                else -> LazyVerticalGrid(
-                    columns = GridCells.Adaptive(150.dp),
-                    state = gridState,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp),
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp)
-                        .pointerInput(reorder) {
-                            detectDragGesturesAfterLongPress(
-                                onDragStart = { pos ->
-                                    reorder.pointer = pos
-                                    if (reorder.start(pos)) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                },
-                                onDrag = { change, amount ->
-                                    if (reorder.draggingKey != null) {
-                                        change.consume()
-                                        reorder.pointer = change.position
-                                        reorder.drag(amount)
-                                    }
-                                },
-                                onDragEnd = {
-                                    if (reorder.draggingKey != null) {
-                                        reorder.end()
-                                        commitOrder(order.map { it.id })
-                                    }
-                                },
-                                onDragCancel = {
-                                    if (reorder.draggingKey != null) {
-                                        reorder.end()
-                                        commitOrder(order.map { it.id })
-                                    }
-                                },
-                            )
-                        },
-                ) {
-                    if (order.size > 1) {
-                        item(key = HEADER_KEY, span = { GridItemSpan(maxLineSpan) }) {
-                            Row(
-                                Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 2.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Icon(Icons.Filled.DragIndicator, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Spacer(Modifier.width(6.dp))
-                                Text(
-                                    "Mantén pulsada una página y arrástrala para reordenar",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                        }
-                    }
-                    itemsIndexed(order, key = { _, p -> p.id }, contentType = { _, _ -> "page" }) { index, page ->
-                        val dragging = reorder.draggingKey == page.id
-                        val lift by animateFloatAsState(if (dragging) 1.06f else 1f, tween(150), label = "lift")
-                        val itemModifier = if (dragging) {
-                            Modifier
-                                .zIndex(1f)
-                                .graphicsLayer {
-                                    val off = reorder.displacementFor(page.id) ?: Offset.Zero
-                                    translationX = off.x
-                                    translationY = off.y
-                                    scaleX = lift
-                                    scaleY = lift
-                                }
-                        } else {
-                            Modifier.animateItem().graphicsLayer { scaleX = lift; scaleY = lift }
-                        }
-                        PageCard(
-                            container = container,
-                            docId = docId,
-                            page = page,
-                            number = index + 1,
-                            total = order.size,
-                            dragging = dragging,
-                            modifier = itemModifier,
-                            // Tocar una hoja abre el visor con la imagen YA PROCESADA (la misma que se exporta), al instante
-                            // y sin reprocesar; desde allí "Editar" lleva al editor.
-                            onClick = { viewerIndex = index },
-                            onEdit = { onEditPage(page.id) },
-                            onOcr = { onOcr(page.id) },
-                            onMoveLeft = { move(page, -1) },
-                            onMoveRight = { move(page, +1) },
-                            onMoveFirst = { move(page, -order.size) },
-                            onMoveLast = { move(page, order.size) },
-                            onDelete = { deleteWithUndo(page) },
-                        )
-                    }
-                    item(key = FOOTER_KEY, span = { GridItemSpan(maxLineSpan) }) { Spacer(Modifier.height(16.dp)) }
-                }
-            }
-
-            // ------------------------------------------------ barra de acciones inferior
-            Surface(
-                tonalElevation = 3.dp,
-                shadowElevation = 12.dp,
-                color = MaterialTheme.colorScheme.surfaceContainer,
-                shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Row(
-                    Modifier.navigationBarsPadding().padding(horizontal = 12.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box {
-                        BarAction(Icons.Filled.Add, "Añadir") { addMenu = true }
-                        DropdownMenu(expanded = addMenu, onDismissRequest = { addMenu = false }) {
-                            DropdownMenuItem(
-                                text = { Text("Escanear con la cámara") },
-                                leadingIcon = { Icon(Icons.Filled.AddAPhoto, null) },
-                                onClick = { addMenu = false; d?.let { onAddPages(it.mode) } },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Importar de la galería") },
-                                leadingIcon = { Icon(Icons.Filled.PhotoLibrary, null) },
-                                onClick = { addMenu = false; openGallery() },
-                            )
-                        }
-                    }
-                    // Abre el OCR en la página visible (allí se puede reconocer todo el documento).
-                    BarAction(Icons.AutoMirrored.Filled.TextSnippet, "Texto") {
-                        visiblePage()?.let { onOcr(it.id) } ?: toast("No hay páginas")
-                    }
-                    BarAction(Icons.Filled.AutoFixHigh, "Filtro") {
-                        if (order.isEmpty()) toast("No hay páginas") else showApplyAll = true
-                    }
-                    Spacer(Modifier.width(10.dp))
-                    GradientButton(
-                        text = "Exportar",
-                        onClick = onExport,
-                        icon = Icons.Filled.PictureAsPdf,
-                        enabled = order.isNotEmpty(),
-                        height = 54.dp,
-                        modifier = Modifier.weight(1f),
-                    )
-                }
-            }
-        }
-
+        },
+        docMenuGroups = docMenuGroups,
+        onBack = onBack,
+        pageThumbnail = { page, number, modifier -> PageThumbnail(container, docId, page, number, modifier) },
+        // Tocar una hoja abre el visor con la imagen YA PROCESADA (la misma que se exporta), al instante y sin
+        // reprocesar; desde allí "Editar" lleva al editor.
+        onPageClick = { index -> viewerIndex = index },
+        pageMenuGroups = { page, number ->
+            pageMenuGroups(
+                number = number,
+                total = order.size,
+                onView = { viewerIndex = number - 1 },
+                onEdit = { onEditPage(page.id) },
+                onOcr = { onOcr(page.id) },
+                onMoveLeft = { move(page, -1) },
+                onMoveRight = { move(page, +1) },
+                onMoveFirst = { move(page, -order.size) },
+                onMoveLast = { move(page, order.size) },
+                onDelete = { deleteWithUndo(page) },
+            )
+        },
+        onAddCamera = { d?.let { onAddPages(it.mode) } },
+        onAddGallery = { openGallery() },
+        // Abre el OCR en la página visible (allí se puede reconocer todo el documento).
+        onText = { visiblePage()?.let { onOcr(it.id) } ?: toast("No hay páginas") },
+        onFilter = { if (order.isEmpty()) toast("No hay páginas") else showApplyAll = true },
+        onExport = onExport,
+        snackbar = snackbar,
+    ) {
         viewerIndex?.let { start ->
             PageViewerDialog(
                 container = container,
@@ -588,19 +508,14 @@ fun ReviewScreen(
             if (i >= 0) viewerIndex = i
         }
 
-        SnackbarHost(
-            snackbar,
-            Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 88.dp),
-        )
-
-        LoadingOverlay(
+        ProgressHud(
             visible = importing,
             message = "Importando y mejorando…",
             progress = importProgress,
             onCancel = { importJob?.cancel() },
             modifier = Modifier.fillMaxSize(),
         )
-        LoadingOverlay(
+        ProgressHud(
             visible = bulkProgress != null,
             message = bulkMessage,
             progress = bulkProgress,
@@ -620,7 +535,7 @@ fun ReviewScreen(
     }
 
     if (showApplyAll) {
-        ApplyAllDialog(
+        ApplyAllSheet(
             initial = order.firstOrNull()?.edits?.filter?.uiFilter ?: FilterType.DEFAULT,
             onDismiss = { showApplyAll = false },
             onApply = { f, lines -> showApplyAll = false; applyToAll(f, lines) },
@@ -630,7 +545,7 @@ fun ReviewScreen(
     if (showMerge) {
         val all by repo.documents.collectAsState()
         val others = all.filter { it.id != docId && it.pages.isNotEmpty() }
-        MergePickerDialog(
+        MergePickerSheet(
             documents = others,
             onDismiss = { showMerge = false },
             onPick = { showMerge = false; mergeSource = it },
@@ -641,106 +556,418 @@ fun ReviewScreen(
             title = "¿Unir documentos?",
             message = "Las ${pagesLabel(src.pages.size)} de «${src.title}» se añadirán al final de este documento y «${src.title}» se eliminará.",
             confirmLabel = "Unir",
-            icon = Icons.Filled.CallMerge,
             onConfirm = { merge(src) },
             onDismiss = { mergeSource = null },
         )
     }
 }
 
-/** Diálogo "Filtro para todas las páginas". [onApply] recibe el filtro y si quitar rayas (null = no tocar). */
-@Composable
-private fun ApplyAllDialog(initial: FilterType, onDismiss: () -> Unit, onApply: (FilterType, Boolean?) -> Unit) {
-    var selected by remember { mutableStateOf(initial) }
-    var lines by remember { mutableStateOf(false) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        icon = { Icon(Icons.Filled.AutoFixHigh, null) },
-        title = { Text("Filtro para todas las páginas") },
-        text = {
-            Column {
-                Column {
-                    for (f in FilterType.visible) {
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .heightIn(min = 56.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .selectable(selected = f == selected, role = Role.RadioButton) { selected = f }
-                                .padding(horizontal = 4.dp, vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            RadioButton(selected = f == selected, onClick = null)
-                            Spacer(Modifier.width(10.dp))
-                            Column {
-                                Text(f.label, style = MaterialTheme.typography.bodyLarge)
-                                Text(
-                                    f.description,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                        }
-                    }
-                }
-                HorizontalDivider(Modifier.padding(vertical = 6.dp))
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 48.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .clickable(role = Role.Checkbox) { lines = !lines }
-                        .padding(horizontal = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Checkbox(checked = lines, onCheckedChange = null)
-                    Spacer(Modifier.width(10.dp))
-                    Text("Quitar también rayas y líneas sueltas", style = MaterialTheme.typography.bodyMedium)
-                }
-            }
-        },
-        confirmButton = { TextButton(onClick = { onApply(selected, if (lines) true else null) }) { Text("Aplicar a todas") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } },
-        shape = MaterialTheme.shapes.extraLarge,
-    )
+/** "4 páginas · Documento · Texto reconocido" (texto reconocido solo si todas las páginas lo tienen). */
+internal fun reviewSubtitle(pages: List<Page>, mode: ScanMode): String {
+    val withText = pages.count { it.ocrFile != null || it.ocrText != null }
+    val text = when {
+        pages.isEmpty() || withText == 0 -> null
+        withText == pages.size -> "Texto reconocido"
+        else -> "Texto en $withText de ${pages.size}"
+    }
+    return listOfNotNull(pagesLabel(pages.size), mode.label, text).joinToString(" · ")
 }
 
-/** Lista de documentos para "Unir con…". */
+/** Opciones del menú ••• de cada página (ver, editar, OCR, mover y eliminar). */
+internal fun pageMenuGroups(
+    number: Int,
+    total: Int,
+    onView: () -> Unit,
+    onEdit: () -> Unit,
+    onOcr: () -> Unit,
+    onMoveLeft: () -> Unit,
+    onMoveRight: () -> Unit,
+    onMoveFirst: () -> Unit,
+    onMoveLast: () -> Unit,
+    onDelete: () -> Unit,
+): List<List<MoreMenuItem>> = listOf(
+    listOf(
+        MoreMenuItem("Ver a pantalla completa", AppIcons.Resolution, onClick = onView),
+        MoreMenuItem("Editar y mejorar", AppIcons.Wand, onClick = onEdit),
+        MoreMenuItem("Reconocer texto (OCR)", AppIcons.Text, onClick = onOcr),
+    ),
+    buildList {
+        if (total > 1 && number > 1) {
+            add(MoreMenuItem("Mover antes", AppIcons.Back, onClick = onMoveLeft))
+            add(MoreMenuItem("Mover al principio", AppIcons.Back, onClick = onMoveFirst))
+        }
+        if (total > 1 && number < total) {
+            add(MoreMenuItem("Mover después", AppIcons.Chevron, onClick = onMoveRight))
+            add(MoreMenuItem("Mover al final", AppIcons.Chevron, onClick = onMoveLast))
+        }
+    },
+    listOf(MoreMenuItem("Eliminar página", AppIcons.Trash, destructive = true, onClick = onDelete)),
+)
+
+/**
+ * Pantalla Documento SIN estado (maqueta Revision.dc.html): "‹ Documentos" + •••, título grande de 30 sp con
+ * subtítulo, cuadrícula de páginas (mantener pulsado y arrastrar = reordenar; ••• por página) y barra flotante
+ * Añadir · Texto · Filtro + Exportar. [overlays] = visor, capas de progreso…
+ */
 @Composable
-private fun MergePickerDialog(documents: List<Document>, onDismiss: () -> Unit, onPick: (Document) -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        icon = { Icon(Icons.Filled.CallMerge, null) },
-        title = { Text("Unir con…") },
-        text = {
-            if (documents.isEmpty()) {
-                Text("No hay otros documentos con páginas.", style = MaterialTheme.typography.bodyMedium)
-            } else {
-                LazyColumn(Modifier.heightIn(max = 360.dp)) {
-                    listItems(documents, key = { it.id }) { doc ->
-                        Column(
-                            Modifier
-                                .fillMaxWidth()
-                                .heightIn(min = 52.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .clickable { onPick(doc) }
-                                .padding(horizontal = 8.dp, vertical = 8.dp),
-                        ) {
-                            Text(doc.title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+internal fun ReviewContent(
+    title: String?,
+    subtitle: String?,
+    pages: List<Page>,
+    loading: Boolean,
+    showEmpty: Boolean,
+    gridState: LazyGridState,
+    draggingKey: String?,
+    displacementFor: (String) -> Offset?,
+    gridGestures: Modifier,
+    docMenuGroups: List<List<MoreMenuItem>>,
+    onBack: () -> Unit,
+    pageThumbnail: @Composable (page: Page, number: Int, modifier: Modifier) -> Unit,
+    onPageClick: (index: Int) -> Unit,
+    pageMenuGroups: (page: Page, number: Int) -> List<List<MoreMenuItem>>,
+    onAddCamera: () -> Unit,
+    onAddGallery: () -> Unit,
+    onText: () -> Unit,
+    onFilter: () -> Unit,
+    onExport: () -> Unit,
+    snackbar: SnackbarHostState,
+    overlays: @Composable BoxScope.() -> Unit = {},
+) {
+    val ui = MaterialTheme.ui
+    var docMenu by remember { mutableStateOf(false) }
+    var addMenu by remember { mutableStateOf(false) }
+    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+
+    val header: @Composable (Dp) -> Unit = { pad ->
+        LargeTitleHeader(
+            title = title ?: "Cargando…",
+            backLabel = "Documentos",
+            onBack = onBack,
+            subtitle = subtitle,
+            titleStyle = MaterialTheme.typography.headlineLarge,
+            horizontalPadding = pad,
+        ) {
+            Box {
+                IconCircleButton(AppIcons.More, "Más opciones del documento", { docMenu = true }, size = 36.dp, iconSize = 18.dp, enabled = title != null)
+                MoreMenu(expanded = docMenu, onDismissRequest = { docMenu = false }, groups = docMenuGroups, width = 280.dp)
+            }
+        }
+    }
+
+    Box(Modifier.fillMaxSize().background(ui.groupedBackground)) {
+        when {
+            loading -> Column(Modifier.fillMaxSize().statusBarsPadding()) {
+                header(20.dp)
+                Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = ui.secondaryLabel, strokeWidth = 3.dp)
+                }
+            }
+            showEmpty -> Column(Modifier.fillMaxSize().statusBarsPadding()) {
+                header(20.dp)
+                EmptyMessage(
+                    title = "Este documento está vacío",
+                    message = "Escanea páginas con la cámara o impórtalas desde la galería.",
+                    icon = AppIcons.Scan,
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        PrimaryCapsuleButton("Galería", onClick = onAddGallery, icon = AppIcons.Gallery, tonal = true, height = 48.dp)
+                        PrimaryCapsuleButton("Cámara", onClick = onAddCamera, icon = AppIcons.Camera, height = 48.dp)
+                    }
+                }
+            }
+            else -> LazyVerticalGrid(
+                columns = GridCells.Adaptive(150.dp),
+                state = gridState,
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalArrangement = Arrangement.spacedBy(18.dp),
+                // Sin contentPadding: los offsets del layout deben coincidir con las coordenadas del puntero
+                // (reordenación). La barra de estado y los márgenes van como relleno del propio modificador.
+                modifier = Modifier
+                    .fillMaxSize()
+                    .statusBarsPadding()
+                    .padding(horizontal = 20.dp)
+                    .then(gridGestures),
+            ) {
+                item(key = HEADER_KEY, span = { GridItemSpan(maxLineSpan) }) {
+                    Column(Modifier.padding(bottom = 2.dp)) {
+                        // La rejilla ya tiene el margen de 20 dp.
+                        header(0.dp)
+                        if (pages.size > 1) {
                             Text(
-                                "${pagesLabel(doc.pages.size)} · ${doc.mode.label}",
+                                "Mantén pulsada una página y arrástrala para reordenar",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                color = ui.tertiaryLabel,
+                                modifier = Modifier.padding(top = 10.dp),
                             )
                         }
                     }
                 }
+                itemsIndexed(pages, key = { _, p -> p.id }, contentType = { _, _ -> "page" }) { index, page ->
+                    val dragging = draggingKey == page.id
+                    val lift by animateFloatAsState(if (dragging) 1.06f else 1f, tween(150), label = "lift")
+                    val itemModifier = if (dragging) {
+                        Modifier
+                            .zIndex(1f)
+                            .graphicsLayer {
+                                val off = displacementFor(page.id) ?: Offset.Zero
+                                translationX = off.x
+                                translationY = off.y
+                                scaleX = lift
+                                scaleY = lift
+                            }
+                    } else {
+                        Modifier.animateItem().graphicsLayer { scaleX = lift; scaleY = lift }
+                    }
+                    PageCell(
+                        page = page,
+                        number = index + 1,
+                        dragging = dragging,
+                        modifier = itemModifier,
+                        thumbnail = { m -> pageThumbnail(page, index + 1, m) },
+                        onClick = { onPageClick(index) },
+                        menuGroups = { pageMenuGroups(page, index + 1) },
+                    )
+                }
+                item(key = FOOTER_KEY, span = { GridItemSpan(maxLineSpan) }) {
+                    Spacer(Modifier.height(FloatingBarContentPadding + navBottom))
+                }
             }
-        },
-        confirmButton = {},
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } },
-        shape = MaterialTheme.shapes.extraLarge,
+        }
+
+        // ------------------------------------------------ barra flotante inferior
+        if (!loading) {
+            FloatingBar(Modifier.align(Alignment.BottomCenter), fillWidth = true) {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Box {
+                        FloatingBarItem(AppIcons.Plus, "Añadir", { addMenu = true })
+                        MoreMenu(
+                            expanded = addMenu,
+                            onDismissRequest = { addMenu = false },
+                            groups = listOf(
+                                listOf(
+                                    MoreMenuItem("Escanear con la cámara", AppIcons.Camera, onClick = onAddCamera),
+                                    MoreMenuItem("Importar de la galería", AppIcons.Gallery, onClick = onAddGallery),
+                                ),
+                            ),
+                        )
+                    }
+                    FloatingBarItem(AppIcons.Text, "Texto", onText)
+                    FloatingBarItem(AppIcons.Wand, "Filtro", onFilter)
+                }
+                PrimaryCapsuleButton("Exportar", onClick = onExport, icon = AppIcons.Share, enabled = pages.isNotEmpty(), height = 48.dp)
+            }
+        }
+
+        SnackbarHost(
+            snackbar,
+            Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 92.dp),
+        ) { data -> IosSnackbar(data) }
+
+        overlays()
+    }
+}
+
+/** Aviso inferior estilo iOS (cápsula oscura, acción en el acento). */
+@Composable
+internal fun IosSnackbar(data: SnackbarData) {
+    val ui = MaterialTheme.ui
+    Snackbar(
+        snackbarData = data,
+        modifier = Modifier.padding(horizontal = 16.dp),
+        shape = RoundedCornerShape(14.dp),
+        containerColor = if (ui.isDark) Color(0xFF2C2C2E) else Color(0xF21C1C1E),
+        contentColor = Color.White,
+        actionColor = if (ui.isDark) ui.accent else Color(0xFF9D97FF),
     )
+}
+
+/** Celda de página: hoja blanca (radio 10, sombra suave) con ••• y marca de texto; debajo, número y filtro. */
+@Composable
+private fun PageCell(
+    page: Page,
+    number: Int,
+    dragging: Boolean,
+    modifier: Modifier,
+    thumbnail: @Composable (Modifier) -> Unit,
+    onClick: () -> Unit,
+    menuGroups: () -> List<List<MoreMenuItem>>,
+) {
+    val ui = MaterialTheme.ui
+    val perf = LocalPerf.current
+    var menu by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(10.dp)
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(0.72f)
+                // En gama baja sin sombra en reposo (trabajo extra de GPU al desplazar); al arrastrar sí.
+                .shadow(if (dragging) 18.dp else if (perf.lowEnd) 0.dp else 3.dp, shape, ambientColor = Color.Black.copy(alpha = 0.25f), spotColor = Color.Black.copy(alpha = 0.25f))
+                .clip(shape)
+                .background(if (ui.isDark) Color(0xFF2C2C2E) else Color.White)
+                .then(if (dragging) Modifier.border(2.dp, ui.accent, shape) else Modifier)
+                .clickable(onClickLabel = "Ver página $number", onClick = onClick),
+        ) {
+            thumbnail(Modifier.fillMaxSize())
+            if (page.ocrFile != null || page.ocrText != null) {
+                Row(
+                    Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(6.dp)
+                        .clip(PillShape)
+                        .background(Color.Black.copy(alpha = 0.55f))
+                        .padding(horizontal = 7.dp, vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(AppIcons.Text, null, tint = Color.White, modifier = Modifier.size(11.dp))
+                    Spacer(Modifier.width(3.dp))
+                    Text("Texto", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.labelSmall)
+                }
+            }
+            Box(Modifier.align(Alignment.TopEnd)) {
+                // Área táctil de 44 dp con el círculo visual de 28 dp dentro.
+                Box(
+                    Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .clickable(role = Role.Button, onClickLabel = "Opciones de la página $number") { menu = true }
+                        .semantics { contentDescription = "Opciones de la página $number" },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Box(
+                        Modifier.size(28.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.42f)),
+                        contentAlignment = Alignment.Center,
+                    ) { Icon(AppIcons.More, null, tint = Color.White, modifier = Modifier.size(16.dp)) }
+                }
+                MoreMenu(expanded = menu, onDismissRequest = { menu = false }, groups = if (menu) menuGroups() else emptyList())
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("$number", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold, color = ui.secondaryLabel)
+            Text(
+                " · ${page.edits.filter.uiFilter.label}",
+                style = MaterialTheme.typography.bodySmall,
+                color = ui.tertiaryLabel,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+/** Miniatura de una página (procesado actual, el mismo que el visor y la exportación). */
+@Composable
+private fun PageThumbnail(container: AppContainer, docId: String, page: Page, number: Int, modifier: Modifier) {
+    val repo = container.documents
+    val context = LocalContext.current
+    // Miniatura = reducción del procesado ACTUAL (misma imagen que el visor y la exportación). Se elige en segundo
+    // plano; si falta o es de otra versión de las ediciones, se regenera desde el procesado (nunca se muestra el
+    // original sin procesar mientras tanto, salvo que el procesado no se pueda generar).
+    val model by produceState<VersionedFile?>(initialValue = null, page.id, page.thumbFile, page.processedFile, page.edits) {
+        value = withContext(Dispatchers.IO) { repo.displayThumb(docId, page) }
+        if (withContext(Dispatchers.IO) { repo.thumbFile(docId, page) } == null) {
+            val ok = runCatching { repo.processedFile(docId, page) }.isSuccess
+            value = withContext(Dispatchers.IO) {
+                repo.displayThumb(docId, page) ?: if (!ok) VersionedFile.of(repo.originalFile(docId, page)) else null
+            }
+        } else if (runCatching { repo.upgradeSmallThumb(docId, page) }.getOrDefault(false)) {
+            // Miniatura antigua (480 px) regenerada en el mismo archivo: nueva versión -> nueva clave de caché.
+            value = withContext(Dispatchers.IO) { repo.displayThumb(docId, page) }
+        }
+    }
+    // Miniatura nítida: Coil decodifica al tamaño REAL de la celda en píxeles, tomado de las restricciones del
+    // AsyncImage. Clave de caché con la versión del archivo.
+    val request = remember(model?.cacheKey) {
+        model?.let {
+            ImageRequest.Builder(context)
+                .data(it.file)
+                .memoryCacheKey(it.cacheKey)
+                .precision(Precision.INEXACT)
+                .build()
+        }
+    }
+    AsyncImage(
+        model = request,
+        contentDescription = "Página $number",
+        contentScale = ContentScale.Fit,
+        filterQuality = FilterQuality.High,
+        modifier = modifier,
+    )
+}
+
+/** Hoja "Filtro para todas las páginas". [onApply] recibe el filtro y si quitar rayas (null = no tocar). */
+@Composable
+private fun ApplyAllSheet(initial: FilterType, onDismiss: () -> Unit, onApply: (FilterType, Boolean?) -> Unit) {
+    var selected by remember { mutableStateOf(initial) }
+    var lines by remember { mutableStateOf(false) }
+    IosSheet(onDismissRequest = onDismiss) { dismiss ->
+        SheetHeader(
+            title = "Filtro para todas",
+            onCancel = dismiss,
+            onDone = { onApply(selected, if (lines) true else null) },
+            doneLabel = "Aplicar",
+        )
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(top = 16.dp, bottom = 28.dp),
+            verticalArrangement = GroupArrangement,
+        ) {
+            InsetGroup(separatorInset = SeparatorInsetPlain, footer = "Se aplica a todas las páginas del documento.") {
+                for (f in FilterType.visible) {
+                    item { CheckRow(title = f.label, subtitle = f.description, selected = f == selected, onClick = { selected = f }) }
+                }
+            }
+            InsetGroup(separatorInset = SeparatorInsetPlain) {
+                item { ToggleRow("Quitar también rayas y líneas sueltas", checked = lines, onCheckedChange = { lines = it }) }
+            }
+        }
+    }
+}
+
+/** Hoja "Unir con…": lista de documentos con páginas. */
+@Composable
+private fun MergePickerSheet(documents: List<Document>, onDismiss: () -> Unit, onPick: (Document) -> Unit) {
+    val ui = MaterialTheme.ui
+    IosSheet(onDismissRequest = onDismiss) { dismiss ->
+        SheetHeader(title = "Unir con…", onCancel = dismiss)
+        if (documents.isEmpty()) {
+            Text(
+                "No hay otros documentos con páginas.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = ui.secondaryLabel,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp, horizontal = 24.dp),
+            )
+        } else {
+            LazyColumn(
+                Modifier.fillMaxWidth().heightIn(max = 520.dp),
+                contentPadding = PaddingValues(top = 16.dp, bottom = 28.dp, start = 20.dp, end = 20.dp),
+            ) {
+                listItems(documents, key = { it.id }) { doc ->
+                    val first = documents.first() == doc
+                    val last = documents.last() == doc
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(topStart = if (first) 12.dp else 0.dp, topEnd = if (first) 12.dp else 0.dp, bottomStart = if (last) 12.dp else 0.dp, bottomEnd = if (last) 12.dp else 0.dp))
+                            .background(ui.card),
+                    ) {
+                        NavigationRow(
+                            title = doc.title,
+                            subtitle = "${pagesLabel(doc.pages.size)} · ${doc.mode.label}",
+                            icon = AppIcons.Document,
+                            onClick = { onPick(doc) },
+                        )
+                        if (!last) HorizontalDivider(Modifier.padding(start = SeparatorInsetIcon), thickness = 0.5.dp, color = ui.separator)
+                    }
+                }
+            }
+        }
+    }
 }
 
 private const val HEADER_KEY = "__header__"
@@ -800,254 +1027,5 @@ private class GridReorderState(
     fun end() {
         draggingKey = null
         accumulated = Offset.Zero
-    }
-}
-
-@Composable
-private fun PageCard(
-    container: AppContainer,
-    docId: String,
-    page: Page,
-    number: Int,
-    total: Int,
-    dragging: Boolean,
-    modifier: Modifier,
-    onClick: () -> Unit,
-    onEdit: () -> Unit,
-    onOcr: () -> Unit,
-    onMoveLeft: () -> Unit,
-    onMoveRight: () -> Unit,
-    onMoveFirst: () -> Unit,
-    onMoveLast: () -> Unit,
-    onDelete: () -> Unit,
-) {
-    val repo = container.documents
-    val brand = MaterialTheme.brand
-    var menu by remember { mutableStateOf(false) }
-
-    val context = LocalContext.current
-    val perf = LocalPerf.current
-    // Miniatura = reducción del procesado ACTUAL (misma imagen que el visor y la exportación). Se elige en segundo
-    // plano; si falta o es de otra versión de las ediciones, se regenera desde el procesado (nunca se muestra el
-    // original sin procesar mientras tanto, salvo que el procesado no se pueda generar).
-    val model by produceState<VersionedFile?>(initialValue = null, page.id, page.thumbFile, page.processedFile, page.edits) {
-        value = withContext(Dispatchers.IO) { repo.displayThumb(docId, page) }
-        if (withContext(Dispatchers.IO) { repo.thumbFile(docId, page) } == null) {
-            val ok = runCatching { repo.processedFile(docId, page) }.isSuccess
-            value = withContext(Dispatchers.IO) {
-                repo.displayThumb(docId, page) ?: if (!ok) VersionedFile.of(repo.originalFile(docId, page)) else null
-            }
-        } else if (runCatching { repo.upgradeSmallThumb(docId, page) }.getOrDefault(false)) {
-            // Miniatura antigua (480 px) regenerada en el mismo archivo: nueva versión -> nueva clave de caché.
-            value = withContext(Dispatchers.IO) { repo.displayThumb(docId, page) }
-        }
-    }
-    // Miniatura nítida: Coil decodifica al tamaño REAL de la celda en píxeles (celda × densidad, p. ej. ~630x875
-    // px en un QHD+), tomado de las restricciones del AsyncImage. Clave de caché con la versión del archivo.
-    val request = remember(model?.cacheKey) {
-        model?.let {
-            ImageRequest.Builder(context)
-                .data(it.file)
-                .memoryCacheKey(it.cacheKey)
-                .precision(Precision.INEXACT)
-                .build()
-        }
-    }
-
-    val shape = RoundedCornerShape(18.dp)
-    Column(
-        modifier
-            // En gama baja sin sombra en reposo (una sombra por celda es trabajo extra de la GPU en cada frame
-            // de desplazamiento); al arrastrar sí, para que se note que la página está "levantada".
-            .shadow(if (dragging) 18.dp else if (perf.lowEnd) 0.dp else 2.dp, shape)
-            .clip(shape)
-            .background(MaterialTheme.colorScheme.surfaceContainer)
-            .then(if (dragging) Modifier.border(BorderStroke(2.dp, brand.gradient), shape) else Modifier)
-            .clickable(onClick = onClick),
-    ) {
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .aspectRatio(0.72f)
-                .padding(8.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(MaterialTheme.colorScheme.surfaceContainerHighest),
-        ) {
-            AsyncImage(
-                model = request,
-                contentDescription = "Página $number",
-                contentScale = ContentScale.Fit,
-                filterQuality = FilterQuality.High,
-                modifier = Modifier.fillMaxSize(),
-            )
-            // Editar (recortar, filtros...) directamente; tocar la hoja la abre en el visor.
-            Box(
-                Modifier
-                    .align(Alignment.TopStart)
-                    .size(48.dp)
-                    .clip(CircleShape)
-                    .clickable(role = Role.Button, onClickLabel = "Editar página", onClick = onEdit),
-                contentAlignment = Alignment.Center,
-            ) {
-                Box(
-                    Modifier.size(32.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.45f)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(Icons.Filled.Edit, "Editar página", tint = Color.White, modifier = Modifier.size(18.dp))
-                }
-            }
-            Box(
-                Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(6.dp)
-                    .clip(RoundedCornerShape(50))
-                    .background(brand.horizontalGradient)
-                    .padding(horizontal = 9.dp, vertical = 3.dp),
-            ) {
-                Text("$number", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-            }
-            if (page.ocrFile != null || page.ocrText != null) {
-                Box(
-                    Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(6.dp)
-                        .clip(RoundedCornerShape(50))
-                        .background(Color.Black.copy(alpha = 0.6f))
-                        .padding(horizontal = 7.dp, vertical = 3.dp),
-                ) {
-                    Text("OCR", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                }
-            }
-            Box(Modifier.align(Alignment.TopEnd)) {
-                // Área táctil de 48 dp con el círculo visual de 32 dp dentro.
-                Box(
-                    Modifier
-                        .size(48.dp)
-                        .clip(CircleShape)
-                        .clickable(role = Role.Button, onClickLabel = "Opciones de la página") { menu = true },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Box(
-                        Modifier.size(32.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.45f)),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(Icons.Filled.MoreVert, "Opciones", tint = Color.White, modifier = Modifier.size(18.dp))
-                    }
-                }
-                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    DropdownMenuItem(
-                        text = { Text("Ver a pantalla completa") },
-                        leadingIcon = { Icon(Icons.Filled.ZoomIn, null) },
-                        onClick = { menu = false; onClick() },
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Editar y mejorar") },
-                        leadingIcon = { Icon(Icons.Filled.AutoFixHigh, null) },
-                        onClick = { menu = false; onEdit() },
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Reconocer texto (OCR)") },
-                        leadingIcon = { Icon(Icons.AutoMirrored.Filled.TextSnippet, null) },
-                        onClick = { menu = false; onOcr() },
-                    )
-                    if (total > 1) {
-                        HorizontalDivider()
-                        if (number > 1) {
-                            DropdownMenuItem(
-                                text = { Text("Mover antes") },
-                                leadingIcon = { Icon(Icons.Filled.ChevronLeft, null) },
-                                onClick = { menu = false; onMoveLeft() },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Mover al principio") },
-                                leadingIcon = { Icon(Icons.Filled.ChevronLeft, null) },
-                                onClick = { menu = false; onMoveFirst() },
-                            )
-                        }
-                        if (number < total) {
-                            DropdownMenuItem(
-                                text = { Text("Mover después") },
-                                leadingIcon = { Icon(Icons.Filled.ChevronRight, null) },
-                                onClick = { menu = false; onMoveRight() },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Mover al final") },
-                                leadingIcon = { Icon(Icons.Filled.ChevronRight, null) },
-                                onClick = { menu = false; onMoveLast() },
-                            )
-                        }
-                    }
-                    HorizontalDivider()
-                    DropdownMenuItem(
-                        text = { Text("Eliminar página", color = MaterialTheme.colorScheme.error) },
-                        leadingIcon = { Icon(Icons.Filled.Delete, null, tint = MaterialTheme.colorScheme.error) },
-                        onClick = { menu = false; onDelete() },
-                    )
-                }
-            }
-        }
-        Row(
-            Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                page.edits.filter.uiFilter.label,
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.weight(1f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                "Página $number",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurface,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
-    }
-}
-
-@Composable
-private fun BarAction(icon: ImageVector, label: String, onClick: () -> Unit) {
-    Column(
-        Modifier
-            .heightIn(min = 48.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 6.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Icon(icon, label, tint = MaterialTheme.colorScheme.onSurface)
-        Spacer(Modifier.height(2.dp))
-        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-}
-
-@Composable
-private fun EmptyPages(modifier: Modifier, onCamera: () -> Unit, onGallery: () -> Unit) {
-    Column(
-        modifier.fillMaxWidth().padding(32.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Box(
-            Modifier.size(96.dp).clip(CircleShape).background(MaterialTheme.brand.gradient),
-            contentAlignment = Alignment.Center,
-        ) { Icon(Icons.Filled.DocumentScanner, null, tint = Color.White, modifier = Modifier.size(44.dp)) }
-        Spacer(Modifier.height(20.dp))
-        Text("Este documento está vacío", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "Escanea páginas con la cámara o impórtalas desde la galería.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-        )
-        Spacer(Modifier.height(24.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            SoftButton("Galería", onClick = onGallery, icon = Icons.Filled.PhotoLibrary, height = 48.dp)
-            GradientButton("Cámara", onClick = onCamera, icon = Icons.Filled.AddAPhoto, height = 48.dp)
-        }
     }
 }

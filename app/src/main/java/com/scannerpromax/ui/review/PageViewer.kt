@@ -1,5 +1,17 @@
 package com.scannerpromax.ui.review
 
+import androidx.compose.material3.MaterialTheme
+import com.scannerpromax.ui.components.AppIcons
+import com.scannerpromax.ui.components.IconCircleButton
+import com.scannerpromax.ui.theme.PillShape
+import com.scannerpromax.ui.theme.ui
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.sp
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.BitmapRegionDecoder
@@ -245,44 +257,66 @@ internal fun PageViewerDialog(
                 androidx.compose.runtime.key(f.path) { ZoomableFileImage(f, Modifier.fillMaxSize()) }
             }
 
+            // Barra superior minimalista sobre un degradado: Cerrar · "Página X de N" · Reconstruido/Escaneo · Editar.
             Row(
                 Modifier
                     .fillMaxWidth()
+                    .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.6f), Color.Transparent)))
                     .statusBarsPadding()
-                    .background(Color.Black.copy(alpha = 0.45f))
-                    .padding(horizontal = 4.dp, vertical = 2.dp),
+                    .padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 18.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(onClick = onDismiss) { Icon(Icons.Filled.Close, "Cerrar", tint = Color.White) }
+                IconCircleButton(
+                    AppIcons.Close, "Cerrar", onDismiss,
+                    size = 36.dp, iconSize = 16.dp, containerColor = Color.White.copy(alpha = 0.16f), contentColor = Color.White, elevation = 0.dp,
+                )
                 Text(
                     "Página ${index + 1} de ${pages.size}",
-                    color = Color.White,
+                    color = Color.White.copy(alpha = 0.85f),
+                    fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.titleSmall,
+                    textAlign = TextAlign.Center,
                     modifier = Modifier.weight(1f),
                 )
                 if (hasLayout) {
-                    TextButton(onClick = { showRebuilt = !showRebuilt }) {
-                        Icon(if (showRebuilt) Icons.Filled.Image else Icons.Filled.AutoAwesome, null, tint = Color.White, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text(if (showRebuilt) "Ver escaneo" else "Ver reconstruido", color = Color.White)
-                    }
-                }
-                TextButton(onClick = { onEdit(page) }) {
-                    Icon(Icons.Filled.Edit, null, tint = Color.White, modifier = Modifier.size(18.dp))
+                    ViewerTextButton(if (showRebuilt) "Ver escaneo" else "Ver reconstruido") { showRebuilt = !showRebuilt }
                     Spacer(Modifier.width(6.dp))
-                    Text("Editar", color = Color.White)
                 }
+                Text(
+                    "Editar",
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier
+                        .clip(PillShape)
+                        .background(MaterialTheme.ui.accent)
+                        .clickable(role = Role.Button) { onEdit(page) }
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                )
             }
             if (pages.size > 1) {
                 Row(
                     Modifier
                         .align(Alignment.BottomCenter)
                         .navigationBarsPadding()
-                        .padding(bottom = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(24.dp),
+                        .padding(bottom = 18.dp)
+                        .clip(PillShape)
+                        .background(Color(0xE61C1C1E))
+                        .padding(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    NavButton(Icons.Filled.ChevronLeft, "Página anterior", index > 0) { index-- }
-                    NavButton(Icons.Filled.ChevronRight, "Página siguiente", index < pages.size - 1) { index++ }
+                    NavButton(AppIcons.Back, "Página anterior", index > 0) { index-- }
+                    Text(
+                        "${index + 1} / ${pages.size}",
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.padding(horizontal = 10.dp),
+                    )
+                    NavButton(AppIcons.Chevron, "Página siguiente", index < pages.size - 1) { index++ }
                 }
             }
         }
@@ -290,17 +324,31 @@ internal fun PageViewerDialog(
 }
 
 @Composable
+private fun ViewerTextButton(label: String, onClick: () -> Unit) {
+    Text(
+        label,
+        color = Color.White,
+        fontSize = 15.sp,
+        style = MaterialTheme.typography.bodyMedium,
+        modifier = Modifier
+            .clip(PillShape)
+            .background(Color.White.copy(alpha = 0.16f))
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+    )
+}
+
+@Composable
 private fun NavButton(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, enabled: Boolean, onClick: () -> Unit) {
     Box(
         Modifier
-            .size(52.dp)
+            .size(44.dp)
             .clip(CircleShape)
-            .background(Color.Black.copy(alpha = if (enabled) 0.6f else 0.25f)),
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = label },
         contentAlignment = Alignment.Center,
     ) {
-        IconButton(onClick = onClick, enabled = enabled) {
-            Icon(icon, label, tint = if (enabled) Color.White else Color.White.copy(alpha = 0.4f))
-        }
+        Icon(icon, null, tint = if (enabled) Color.White else Color.White.copy(alpha = 0.3f), modifier = Modifier.size(20.dp))
     }
 }
 
