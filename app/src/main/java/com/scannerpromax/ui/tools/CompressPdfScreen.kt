@@ -92,16 +92,37 @@ import androidx.core.content.ContextCompat
 import com.scannerpromax.di.AppContainer
 import com.scannerpromax.domain.CompressionLevel
 import com.scannerpromax.pdf.CompressionResult
-import com.scannerpromax.ui.components.AppTopBar
-import com.scannerpromax.ui.components.BrandCard
-import com.scannerpromax.ui.components.EmptyState
-import com.scannerpromax.ui.components.GradientButton
-import com.scannerpromax.ui.components.SoftButton
 import com.scannerpromax.ui.components.SpanishLocale
 import com.scannerpromax.ui.components.formatBytes
 import com.scannerpromax.ui.components.pagesLabel
 import com.scannerpromax.ui.components.safeFileName
-import com.scannerpromax.ui.theme.brand
+import com.scannerpromax.ui.components.AppIcons
+import com.scannerpromax.ui.components.CheckRow
+import com.scannerpromax.ui.components.EmptyMessage
+import com.scannerpromax.ui.components.GroupArrangement
+import com.scannerpromax.ui.components.IconCircleButton
+import com.scannerpromax.ui.components.IconTile
+import com.scannerpromax.ui.components.InsetGroup
+import com.scannerpromax.ui.components.LargeTitleHeader
+import com.scannerpromax.ui.components.MoreMenu
+import com.scannerpromax.ui.components.MoreMenuItem
+import com.scannerpromax.ui.components.PrimaryCapsuleButton
+import com.scannerpromax.ui.components.SegmentedControl
+import com.scannerpromax.ui.components.SeparatorInsetPlain
+import com.scannerpromax.ui.theme.GroupShape
+import com.scannerpromax.ui.theme.PillShape
+import com.scannerpromax.ui.theme.ui
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.clickable
+import androidx.compose.material3.Snackbar
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -113,9 +134,9 @@ import kotlin.math.roundToInt
 
 /** Datos básicos del PDF elegido. [pages] null si no se pudo contar; [locked] = protegido con contraseña. */
 @Immutable
-private data class PdfInfo(val name: String, val size: Long, val pages: Int?, val locked: Boolean)
+internal data class PdfInfo(val name: String, val size: Long, val pages: Int?, val locked: Boolean)
 
-private enum class CompressMode { LEVEL, TARGET }
+internal enum class CompressMode { LEVEL, TARGET }
 
 @OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
@@ -251,329 +272,321 @@ fun CompressPdfScreen(container: AppContainer, initialUri: Uri?, onBack: () -> U
         }
     }
 
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
-        topBar = {
-            AppTopBar(
-                title = "Comprimir PDF",
-                subtitle = "Reduce el tamaño para enviar por correo o chat",
-                onBack = {
-                    job?.cancel()
-                    onBack()
-                },
-            )
+    CompressContent(
+        hasFile = uri != null,
+        info = info,
+        loadingInfo = loadingInfo,
+        mode = mode,
+        onModeChange = { mode = it },
+        level = level,
+        onLevelChange = { level = it },
+        targetMb = targetMb,
+        onTargetChange = { targetMb = it },
+        progress = progress,
+        result = result,
+        error = error,
+        saving = saving,
+        busy = job != null,
+        onBack = {
+            job?.cancel()
+            onBack()
         },
-        snackbarHost = { SnackbarHost(snackbar) },
-    ) { inner ->
-        val current = info
-        // [inner] ya incluye las barras del sistema (insets por defecto del Scaffold): no se añade
-        // navigationBarsPadding otra vez (daba doble margen inferior).
-        if (uri == null) {
-            Column(
-                Modifier
-                    .fillMaxSize()
-                    .padding(inner)
-                    .consumeWindowInsets(inner),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                // El estado vacío ocupa el espacio libre y el botón va debajo: nunca se solapan.
-                Box(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()), contentAlignment = Alignment.Center) {
-                    EmptyState(
-                        title = "Elige un PDF",
-                        message = "Comprime cualquier PDF de tu teléfono manteniendo el texto legible. También puedes compartir un PDF desde otra app hacia ESCÁNER PRO MAX.",
-                        actionLabel = null,
-                    )
-                }
-                GradientButton(
-                    text = "Elegir PDF",
-                    onClick = openPicker,
-                    icon = Icons.Rounded.FileOpen,
-                    modifier = Modifier
-                        .padding(20.dp)
-                        .fillMaxWidth(),
-                )
-            }
-        } else Column(
-            Modifier
-                .fillMaxSize()
-                .padding(inner)
-                .consumeWindowInsets(inner)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp)
-                .padding(bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            FileCard(info = current, loading = loadingInfo, onChange = openPicker, enabled = job == null)
-
-            val working = progress != null
-            AnimatedContent(
-                targetState = when {
-                    working -> 1
-                    result != null -> 2
-                    else -> 0
-                },
-                transitionSpec = { fadeIn(tween(250)) togetherWith fadeOut(tween(150)) },
-                label = "compressState",
-            ) { state ->
-                when (state) {
-                    1 -> ProgressCard(progress ?: 0f, onCancel = { job?.cancel() })
-                    2 -> result?.let { r ->
-                        ResultCard(
-                            result = r,
-                            saving = saving,
-                            onSave = save,
-                            onShare = share,
-                            onAgain = { result = null },
-                        )
-                    }
-                    else -> Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                        OptionsSection(
-                            mode = mode,
-                            onModeChange = { mode = it },
-                            level = level,
-                            onLevelChange = { level = it },
-                            targetMb = targetMb,
-                            onTargetChange = { targetMb = it },
-                            originalBytes = current?.size ?: 0L,
-                        )
-                        AnimatedVisibility(error != null, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
-                            ErrorCard(error.orEmpty())
-                        }
-                        GradientButton(
-                            text = "Comprimir",
-                            onClick = { startCompression() },
-                            icon = Icons.Rounded.Compress,
-                            enabled = current != null && !current.locked && !loadingInfo,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                    }
-                }
-            }
-        }
-    }
+        onPick = openPicker,
+        onCompress = { startCompression() },
+        onCancel = { job?.cancel() },
+        onSave = save,
+        onShare = share,
+        onAgain = { result = null },
+        snackbar = snackbar,
+    )
 }
 
-// ------------------------------------------------------------------------------------ secciones
-
+/**
+ * Comprimir PDF SIN estado: cabecera grande, archivo elegido (tocar ••• o "Cambiar" para otro), segmento
+ * Por nivel | Tamaño objetivo con sus opciones en grupos, y el progreso / resultado en tarjetas.
+ */
 @Composable
-private fun FileCard(info: PdfInfo?, loading: Boolean, onChange: () -> Unit, enabled: Boolean) {
-    val brand = MaterialTheme.brand
-    BrandCard {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                Modifier
-                    .size(52.dp)
-                    .clip(MaterialTheme.shapes.medium)
-                    .background(Color(0xFFFF4D67).copy(alpha = 0.15f)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    if (info?.locked == true) Icons.Rounded.Lock else Icons.Rounded.PictureAsPdf,
-                    null,
-                    tint = Color(0xFFFF4D67),
-                    modifier = Modifier.size(28.dp),
-                )
-            }
-            Spacer(Modifier.width(14.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    when {
-                        loading -> "Leyendo PDF…"
-                        info != null -> info.name
-                        else -> "Archivo no disponible"
-                    },
-                    style = MaterialTheme.typography.titleSmall,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                if (info != null) {
-                    val parts = buildList {
-                        if (info.size > 0) add(formatBytes(info.size))
-                        info.pages?.let { add(pagesLabel(it)) }
-                        if (info.locked) add("Protegido con contraseña")
-                    }
-                    Text(
-                        parts.joinToString(" · "),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (info.locked) brand.danger else MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            TextButton(onClick = onChange, enabled = enabled) {
-                Icon(Icons.Rounded.SwapHoriz, null, Modifier.size(18.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("Cambiar")
-            }
-        }
-        if (loading) {
-            Spacer(Modifier.height(12.dp))
-            LinearProgressIndicator(Modifier.fillMaxWidth().clip(CircleShape), color = brand.gradientStart)
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun OptionsSection(
+internal fun CompressContent(
+    hasFile: Boolean,
+    info: PdfInfo?,
+    loadingInfo: Boolean,
     mode: CompressMode,
     onModeChange: (CompressMode) -> Unit,
     level: CompressionLevel,
     onLevelChange: (CompressionLevel) -> Unit,
     targetMb: Float,
     onTargetChange: (Float) -> Unit,
-    originalBytes: Long,
+    progress: Float?,
+    result: CompressionResult?,
+    error: String?,
+    saving: Boolean,
+    busy: Boolean,
+    onBack: () -> Unit,
+    onPick: () -> Unit,
+    onCompress: () -> Unit,
+    onCancel: () -> Unit,
+    onSave: () -> Unit,
+    onShare: () -> Unit,
+    onAgain: () -> Unit,
+    snackbar: SnackbarHostState,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-            SegmentedButton(
-                selected = mode == CompressMode.LEVEL,
-                onClick = { onModeChange(CompressMode.LEVEL) },
-                shape = SegmentedButtonDefaults.itemShape(0, 2),
-                label = { Text("Por nivel") },
-            )
-            SegmentedButton(
-                selected = mode == CompressMode.TARGET,
-                onClick = { onModeChange(CompressMode.TARGET) },
-                shape = SegmentedButtonDefaults.itemShape(1, 2),
-                label = { Text("Tamaño objetivo") },
+    val ui = MaterialTheme.ui
+    var menu by remember { mutableStateOf(false) }
+    Box(Modifier.fillMaxSize().background(ui.groupedBackground)) {
+        Column(Modifier.fillMaxSize().statusBarsPadding()) {
+            LargeTitleHeader(
+                title = "Comprimir PDF",
+                backLabel = "Documentos",
+                onBack = onBack,
+                subtitle = "Reduce el tamaño para enviar por correo o chat",
+            ) {
+                if (hasFile) {
+                    Box {
+                        IconCircleButton(AppIcons.More, "Más opciones", { menu = true }, size = 36.dp, iconSize = 18.dp)
+                        MoreMenu(
+                            expanded = menu,
+                            onDismissRequest = { menu = false },
+                            groups = listOf(listOf(MoreMenuItem("Elegir otro PDF", AppIcons.Document, enabled = !busy, onClick = onPick))),
+                        )
+                    }
+                }
+            }
+            if (!hasFile) {
+                // El estado vacío ocupa el espacio libre y el botón va debajo: nunca se solapan.
+                Box(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()), contentAlignment = Alignment.Center) {
+                    EmptyMessage(
+                        title = "Elige un PDF",
+                        message = "Comprime cualquier PDF de tu teléfono manteniendo el texto legible. También puedes compartir un PDF desde otra app hacia ESCÁNER PRO MAX.",
+                        icon = AppIcons.Compress,
+                    )
+                }
+                PrimaryCapsuleButton(
+                    text = "Elegir PDF",
+                    onClick = onPick,
+                    icon = AppIcons.Document,
+                    modifier = Modifier
+                        .navigationBarsPadding()
+                        .padding(20.dp)
+                        .fillMaxWidth(),
+                )
+            } else {
+                Column(
+                    Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                        .navigationBarsPadding()
+                        .padding(top = 20.dp, bottom = 28.dp),
+                    verticalArrangement = GroupArrangement,
+                ) {
+                    FileGroup(info = info, loading = loadingInfo, onChange = onPick, enabled = !busy)
+                    val working = progress != null
+                    AnimatedContent(
+                        targetState = when {
+                            working -> 1
+                            result != null -> 2
+                            else -> 0
+                        },
+                        transitionSpec = { fadeIn(tween(250)) togetherWith fadeOut(tween(150)) },
+                        label = "compressState",
+                    ) { state ->
+                        when (state) {
+                            1 -> ProgressCard(progress ?: 0f, onCancel = onCancel)
+                            2 -> result?.let { r -> ResultCard(result = r, saving = saving, onSave = onSave, onShare = onShare, onAgain = onAgain) }
+                            else -> Column(verticalArrangement = GroupArrangement) {
+                                SegmentedControl(
+                                    options = listOf("Por nivel", "Tamaño objetivo"),
+                                    selectedIndex = mode.ordinal,
+                                    onSelect = { onModeChange(CompressMode.entries[it]) },
+                                    modifier = Modifier.padding(horizontal = 20.dp),
+                                )
+                                if (mode == CompressMode.LEVEL) {
+                                    InsetGroup(header = "Nivel de compresión", separatorInset = SeparatorInsetPlain) {
+                                        CompressionLevel.entries.forEach { l ->
+                                            item { LevelRow(level = l, selected = l == level, onClick = { onLevelChange(l) }, originalBytes = info?.size ?: 0L) }
+                                        }
+                                    }
+                                } else {
+                                    TargetGroup(targetMb, onTargetChange, info?.size ?: 0L)
+                                }
+                                AnimatedVisibility(error != null, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+                                    ErrorCard(error.orEmpty())
+                                }
+                                PrimaryCapsuleButton(
+                                    text = "Comprimir",
+                                    onClick = onCompress,
+                                    icon = AppIcons.Compress,
+                                    enabled = info != null && !info.locked && !loadingInfo,
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 16.dp)) { data ->
+            Snackbar(
+                snackbarData = data,
+                modifier = Modifier.padding(horizontal = 16.dp),
+                shape = RoundedCornerShape(14.dp),
+                containerColor = if (ui.isDark) Color(0xFF2C2C2E) else Color(0xF21C1C1E),
+                contentColor = Color.White,
             )
         }
-        if (mode == CompressMode.LEVEL) {
-            CompressionLevel.entries.forEach { l ->
-                LevelCard(level = l, selected = l == level, onClick = { onLevelChange(l) }, originalBytes = originalBytes)
+    }
+}
+
+// ------------------------------------------------------------------------------------ secciones
+
+private val PdfRed = Color(0xFFFF3B30)
+
+@Composable
+private fun FileGroup(info: PdfInfo?, loading: Boolean, onChange: () -> Unit, enabled: Boolean) {
+    val ui = MaterialTheme.ui
+    InsetGroup(header = "Archivo") {
+        item {
+            Column {
+                Row(Modifier.fillMaxWidth().heightIn(min = 60.dp).padding(start = 12.dp, end = 6.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconTile(if (info?.locked == true) AppIcons.Lock else AppIcons.Document, PdfRed)
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            when {
+                                loading -> "Leyendo PDF…"
+                                info != null -> info.name
+                                else -> "Archivo no disponible"
+                            },
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = ui.label,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (info != null) {
+                            val parts = buildList {
+                                if (info.size > 0) add(formatBytes(info.size))
+                                info.pages?.let { add(pagesLabel(it)) }
+                                if (info.locked) add("Protegido con contraseña")
+                            }
+                            Text(parts.joinToString(" · "), style = MaterialTheme.typography.bodySmall, color = if (info.locked) ui.red else ui.secondaryLabel)
+                        }
+                    }
+                    Text(
+                        "Cambiar",
+                        color = ui.accent,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable(enabled = enabled, role = Role.Button, onClick = onChange)
+                            .graphicsLayer { alpha = if (enabled) 1f else 0.4f }
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                    )
+                }
+                if (loading) {
+                    LinearProgressIndicator(Modifier.fillMaxWidth().padding(horizontal = 14.dp).padding(bottom = 10.dp).clip(CircleShape), color = ui.accent, trackColor = ui.fill)
+                }
             }
-        } else {
-            TargetCard(targetMb, onTargetChange, originalBytes)
         }
     }
 }
 
 @Composable
-private fun LevelCard(level: CompressionLevel, selected: Boolean, onClick: () -> Unit, originalBytes: Long) {
-    val brand = MaterialTheme.brand
+private fun LevelRow(level: CompressionLevel, selected: Boolean, onClick: () -> Unit, originalBytes: Long) {
     val (description, ratio) = when (level) {
         CompressionLevel.LIGHT -> "Casi sin pérdida visible. Ideal para imprimir." to 0.6
         CompressionLevel.RECOMMENDED -> "El mejor equilibrio entre calidad y tamaño." to 0.4
         CompressionLevel.STRONG -> "Archivo muy ligero, texto aún legible." to 0.25
         CompressionLevel.EXTREME -> "Blanco y negro, tamaño mínimo para enviar rápido." to 0.12
     }
-    Surface(
+    CheckRow(
+        title = level.label + if (level == CompressionLevel.RECOMMENDED) " · recomendado" else "",
+        subtitle = description + "\n${level.dpi} ppp · calidad ${level.jpegQuality} %" +
+            if (originalBytes > 0) " · aprox. ${formatBytes((originalBytes * ratio).toLong())}" else "",
+        selected = selected,
         onClick = onClick,
-        shape = MaterialTheme.shapes.large,
-        color = if (selected) brand.gradientStart.copy(alpha = if (brand.isDark) 0.16f else 0.08f) else brand.card,
-        border = BorderStroke(if (selected) 2.dp else 1.dp, if (selected) brand.gradientStart else brand.cardBorder),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            RadioButton(selected = selected, onClick = null, colors = RadioButtonDefaults.colors(selectedColor = brand.gradientStart))
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(level.label, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f, fill = false))
-                    if (level == CompressionLevel.RECOMMENDED) {
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            "RECOMENDADO",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color.White,
-                            modifier = Modifier
-                                .clip(CircleShape)
-                                .background(brand.horizontalGradient)
-                                .padding(horizontal = 8.dp, vertical = 2.dp),
-                        )
-                    }
-                }
-                Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(
-                    "${level.dpi} ppp · calidad ${level.jpegQuality} %" +
-                        if (originalBytes > 0) " · aprox. ${formatBytes((originalBytes * ratio).toLong())}" else "",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = brand.accent,
-                )
-            }
-        }
-    }
+    )
 }
 
 @Composable
-private fun TargetCard(targetMb: Float, onChange: (Float) -> Unit, originalBytes: Long) {
-    val brand = MaterialTheme.brand
+private fun TargetGroup(targetMb: Float, onChange: (Float) -> Unit, originalBytes: Long) {
+    val ui = MaterialTheme.ui
     val originalMb = (originalBytes / MB).toFloat()
     val maxMb = max(0.2f, originalMb * 0.95f)
     val presets = remember(originalMb) { listOf(0.5f, 1f, 2f, 5f, 10f).filter { it < originalMb } }
-    BrandCard {
-        Text("Tamaño máximo deseado", style = MaterialTheme.typography.titleSmall)
-        Spacer(Modifier.height(4.dp))
-        Row(verticalAlignment = Alignment.Bottom) {
-            Text(
-                String.format(SpanishLocale, if (targetMb < 10) "%.1f" else "%.0f", targetMb),
-                style = MaterialTheme.typography.displaySmall,
-                color = brand.gradientStart,
-            )
-            Spacer(Modifier.width(6.dp))
-            Text("MB", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(bottom = 6.dp))
-            Spacer(Modifier.weight(1f))
-            if (originalBytes > 0) {
-                Text(
-                    "Original: ${formatBytes(originalBytes)}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(bottom = 8.dp),
-                )
-            }
-        }
-        Slider(
-            value = targetMb.coerceIn(0.1f, maxMb),
-            onValueChange = { onChange(((it * 10).roundToInt() / 10f).coerceAtLeast(0.1f)) },
-            valueRange = 0.1f..maxMb,
-            colors = SliderDefaults.colors(thumbColor = brand.gradientStart, activeTrackColor = brand.gradientStart),
-        )
-        if (presets.isNotEmpty()) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                presets.forEach { p ->
-                    FilterChip(
-                        selected = targetMb == p,
-                        onClick = { onChange(p) },
-                        label = { Text(if (p < 1f) "500 KB" else "${p.toInt()} MB") },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = brand.gradientStart.copy(alpha = 0.2f),
-                        ),
+    InsetGroup(header = "Tamaño máximo deseado", footer = "Buscamos la mejor calidad posible que quepa en ese tamaño.") {
+        item {
+            Column(Modifier.fillMaxWidth().padding(16.dp)) {
+                Row(verticalAlignment = Alignment.Bottom) {
+                    Text(
+                        String.format(SpanishLocale, if (targetMb < 10) "%.1f" else "%.0f", targetMb),
+                        style = MaterialTheme.typography.displaySmall,
+                        color = ui.label,
                     )
+                    Spacer(Modifier.width(6.dp))
+                    Text("MB", style = MaterialTheme.typography.titleMedium, color = ui.secondaryLabel, modifier = Modifier.padding(bottom = 6.dp))
+                    Spacer(Modifier.weight(1f))
+                    if (originalBytes > 0) {
+                        Text("Original: ${formatBytes(originalBytes)}", style = MaterialTheme.typography.bodySmall, color = ui.secondaryLabel, modifier = Modifier.padding(bottom = 8.dp))
+                    }
+                }
+                Slider(
+                    value = targetMb.coerceIn(0.1f, maxMb),
+                    onValueChange = { onChange(((it * 10).roundToInt() / 10f).coerceAtLeast(0.1f)) },
+                    valueRange = 0.1f..maxMb,
+                    colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = ui.accent, inactiveTrackColor = ui.fill),
+                )
+                if (presets.isNotEmpty()) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        presets.forEach { p ->
+                            val sel = targetMb == p
+                            Text(
+                                if (p < 1f) "500 KB" else "${p.toInt()} MB",
+                                color = if (sel) ui.onAccent else ui.label,
+                                style = MaterialTheme.typography.labelLarge,
+                                modifier = Modifier
+                                    .clip(PillShape)
+                                    .background(if (sel) ui.accent else ui.fill)
+                                    .selectable(selected = sel, role = Role.RadioButton) { onChange(p) }
+                                    .padding(horizontal = 12.dp, vertical = 7.dp),
+                            )
+                        }
+                    }
                 }
             }
         }
-        Spacer(Modifier.height(4.dp))
-        Text(
-            "Buscamos la mejor calidad posible que quepa en ese tamaño.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
     }
 }
 
 @Composable
 private fun ProgressCard(progress: Float, onCancel: () -> Unit) {
-    val brand = MaterialTheme.brand
+    val ui = MaterialTheme.ui
     val animated by animateFloatAsState(progress.coerceIn(0f, 1f), tween(300), label = "compressProgress")
-    BrandCard(Modifier.fillMaxWidth()) {
-        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-            Spacer(Modifier.height(8.dp))
-            Text("${(animated * 100).roundToInt()} %", style = MaterialTheme.typography.displayMedium, color = brand.gradientStart)
-            Spacer(Modifier.height(4.dp))
-            Text("Comprimiendo páginas…", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.height(16.dp))
-            LinearProgressIndicator(
-                progress = { animated },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(10.dp)
-                    .clip(CircleShape),
-                color = brand.gradientEnd,
-                trackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-                strokeCap = StrokeCap.Round,
-            )
-            Spacer(Modifier.height(8.dp))
-            TextButton(onClick = onCancel) { Text("Cancelar") }
+    InsetGroup {
+        item {
+            Column(Modifier.fillMaxWidth().padding(top = 20.dp, start = 20.dp, end = 20.dp, bottom = 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("${(animated * 100).roundToInt()} %", style = MaterialTheme.typography.displayMedium, color = ui.label)
+                Text("Comprimiendo páginas…", style = MaterialTheme.typography.bodyMedium, color = ui.secondaryLabel)
+                Spacer(Modifier.height(16.dp))
+                LinearProgressIndicator(
+                    progress = { animated },
+                    modifier = Modifier.fillMaxWidth().height(6.dp).clip(CircleShape),
+                    color = ui.accent,
+                    trackColor = ui.fill,
+                    strokeCap = StrokeCap.Round,
+                    drawStopIndicator = {},
+                )
+                Text(
+                    "Cancelar",
+                    color = ui.accent,
+                    fontSize = 17.sp,
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier
+                        .padding(top = 8.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(role = Role.Button, onClick = onCancel)
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                )
+            }
         }
     }
 }
@@ -586,7 +599,7 @@ private fun ResultCard(
     onShare: () -> Unit,
     onAgain: () -> Unit,
 ) {
-    val brand = MaterialTheme.brand
+    val ui = MaterialTheme.ui
     val percent = remember(result) { Animatable(0f) }
     LaunchedEffect(result) {
         percent.animateTo(result.savedPercent.toFloat(), tween(1100, easing = FastOutSlowInEasing))
@@ -594,81 +607,74 @@ private fun ResultCard(
     val ratio = if (result.originalBytes > 0) result.compressedBytes.toFloat() / result.originalBytes else 1f
     val barRatio by animateFloatAsState(ratio.coerceIn(0.02f, 1f), tween(1100, easing = FastOutSlowInEasing), label = "bar")
 
-    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        BrandCard(Modifier.fillMaxWidth()) {
-            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(
-                    Icons.Rounded.CheckCircle,
-                    null,
-                    tint = if (result.keptOriginal) brand.warning else brand.success,
-                    modifier = Modifier.size(40.dp),
-                )
-                Spacer(Modifier.height(8.dp))
-                if (result.keptOriginal) {
-                    Text("Ya estaba optimizado", style = MaterialTheme.typography.titleLarge)
-                    Text(
-                        "No fue posible reducirlo más sin perder calidad; se conserva el original.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                } else {
-                    Text(
-                        "−${percent.value.roundToInt()} %",
-                        style = MaterialTheme.typography.displayLarge.merge(
-                            androidx.compose.ui.text.TextStyle(brush = brand.horizontalGradient),
-                        ),
-                    )
-                    Text("de tamaño ahorrado", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (result.rasterized) {
-                        Spacer(Modifier.height(8.dp))
+    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        InsetGroup {
+            item {
+                Column(Modifier.fillMaxWidth().padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(
+                        Modifier.size(44.dp).clip(CircleShape).background(if (result.keptOriginal) ui.orange else ui.green),
+                        contentAlignment = Alignment.Center,
+                    ) { Icon(AppIcons.Check, null, tint = Color.White, modifier = Modifier.size(24.dp)) }
+                    Spacer(Modifier.height(10.dp))
+                    if (result.keptOriginal) {
+                        Text("Ya estaba optimizado", style = MaterialTheme.typography.titleLarge, color = ui.label)
                         Text(
-                            "Las páginas se convirtieron en imágenes: el texto ya no se podrá seleccionar ni buscar.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = brand.warning,
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                            "No fue posible reducirlo más sin perder calidad; se conserva el original.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = ui.secondaryLabel,
+                            textAlign = TextAlign.Center,
                         )
+                    } else {
+                        Text("−${percent.value.roundToInt()} %", style = MaterialTheme.typography.displayLarge, color = ui.label)
+                        Text("de tamaño ahorrado", style = MaterialTheme.typography.bodyMedium, color = ui.secondaryLabel)
+                        if (result.rasterized) {
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "Las páginas se convirtieron en imágenes: el texto ya no se podrá seleccionar ni buscar.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = ui.orange,
+                                textAlign = TextAlign.Center,
+                            )
+                        }
                     }
+                    Spacer(Modifier.height(20.dp))
+                    SizeBar("Antes", result.originalBytes, 1f, ui.tertiaryLabel)
+                    Spacer(Modifier.height(10.dp))
+                    SizeBar("Después", result.compressedBytes, barRatio, ui.accent)
+                    Spacer(Modifier.height(8.dp))
+                    Text(pagesLabel(result.pageCount), style = MaterialTheme.typography.bodySmall, color = ui.secondaryLabel)
                 }
-                Spacer(Modifier.height(20.dp))
-                SizeBar("Antes", result.originalBytes, 1f, MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f))
-                Spacer(Modifier.height(10.dp))
-                SizeBar("Después", result.compressedBytes, barRatio, brand.gradientEnd)
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    pagesLabel(result.pageCount),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
             }
         }
-        GradientButton(
+        PrimaryCapsuleButton(
             text = "Guardar en Descargas",
             onClick = onSave,
-            icon = Icons.Rounded.Download,
+            icon = AppIcons.Download,
             loading = saving,
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            SoftButton("Compartir", onShare, Modifier.weight(1f), icon = Icons.Rounded.Share)
-            SoftButton("Otra vez", onAgain, Modifier.weight(1f), icon = Icons.Rounded.Refresh)
+        Row(Modifier.padding(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            PrimaryCapsuleButton("Compartir", onShare, Modifier.weight(1f), icon = AppIcons.Share, tonal = true)
+            PrimaryCapsuleButton("Otra vez", onAgain, Modifier.weight(1f), icon = AppIcons.Rotate, tonal = true)
         }
     }
 }
 
 @Composable
 private fun SizeBar(label: String, bytes: Long, fraction: Float, color: Color) {
+    val ui = MaterialTheme.ui
     Column(Modifier.fillMaxWidth()) {
         Row {
-            Text(label, style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
-            Text(formatBytes(bytes), style = MaterialTheme.typography.labelLarge)
+            Text(label, style = MaterialTheme.typography.bodySmall, color = ui.secondaryLabel, modifier = Modifier.weight(1f))
+            Text(formatBytes(bytes), style = MaterialTheme.typography.labelLarge, color = ui.label)
         }
         Spacer(Modifier.height(4.dp))
         Box(
             Modifier
                 .fillMaxWidth()
-                .height(12.dp)
+                .height(8.dp)
                 .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+                .background(ui.fill),
         ) {
             Box(
                 Modifier
@@ -683,18 +689,21 @@ private fun SizeBar(label: String, bytes: Long, fraction: Float, color: Color) {
 
 @Composable
 private fun ErrorCard(message: String) {
-    val brand = MaterialTheme.brand
-    Surface(
-        shape = MaterialTheme.shapes.large,
-        color = brand.danger.copy(alpha = 0.12f),
-        contentColor = brand.danger,
-        modifier = Modifier.fillMaxWidth(),
+    val ui = MaterialTheme.ui
+    Row(
+        Modifier
+            .padding(horizontal = 20.dp)
+            .fillMaxWidth()
+            .clip(GroupShape)
+            .background(ui.card)
+            .padding(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Rounded.ErrorOutline, null)
-            Spacer(Modifier.width(12.dp))
-            Text(message, style = MaterialTheme.typography.bodyMedium)
+        Box(Modifier.size(28.dp).clip(CircleShape).background(ui.red), contentAlignment = Alignment.Center) {
+            Icon(AppIcons.Info, null, tint = Color.White, modifier = Modifier.size(16.dp))
         }
+        Spacer(Modifier.width(12.dp))
+        Text(message, style = MaterialTheme.typography.bodyMedium, color = ui.label)
     }
 }
 
