@@ -91,13 +91,40 @@ import com.scannerpromax.ai.RecognitionEngine
 import com.scannerpromax.data.AppSettings
 import com.scannerpromax.di.AppContainer
 import com.scannerpromax.imaging.BitmapIO
-import com.scannerpromax.ui.components.AppTopBar
-import com.scannerpromax.ui.components.BrandCard
-import com.scannerpromax.ui.components.GradientButton
-import com.scannerpromax.ui.components.SoftButton
 import com.scannerpromax.ui.components.SpanishLocale
 import com.scannerpromax.ui.components.formatBytes
-import com.scannerpromax.ui.theme.brand
+import com.scannerpromax.ui.components.AppIcons
+import com.scannerpromax.ui.components.GroupArrangement
+import com.scannerpromax.ui.components.GroupRow
+import com.scannerpromax.ui.components.IconCircleButton
+import com.scannerpromax.ui.components.InsetGroup
+import com.scannerpromax.ui.components.IosTextField
+import com.scannerpromax.ui.components.LargeTitleHeader
+import com.scannerpromax.ui.components.MoreMenu
+import com.scannerpromax.ui.components.MoreMenuItem
+import com.scannerpromax.ui.components.NavigationRow
+import com.scannerpromax.ui.components.PrimaryCapsuleButton
+import com.scannerpromax.ui.components.SegmentedControl
+import com.scannerpromax.ui.components.SeparatorInsetIcon
+import com.scannerpromax.ui.components.SeparatorInsetPlain
+import com.scannerpromax.ui.components.ToggleRow
+import com.scannerpromax.ui.theme.GroupShape
+import com.scannerpromax.ui.theme.PillShape
+import com.scannerpromax.ui.theme.SystemBlue
+import com.scannerpromax.ui.theme.SystemGray
+import com.scannerpromax.ui.theme.SystemOrange
+import com.scannerpromax.ui.theme.SystemPurple
+import com.scannerpromax.ui.theme.SystemTeal
+import com.scannerpromax.ui.theme.ui
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -147,132 +174,28 @@ fun AiModelsScreen(container: AppContainer, onBack: () -> Unit) {
         manager.enqueueDownload(model, settings.aiWifiOnly, quantize)?.let { message = it }
     }
 
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
-        topBar = { AppTopBar(title = "Modelos IA", onBack = onBack, scrollBehavior = scrollBehavior) },
-        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
-    ) { inner ->
-        Column(
-            Modifier
-                .fillMaxSize()
-                .padding(inner)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp)
-                .padding(bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            Text(
-                "Modelos de inteligencia artificial que funcionan dentro del teléfono, sin internet una vez " +
-                    "descargados. Puedes descargar uno, otro o ambos, ahora o más tarde.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            engineStatus?.takeIf { it.isNotEmpty() }?.let { WarningCard(it) }
-            if (ramMb in 1 until 3072) {
-                WarningCard(
-                    "Tu teléfono tiene ${String.format(SpanishLocale, "%.1f", ramMb / 1024f)} GB de RAM. Los modelos " +
-                        "pueden ir lentos o cerrarse por falta de memoria. Recomendado: solo el Asistente visual " +
-                        "(más ligero) o el reconocimiento Básico.",
-                )
-            }
-            message?.let { WarningCard(it, onDismiss = { message = null }) }
-
-            // ---------------------------------------------------------------- motor principal
-            SectionTitle("Motor de reconocimiento principal")
-            BrandCard(contentPadding = PaddingValues(vertical = 4.dp)) {
-                RecognitionEngine.entries.forEach { engine ->
-                    val model = engine.role?.let { ModelCatalog.forRole(it) }
-                    val cloudOk = engine.cloud?.let { container.cloudKeys.has(it) && settings.cloudConsent(it) }
-                    val ready = cloudOk ?: (model == null || states[model.id] is ModelState.Ready)
-                    EngineRow(
-                        engine = engine,
-                        selected = settings.recognitionEngine == engine,
-                        enabled = ready,
-                        hint = when {
-                            ready -> engine.description
-                            engine.cloud != null -> "Configura tu clave en Ajustes → IA en la nube"
-                            else -> "Descarga primero el modelo"
-                        },
-                        onSelect = { update { it.copy(recognitionEngine = engine) } },
-                    )
-                }
-            }
-
-            // ---------------------------------------------------------------- opciones
-            SectionTitle("Descargas")
-            BrandCard(contentPadding = PaddingValues(vertical = 4.dp)) {
-                ToggleRow(
-                    icon = Icons.Rounded.Wifi,
-                    title = "Solo con Wi-Fi",
-                    subtitle = "No usar datos móviles para descargar modelos",
-                    checked = settings.aiWifiOnly,
-                    onChange = { v -> update { it.copy(aiWifiOnly = v) } },
-                )
-                if (ModelCatalog.all.any { it.onDeviceQuantization != null }) {
-                    ToggleRow(
-                        icon = Icons.Rounded.Tune,
-                        title = "Optimizar el Lector tras descargar",
-                        subtitle = "Lo cuantiza en el teléfono (Q8_0): casi la mitad de memoria y disco, con una " +
-                            "pérdida de precisión mínima. Tarda uno o dos minutos.",
-                        checked = settings.aiQuantizeOnDevice,
-                        onChange = { v -> update { it.copy(aiQuantizeOnDevice = v) } },
-                    )
-                }
-            }
-
-            // ---------------------------------------------------------------- asistente visual
-            SectionTitle("Asistente visual (si está descargado)")
-            BrandCard(contentPadding = PaddingValues(vertical = 4.dp)) {
-                ToggleRow(
-                    icon = Icons.Rounded.AutoFixHigh,
-                    title = "Mejora según el tipo de documento",
-                    subtitle = "Reconoce recibos, pizarras y fotos de pantalla y les aplica la mejora adecuada " +
-                        "(solo si la página sigue con el filtro por defecto).",
-                    checked = settings.aiAutoEnhance,
-                    onChange = { v -> update { it.copy(aiAutoEnhance = v) } },
-                )
-                ToggleRow(
-                    icon = Icons.Rounded.CropFree,
-                    title = "Ayuda con el encuadre",
-                    subtitle = "Si no se detectan los bordes de la hoja, la IA busca dónde está el documento y " +
-                        "vuelve a recortarlo en segundo plano.",
-                    checked = settings.aiFrameRescue,
-                    onChange = { v -> update { it.copy(aiFrameRescue = v) } },
-                )
-            }
-
-            val missing = ModelCatalog.all.filter { states[it.id] !is ModelState.Ready }
-            if (missing.size > 1) {
-                GradientButton(
-                    text = (if (missing.size == 2) "Descargar ambos (" else "Descargar todos (") + "${formatBytes(missing.sumOf { it.totalDownloadBytes })})",
-                    onClick = { missing.forEach { download(it) } },
-                    icon = Icons.Rounded.CloudDownload,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-
-            // ---------------------------------------------------------------- tarjetas
-            ModelCatalog.all.forEach { model ->
-                ModelCard(
-                    model = model,
-                    state = states[model.id] ?: ModelState.NotDownloaded,
-                    ramMb = ramMb,
-                    canQuantize = model.onDeviceQuantization != null,
-                    onDownload = { download(model) },
-                    onCancel = { manager.cancelDownload(model) },
-                    onDelete = { confirmDelete = model },
-                    onQuantize = {
-                        askNotificationPermission()
-                        manager.enqueueDownload(model, settings.aiWifiOnly, quantize = true)?.let { message = it }
-                    },
-                )
-            }
-
-            // ---------------------------------------------------------------- prueba
-            TestSection(container, states, available = engineStatus == "")
-        }
-    }
+    val missing = ModelCatalog.all.filter { states[it.id] !is ModelState.Ready }
+    AiModelsContent(
+        settings = settings,
+        states = states,
+        ramMb = ramMb,
+        engineStatus = engineStatus,
+        message = message,
+        onDismissMessage = { message = null },
+        cloudReady = { engine -> engine.cloud?.let { container.cloudKeys.has(it) && settings.cloudConsent(it) } },
+        onUpdate = { update(it) },
+        onBack = onBack,
+        onDownloadAll = if (missing.size > 1) ({ missing.forEach { download(it) } }) else null,
+        downloadAllLabel = (if (missing.size == 2) "Descargar ambos (" else "Descargar todos (") + "${formatBytes(missing.sumOf { it.totalDownloadBytes })})",
+        onDownload = { download(it) },
+        onCancel = { manager.cancelDownload(it) },
+        onDelete = { confirmDelete = it },
+        onQuantize = { model ->
+            askNotificationPermission()
+            manager.enqueueDownload(model, settings.aiWifiOnly, quantize = true)?.let { message = it }
+        },
+        testSection = { TestSection(container, states, available = engineStatus == "") },
+    )
 
     confirmDelete?.let { model ->
         com.scannerpromax.ui.components.ConfirmDialog(
@@ -294,6 +217,166 @@ fun AiModelsScreen(container: AppContainer, onBack: () -> Unit) {
     }
 }
 
+/**
+ * Modelos IA SIN estado: cabecera grande (••• = descargar todos), avisos, grupos de motor principal, descargas y
+ * asistente visual, una tarjeta por modelo y la prueba en el dispositivo ([testSection]).
+ */
+@Composable
+internal fun AiModelsContent(
+    settings: AppSettings,
+    states: Map<String, ModelState>,
+    ramMb: Int,
+    engineStatus: String?,
+    message: String?,
+    onDismissMessage: () -> Unit,
+    cloudReady: (RecognitionEngine) -> Boolean?,
+    onUpdate: ((AppSettings) -> AppSettings) -> Unit,
+    onBack: () -> Unit,
+    onDownloadAll: (() -> Unit)?,
+    downloadAllLabel: String,
+    onDownload: (AiModel) -> Unit,
+    onCancel: (AiModel) -> Unit,
+    onDelete: (AiModel) -> Unit,
+    onQuantize: (AiModel) -> Unit,
+    testSection: @Composable () -> Unit,
+) {
+    val ui = MaterialTheme.ui
+    var menu by remember { mutableStateOf(false) }
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(ui.groupedBackground)
+            .verticalScroll(rememberScrollState())
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .padding(bottom = 32.dp),
+        verticalArrangement = GroupArrangement,
+    ) {
+        LargeTitleHeader(title = "Modelos IA", backLabel = "Ajustes", onBack = onBack) {
+            if (onDownloadAll != null) {
+                Box {
+                    IconCircleButton(AppIcons.More, "Más opciones", { menu = true }, size = 36.dp, iconSize = 18.dp)
+                    MoreMenu(
+                        expanded = menu,
+                        onDismissRequest = { menu = false },
+                        groups = listOf(listOf(MoreMenuItem(downloadAllLabel, AppIcons.Download, onClick = onDownloadAll))),
+                        width = 290.dp,
+                    )
+                }
+            }
+        }
+        Text(
+            "Modelos de inteligencia artificial que funcionan dentro del teléfono, sin internet una vez " +
+                "descargados. Puedes descargar uno, otro o ambos, ahora o más tarde.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = ui.secondaryLabel,
+            modifier = Modifier.padding(horizontal = 20.dp).padding(top = 0.dp),
+        )
+
+        engineStatus?.takeIf { it.isNotEmpty() }?.let { WarningCard(it) }
+        if (ramMb in 1 until 3072) {
+            WarningCard(
+                "Tu teléfono tiene ${String.format(SpanishLocale, "%.1f", ramMb / 1024f)} GB de RAM. Los modelos " +
+                    "pueden ir lentos o cerrarse por falta de memoria. Recomendado: solo el Asistente visual " +
+                    "(más ligero) o el reconocimiento Básico.",
+            )
+        }
+        message?.let { WarningCard(it, onDismiss = onDismissMessage) }
+
+        // ---------------------------------------------------------------- motor principal
+        InsetGroup(header = "Motor de reconocimiento principal", separatorInset = SeparatorInsetPlain) {
+            RecognitionEngine.entries.forEach { engine ->
+                val model = engine.role?.let { ModelCatalog.forRole(it) }
+                val cloudOk = cloudReady(engine)
+                val ready = cloudOk ?: (model == null || states[model.id] is ModelState.Ready)
+                item {
+                    EngineRow(
+                        engine = engine,
+                        selected = settings.recognitionEngine == engine,
+                        enabled = ready,
+                        hint = when {
+                            ready -> engine.description
+                            engine.cloud != null -> "Configura tu clave en Ajustes → IA en la nube"
+                            else -> "Descarga primero el modelo"
+                        },
+                        onSelect = { onUpdate { it.copy(recognitionEngine = engine) } },
+                    )
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------- opciones
+        InsetGroup(header = "Descargas") {
+            item {
+                ToggleRow(
+                    title = "Solo con Wi-Fi",
+                    subtitle = "No usar datos móviles para descargar modelos",
+                    checked = settings.aiWifiOnly,
+                    onCheckedChange = { v -> onUpdate { it.copy(aiWifiOnly = v) } },
+                    icon = Icons.Rounded.Wifi,
+                    iconTint = SystemBlue,
+                )
+            }
+            if (ModelCatalog.all.any { it.onDeviceQuantization != null }) {
+                item {
+                    ToggleRow(
+                        title = "Optimizar el Lector tras descargar",
+                        subtitle = "Lo cuantiza en el teléfono (Q8_0): casi la mitad de memoria y disco, con una " +
+                            "pérdida de precisión mínima. Tarda uno o dos minutos.",
+                        checked = settings.aiQuantizeOnDevice,
+                        onCheckedChange = { v -> onUpdate { it.copy(aiQuantizeOnDevice = v) } },
+                        icon = Icons.Rounded.Tune,
+                        iconTint = SystemOrange,
+                    )
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------- asistente visual
+        InsetGroup(header = "Asistente visual (si está descargado)") {
+            item {
+                ToggleRow(
+                    title = "Mejora según el tipo de documento",
+                    subtitle = "Reconoce recibos, pizarras y fotos de pantalla y les aplica la mejora adecuada " +
+                        "(solo si la página sigue con el filtro por defecto).",
+                    checked = settings.aiAutoEnhance,
+                    onCheckedChange = { v -> onUpdate { it.copy(aiAutoEnhance = v) } },
+                    icon = Icons.Rounded.AutoFixHigh,
+                    iconTint = SystemPurple,
+                )
+            }
+            item {
+                ToggleRow(
+                    title = "Ayuda con el encuadre",
+                    subtitle = "Si no se detectan los bordes de la hoja, la IA busca dónde está el documento y " +
+                        "vuelve a recortarlo en segundo plano.",
+                    checked = settings.aiFrameRescue,
+                    onCheckedChange = { v -> onUpdate { it.copy(aiFrameRescue = v) } },
+                    icon = Icons.Rounded.CropFree,
+                    iconTint = SystemTeal,
+                )
+            }
+        }
+
+        // ---------------------------------------------------------------- tarjetas
+        ModelCatalog.all.forEach { model ->
+            ModelCard(
+                model = model,
+                state = states[model.id] ?: ModelState.NotDownloaded,
+                ramMb = ramMb,
+                canQuantize = model.onDeviceQuantization != null,
+                onDownload = { onDownload(model) },
+                onCancel = { onCancel(model) },
+                onDelete = { onDelete(model) },
+                onQuantize = { onQuantize(model) },
+            )
+        }
+
+        // ---------------------------------------------------------------- prueba
+        testSection()
+    }
+}
+
 // ------------------------------------------------------------------------------------------------ tarjeta
 
 @Composable
@@ -307,119 +390,152 @@ private fun ModelCard(
     onDelete: () -> Unit,
     onQuantize: () -> Unit,
 ) {
-    val brand = MaterialTheme.brand
-    BrandCard {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconBadge(
-                when (model.role) {
+    val ui = MaterialTheme.ui
+    InsetGroup(separatorInset = SeparatorInsetIcon) {
+        item {
+            GroupRow(
+                title = model.name,
+                subtitle = "${model.technicalName} · ${model.license}",
+                icon = when (model.role) {
                     ModelRole.DOCUMENT_READER -> Icons.Rounded.DocumentScanner
                     ModelRole.PAGE_LAYOUT -> Icons.Rounded.Dashboard
                     else -> Icons.Rounded.Visibility
                 },
+                iconTint = ui.accent,
             )
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text(model.name, style = MaterialTheme.typography.titleMedium)
-                Text(
-                    "${model.technicalName} · ${model.license}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
         }
-        Spacer(Modifier.height(10.dp))
-        Text("Para qué sirve", style = MaterialTheme.typography.labelMedium, color = brand.gradientStart)
-        Text(model.purpose, style = MaterialTheme.typography.bodyMedium)
-        Spacer(Modifier.height(8.dp))
-        val lowRam = ramMb in 1 until model.minRamMb
-        Text(
-            "Descarga: ${formatBytes(model.totalDownloadBytes)} · RAM recomendada: ${model.recommendedRamMb / 1024} GB" +
-                (if (lowRam) " (tu teléfono tiene menos)" else ""),
-            style = MaterialTheme.typography.bodySmall,
-            color = if (lowRam) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.height(12.dp))
-
-        when (state) {
-            is ModelState.NotDownloaded -> GradientButton("Descargar", onDownload, Modifier.fillMaxWidth(), icon = Icons.Rounded.CloudDownload, height = 48.dp)
-            is ModelState.Paused -> {
-                ProgressLine(state.downloaded, state.total, "En pausa")
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    GradientButton("Reanudar", onDownload, Modifier.weight(1f), icon = Icons.Rounded.CloudDownload, height = 48.dp)
-                    SoftButton("Eliminar", onDelete, Modifier.weight(1f), icon = Icons.Rounded.Delete, height = 48.dp)
-                }
-            }
-            is ModelState.Queued -> {
-                ProgressLine(state.downloaded, state.total, if (state.waitingForNetwork) "En cola (esperando red / Wi-Fi)" else "En cola")
-                SoftButton("Cancelar", onCancel, Modifier.fillMaxWidth(), icon = Icons.Rounded.Stop, height = 48.dp)
-            }
-            is ModelState.Downloading -> {
-                val speed = if (state.bytesPerSecond > 0) " · ${formatBytes(state.bytesPerSecond)}/s" else ""
-                ProgressLine(state.downloaded, state.total, "Descargando$speed")
-                SoftButton("Cancelar", onCancel, Modifier.fillMaxWidth(), icon = Icons.Rounded.Stop, height = 48.dp)
-            }
-            is ModelState.Verifying -> {
-                Text("Verificando ${state.fileName}…", style = MaterialTheme.typography.bodySmall)
-                LinearProgressIndicator(Modifier.fillMaxWidth().padding(vertical = 8.dp))
-                SoftButton("Cancelar", onCancel, Modifier.fillMaxWidth(), icon = Icons.Rounded.Stop, height = 48.dp)
-            }
-            is ModelState.Quantizing -> {
-                Text("Optimizando el modelo en el teléfono…", style = MaterialTheme.typography.bodySmall)
-                LinearProgressIndicator(Modifier.fillMaxWidth().padding(vertical = 8.dp))
-            }
-            is ModelState.Ready -> {
+        item {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+                Text("PARA QUÉ SIRVE", style = MaterialTheme.typography.bodySmall, color = ui.secondaryLabel)
+                Text(model.purpose, style = MaterialTheme.typography.bodyMedium, color = ui.label)
+                Spacer(Modifier.height(8.dp))
+                val lowRam = ramMb in 1 until model.minRamMb
                 Text(
-                    "Listo · ocupa ${formatBytes(state.diskBytes)}" + if (state.quantized) " · optimizado" else "",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = brand.accent,
+                    "Descarga: ${formatBytes(model.totalDownloadBytes)} · RAM recomendada: ${model.recommendedRamMb / 1024} GB" +
+                        (if (lowRam) " (tu teléfono tiene menos)" else ""),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (lowRam) ui.red else ui.secondaryLabel,
                 )
-                state.warning?.let {
-                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                }
-                Spacer(Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (canQuantize && !state.quantized) {
-                        SoftButton("Optimizar", onQuantize, Modifier.weight(1f), icon = Icons.Rounded.Tune, height = 48.dp)
+                Spacer(Modifier.height(12.dp))
+                when (state) {
+                    is ModelState.NotDownloaded -> CardButton("Descargar", onDownload, Modifier.fillMaxWidth(), icon = AppIcons.Download)
+                    is ModelState.Paused -> {
+                        ProgressLine(state.downloaded, state.total, "En pausa")
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            CardButton("Reanudar", onDownload, Modifier.weight(1f), icon = AppIcons.Download)
+                            CardButton("Eliminar", onDelete, Modifier.weight(1f), tonal = true, destructive = true)
+                        }
                     }
-                    SoftButton("Eliminar", onDelete, Modifier.weight(1f), icon = Icons.Rounded.Delete, height = 48.dp)
-                }
-            }
-            is ModelState.Failed -> {
-                Text(state.message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                if (state.downloaded > 0) ProgressLine(state.downloaded, state.total, "Error")
-                Spacer(Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    GradientButton("Reintentar", onDownload, Modifier.weight(1f), icon = Icons.Rounded.CloudDownload, height = 48.dp)
-                    SoftButton("Eliminar", onDelete, Modifier.weight(1f), icon = Icons.Rounded.Delete, height = 48.dp)
+                    is ModelState.Queued -> {
+                        ProgressLine(state.downloaded, state.total, if (state.waitingForNetwork) "En cola (esperando red / Wi-Fi)" else "En cola")
+                        CardButton("Cancelar", onCancel, Modifier.fillMaxWidth(), tonal = true)
+                    }
+                    is ModelState.Downloading -> {
+                        val speed = if (state.bytesPerSecond > 0) " · ${formatBytes(state.bytesPerSecond)}/s" else ""
+                        ProgressLine(state.downloaded, state.total, "Descargando$speed")
+                        CardButton("Cancelar", onCancel, Modifier.fillMaxWidth(), tonal = true)
+                    }
+                    is ModelState.Verifying -> {
+                        Text("Verificando ${state.fileName}…", style = MaterialTheme.typography.bodySmall, color = ui.label)
+                        LinearProgressIndicator(Modifier.fillMaxWidth().padding(vertical = 8.dp).clip(CircleShape), color = ui.accent, trackColor = ui.fill)
+                        CardButton("Cancelar", onCancel, Modifier.fillMaxWidth(), tonal = true)
+                    }
+                    is ModelState.Quantizing -> {
+                        Text("Optimizando el modelo en el teléfono…", style = MaterialTheme.typography.bodySmall, color = ui.label)
+                        LinearProgressIndicator(Modifier.fillMaxWidth().padding(vertical = 8.dp).clip(CircleShape), color = ui.accent, trackColor = ui.fill)
+                    }
+                    is ModelState.Ready -> {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(AppIcons.Check, null, tint = ui.green, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                "Listo · ocupa ${formatBytes(state.diskBytes)}" + if (state.quantized) " · optimizado" else "",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = ui.label,
+                            )
+                        }
+                        state.warning?.let {
+                            Text(it, style = MaterialTheme.typography.bodySmall, color = ui.red)
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (canQuantize && !state.quantized) {
+                                CardButton("Optimizar", onQuantize, Modifier.weight(1f), tonal = true)
+                            }
+                            CardButton("Eliminar", onDelete, Modifier.weight(1f), tonal = true, destructive = true)
+                        }
+                    }
+                    is ModelState.Failed -> {
+                        Text(state.message, style = MaterialTheme.typography.bodySmall, color = ui.red)
+                        if (state.downloaded > 0) ProgressLine(state.downloaded, state.total, "Error")
+                        Spacer(Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            CardButton("Reintentar", onDownload, Modifier.weight(1f), icon = AppIcons.Download)
+                            CardButton("Eliminar", onDelete, Modifier.weight(1f), tonal = true, destructive = true)
+                        }
+                    }
                 }
             }
         }
     }
 }
 
+/** Botón de tarjeta (44 dp, radio 10): acento o gris; [destructive] = texto rojo sobre gris. */
+@Composable
+internal fun CardButton(
+    text: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    icon: ImageVector? = null,
+    tonal: Boolean = false,
+    destructive: Boolean = false,
+    enabled: Boolean = true,
+) {
+    if (destructive) {
+        val ui = MaterialTheme.ui
+        Box(
+            modifier
+                .height(44.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(ui.fill)
+                .clickable(enabled = enabled, role = Role.Button, onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(text, color = ui.red, style = MaterialTheme.typography.titleSmall)
+        }
+    } else {
+        PrimaryCapsuleButton(text, onClick, modifier, icon = icon, tonal = tonal, enabled = enabled, height = 44.dp, shape = RoundedCornerShape(10.dp))
+    }
+}
+
 @Composable
 private fun ProgressLine(done: Long, total: Long, label: String) {
+    val ui = MaterialTheme.ui
     val frac = if (total > 0) (done.toFloat() / total).coerceIn(0f, 1f) else 0f
     Text(
         "$label · ${formatBytes(done)} de ${formatBytes(total)} (${(frac * 100).toInt()} %)",
         style = MaterialTheme.typography.bodySmall,
+        color = ui.label,
     )
     LinearProgressIndicator(
         progress = { frac },
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 8.dp),
-        color = MaterialTheme.brand.gradientStart,
+            .padding(vertical = 8.dp)
+            .clip(CircleShape),
+        color = ui.accent,
+        trackColor = ui.fill,
+        drawStopIndicator = {},
     )
 }
 
 // ------------------------------------------------------------------------------------------------ prueba
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TestSection(container: AppContainer, states: Map<String, ModelState>, available: Boolean) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val ui = MaterialTheme.ui
     val readyModels = ModelCatalog.all.filter { it.isLlm && states[it.id] is ModelState.Ready }
     var modelId by remember { mutableStateOf<String?>(null) }
     val model = readyModels.firstOrNull { it.id == modelId } ?: readyModels.firstOrNull()
@@ -439,129 +555,132 @@ private fun TestSection(container: AppContainer, states: Map<String, ModelState>
         }
     }
 
-    SectionTitle("Probar modelo")
-    BrandCard {
-        if (!available) {
-            Text("El motor de IA no está disponible en este dispositivo.", style = MaterialTheme.typography.bodyMedium)
-            return@BrandCard
-        }
-        if (model == null) {
-            Text("Descarga un modelo para probarlo aquí.", style = MaterialTheme.typography.bodyMedium)
-            return@BrandCard
-        }
-        if (readyModels.size > 1) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                readyModels.forEach { m ->
-                    FilterChip(selected = m.id == model.id, onClick = { modelId = m.id }, label = { Text(m.name) })
+    InsetGroup(header = "Probar modelo") {
+        item {
+            Column(Modifier.fillMaxWidth().padding(16.dp)) {
+                if (!available) {
+                    Text("El motor de IA no está disponible en este dispositivo.", style = MaterialTheme.typography.bodyMedium, color = ui.secondaryLabel)
+                    return@Column
                 }
-            }
-        }
-        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            model.tasks.forEach { t ->
-                FilterChip(selected = taskPrompt == t.prompt, onClick = { taskPrompt = t.prompt }, label = { Text(t.label) })
-            }
-        }
-        OutlinedTextField(
-            value = taskPrompt,
-            onValueChange = { taskPrompt = it },
-            label = { Text("Instrucción (prompt)") },
-            modifier = Modifier.fillMaxWidth(),
-            maxLines = 4,
-        )
-        Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = {
-                picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-            }, modifier = Modifier.weight(1f)) {
-                Icon(Icons.Rounded.PhotoLibrary, null, Modifier.size(18.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("Galería")
-            }
-            OutlinedButton(onClick = {
-                scope.launch {
-                    val f = latestScannedPage(container)
-                    if (f == null) status = "No hay páginas escaneadas" else {
-                        image = withContext(Dispatchers.IO) { runCatching { BitmapIO.decodeThumbnail(f.absolutePath, 2048) }.getOrNull() }
-                        imageLabel = "Última página escaneada"
-                    }
+                if (model == null) {
+                    Text("Descarga un modelo para probarlo aquí.", style = MaterialTheme.typography.bodyMedium, color = ui.secondaryLabel)
+                    return@Column
                 }
-            }, modifier = Modifier.weight(1f)) {
-                Icon(Icons.Rounded.DocumentScanner, null, Modifier.size(18.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("Última página")
-            }
-        }
-        image?.let { bmp ->
-            Spacer(Modifier.height(8.dp))
-            Text("$imageLabel · ${bmp.width}×${bmp.height}", style = MaterialTheme.typography.bodySmall)
-            Image(
-                bmp.asImageBitmap(),
-                contentDescription = null,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 220.dp)
-                    .clip(MaterialTheme.shapes.medium),
-            )
-        }
-        Spacer(Modifier.height(8.dp))
-        if (running == null) {
-            GradientButton(
-                text = "Probar modelo",
-                icon = Icons.Rounded.PlayArrow,
-                enabled = taskPrompt.isNotBlank(),
-                modifier = Modifier.fillMaxWidth(),
-                height = 48.dp,
-                onClick = {
-                    output = ""
-                    status = "Cargando modelo…"
-                    val img = image
-                    running = scope.launch {
-                        try {
-                            val r = runTest(container, model, taskPrompt, img,
-                                onLoaded = { status = "Procesando la imagen…" },
-                            ) { piece ->
-                                // Llega desde el hilo de inferencia: pasar al principal.
-                                scope.launch { output += piece; status = "Generando…" }
+                if (readyModels.size > 1) {
+                    SegmentedControl(
+                        options = readyModels.map { it.name },
+                        selectedIndex = readyModels.indexOf(model).coerceAtLeast(0),
+                        onSelect = { modelId = readyModels[it].id },
+                    )
+                    Spacer(Modifier.height(10.dp))
+                }
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    model.tasks.forEach { t -> ChoicePill(t.label, taskPrompt == t.prompt) { taskPrompt = t.prompt } }
+                }
+                Spacer(Modifier.height(10.dp))
+                Text("INSTRUCCIÓN (PROMPT)", style = MaterialTheme.typography.bodySmall, color = ui.secondaryLabel)
+                Spacer(Modifier.height(4.dp))
+                var promptValue by remember(model.id) { mutableStateOf(TextFieldValue(taskPrompt)) }
+                if (promptValue.text != taskPrompt) promptValue = TextFieldValue(taskPrompt, TextRange(taskPrompt.length))
+                Box(Modifier.clip(RoundedCornerShape(10.dp)).background(ui.groupedBackground)) {
+                    IosTextField(
+                        value = promptValue,
+                        onValueChange = { promptValue = it; taskPrompt = it.text },
+                        placeholder = "Instrucción",
+                        singleLine = false,
+                        modifier = Modifier.heightIn(max = 120.dp),
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    CardButton("Galería", {
+                        picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                    }, Modifier.weight(1f), icon = AppIcons.Gallery, tonal = true)
+                    CardButton("Última página", {
+                        scope.launch {
+                            val f = latestScannedPage(container)
+                            if (f == null) status = "No hay páginas escaneadas" else {
+                                image = withContext(Dispatchers.IO) { runCatching { BitmapIO.decodeThumbnail(f.absolutePath, 2048) }.getOrNull() }
+                                imageLabel = "Última página escaneada"
                             }
-                            status = statsLine(r)
-                        } catch (e: LlmException) {
-                            status = "Error: ${e.message}"
-                        } catch (e: kotlinx.coroutines.CancellationException) {
-                            status = "Detenido"
-                            throw e
-                        } finally {
-                            running = null
                         }
+                    }, Modifier.weight(1f), icon = AppIcons.Document, tonal = true)
+                }
+                image?.let { bmp ->
+                    Spacer(Modifier.height(8.dp))
+                    Text("$imageLabel · ${bmp.width}×${bmp.height}", style = MaterialTheme.typography.bodySmall, color = ui.secondaryLabel)
+                    Image(
+                        bmp.asImageBitmap(),
+                        contentDescription = null,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 220.dp)
+                            .clip(RoundedCornerShape(10.dp)),
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                if (running == null) {
+                    CardButton(
+                        text = "Probar modelo",
+                        icon = Icons.Rounded.PlayArrow,
+                        enabled = taskPrompt.isNotBlank(),
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = {
+                            output = ""
+                            status = "Cargando modelo…"
+                            val img = image
+                            running = scope.launch {
+                                try {
+                                    val r = runTest(container, model, taskPrompt, img,
+                                        onLoaded = { status = "Procesando la imagen…" },
+                                    ) { piece ->
+                                        // Llega desde el hilo de inferencia: pasar al principal.
+                                        scope.launch { output += piece; status = "Generando…" }
+                                    }
+                                    status = statsLine(r)
+                                } catch (e: LlmException) {
+                                    status = "Error: ${e.message}"
+                                } catch (e: kotlinx.coroutines.CancellationException) {
+                                    status = "Detenido"
+                                    throw e
+                                } finally {
+                                    running = null
+                                }
+                            }
+                        },
+                    )
+                } else {
+                    CardButton("Detener", { running?.cancel(); container.llm.cancel() }, Modifier.fillMaxWidth(), tonal = true, destructive = true)
+                }
+                if (status.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(status, style = MaterialTheme.typography.bodySmall, color = ui.secondaryLabel)
+                }
+                if (output.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    SelectionContainer {
+                        Text(
+                            output,
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            color = ui.label,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(ui.groupedBackground)
+                                .padding(10.dp),
+                        )
                     }
-                },
-            )
-        } else {
-            SoftButton("Detener", { running?.cancel(); container.llm.cancel() }, Modifier.fillMaxWidth(), icon = Icons.Rounded.Stop, height = 48.dp)
-        }
-        if (status.isNotEmpty()) {
-            Spacer(Modifier.height(8.dp))
-            Text(status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.brand.accent)
-        }
-        if (output.isNotEmpty()) {
-            Spacer(Modifier.height(8.dp))
-            SelectionContainer {
-                Text(
-                    output,
-                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(MaterialTheme.shapes.small)
-                        .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-                        .padding(10.dp),
-                )
+                }
             }
         }
-        Spacer(Modifier.height(4.dp))
-        TextButton(onClick = { scope.launch { container.llm.unload(); status = "Memoria liberada" } }) {
-            Icon(Icons.Rounded.Memory, null, Modifier.size(16.dp))
-            Spacer(Modifier.width(6.dp))
-            Text("Liberar memoria del modelo")
+        item {
+            NavigationRow(
+                title = "Liberar memoria del modelo",
+                icon = Icons.Rounded.Memory,
+                iconTint = SystemGray,
+                onClick = { scope.launch { container.llm.unload(); status = "Memoria liberada" } },
+            )
         }
     }
 }
@@ -632,87 +751,70 @@ private fun decodeUri(context: android.content.Context, uri: Uri, maxSide: Int):
 
 // ------------------------------------------------------------------------------------------------ piezas
 
+/** Aviso en tarjeta de grupo: icono naranja, texto y "Entendido" opcional. */
 @Composable
-private fun SectionTitle(text: String) {
+internal fun WarningCard(text: String, onDismiss: (() -> Unit)? = null) {
+    val ui = MaterialTheme.ui
+    Column(
+        Modifier
+            .padding(horizontal = 20.dp)
+            .fillMaxWidth()
+            .clip(GroupShape)
+            .background(ui.card)
+            .padding(start = 14.dp, end = 14.dp, top = 12.dp, bottom = if (onDismiss != null) 2.dp else 12.dp),
+    ) {
+        Row(verticalAlignment = Alignment.Top) {
+            Box(Modifier.size(24.dp).clip(CircleShape).background(ui.orange), contentAlignment = Alignment.Center) {
+                Text("!", color = Color.White, style = MaterialTheme.typography.labelLarge)
+            }
+            Spacer(Modifier.width(10.dp))
+            Text(text, style = MaterialTheme.typography.bodySmall, color = ui.label, modifier = Modifier.weight(1f))
+        }
+        if (onDismiss != null) {
+            Text(
+                "Entendido",
+                color = ui.accent,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier
+                    .align(Alignment.End)
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(role = Role.Button, onClick = onDismiss)
+                    .padding(horizontal = 10.dp, vertical = 10.dp),
+            )
+        }
+    }
+}
+
+/** Píldora de opción (tareas de prueba). */
+@Composable
+internal fun ChoicePill(label: String, selected: Boolean, onClick: () -> Unit) {
+    val ui = MaterialTheme.ui
     Text(
-        text.uppercase(),
-        style = MaterialTheme.typography.labelMedium,
-        color = MaterialTheme.brand.gradientStart,
-        modifier = Modifier.padding(start = 8.dp, top = 4.dp),
+        label,
+        color = if (selected) ui.onAccent else ui.label,
+        style = MaterialTheme.typography.labelLarge,
+        maxLines = 1,
+        modifier = Modifier
+            .clip(PillShape)
+            .background(if (selected) ui.accent else ui.fill)
+            .selectable(selected = selected, role = Role.RadioButton, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 7.dp),
     )
 }
 
-@Composable
-private fun IconBadge(icon: ImageVector) {
-    val brand = MaterialTheme.brand
-    androidx.compose.foundation.layout.Box(
-        Modifier
-            .size(42.dp)
-            .clip(MaterialTheme.shapes.small)
-            .background(brand.gradientStart.copy(alpha = if (brand.isDark) 0.18f else 0.12f)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(icon, null, tint = brand.gradientStart, modifier = Modifier.size(22.dp))
-    }
-}
-
-@Composable
-private fun WarningCard(text: String, onDismiss: (() -> Unit)? = null) {
-    BrandCard {
-        Row(verticalAlignment = Alignment.Top) {
-            Icon(Icons.Rounded.Warning, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(20.dp))
-            Spacer(Modifier.width(10.dp))
-            Text(text, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
-        }
-        if (onDismiss != null) {
-            TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) { Text("Entendido") }
-        }
-    }
-}
-
+/** Fila de motor: título + descripción y ✓ si es el elegido; desactivada si falta el modelo o la clave. */
 @Composable
 private fun EngineRow(engine: RecognitionEngine, selected: Boolean, enabled: Boolean, hint: String, onSelect: () -> Unit) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = onSelect)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        RadioButton(
-            selected = selected,
-            onClick = null,
-            enabled = enabled,
-            colors = RadioButtonDefaults.colors(selectedColor = MaterialTheme.brand.gradientStart),
-        )
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Text(
-                engine.label,
-                style = MaterialTheme.typography.titleSmall,
-                color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-            )
-            Text(hint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    }
-}
-
-@Composable
-private fun ToggleRow(icon: ImageVector, title: String, subtitle: String, checked: Boolean, onChange: (Boolean) -> Unit) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .selectable(selected = checked, role = Role.Switch) { onChange(!checked) }
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        IconBadge(icon)
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleSmall)
-            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        Spacer(Modifier.width(8.dp))
-        Switch(checked = checked, onCheckedChange = null)
-    }
+    val ui = MaterialTheme.ui
+    GroupRow(
+        title = engine.label,
+        subtitle = hint,
+        enabled = enabled,
+        modifier = Modifier.selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = onSelect),
+        trailing = {
+            Box(Modifier.size(22.dp), contentAlignment = Alignment.Center) {
+                if (selected) Icon(AppIcons.Check, contentDescription = "Seleccionado", tint = ui.accent, modifier = Modifier.size(20.dp))
+            }
+        },
+    )
 }
