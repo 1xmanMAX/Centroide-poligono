@@ -116,12 +116,32 @@ import com.scannerpromax.domain.DocLayout
 import com.scannerpromax.pdf.DocLayoutFiles
 import com.scannerpromax.pdf.PdfPageInput
 import com.scannerpromax.pdf.binaryHintFor
-import com.scannerpromax.ui.components.AppTopBar
-import com.scannerpromax.ui.components.GradientButton
-import com.scannerpromax.ui.components.LoadingOverlay
-import com.scannerpromax.ui.components.SoftButton
 import com.scannerpromax.ui.theme.LocalPerf
-import com.scannerpromax.ui.theme.brand
+import com.scannerpromax.domain.Page
+import com.scannerpromax.ui.components.AlertAction
+import com.scannerpromax.ui.components.AppIcons
+import com.scannerpromax.ui.components.ClearFieldButton
+import com.scannerpromax.ui.components.InsetGroup
+import com.scannerpromax.ui.components.IosAlert
+import com.scannerpromax.ui.components.IosTextField
+import com.scannerpromax.ui.components.NavigationRow
+import com.scannerpromax.ui.components.OptionsSheet
+import com.scannerpromax.ui.components.PrimaryCapsuleButton
+import com.scannerpromax.ui.components.ProgressHud
+import com.scannerpromax.ui.components.SegmentedControl
+import com.scannerpromax.ui.components.SeparatorInsetPlain
+import com.scannerpromax.ui.components.SheetHeader
+import com.scannerpromax.ui.components.ToggleRow
+import com.scannerpromax.ui.components.pagesLabel
+import com.scannerpromax.ui.theme.GroupShape
+import com.scannerpromax.ui.theme.SheetShape
+import com.scannerpromax.ui.theme.ui
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextOverflow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CancellationException
@@ -135,7 +155,7 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
 
-private enum class ExportKind { PDF, IMAGES, TXT, DOCX }
+internal enum class ExportKind { PDF, IMAGES, TXT, DOCX }
 private enum class ExportAction { SAVE, SHARE }
 
 private data class Progress(val value: Float, val message: String)
@@ -447,18 +467,179 @@ fun ExportScreen(
     }
 
     val d = doc
+    val estimate: Long? = d?.takeIf { it.pages.isNotEmpty() }?.let { dd ->
+        remember(dd, quality, kind, imageFormat, textMode, textPlacement, aiPages) {
+            when (kind) {
+                ExportKind.PDF -> estimatePdfBytes(dd, quality, textMode, container.deviceTier.maxWorkingPixels, aiPages)
+                ExportKind.IMAGES -> estimateBytes(dd, quality, imageFormat, container.deviceTier.maxWorkingPixels)
+                ExportKind.TXT -> estimateTextChars(dd) + 64L
+                ExportKind.DOCX -> estimateTextChars(dd) / 3 + 3_000L
+            }
+        }
+    }
+
+    ExportSheetContent(
+        title = d?.title,
+        pages = d?.pages.orEmpty(),
+        kind = kind,
+        onKind = { kind = it },
+        textMode = textMode,
+        onTextMode = { textMode = it },
+        textPlacement = textPlacement,
+        onTextPlacement = { textPlacement = it },
+        quality = quality,
+        onQuality = { quality = it },
+        pageSize = pageSize,
+        onPageSize = { pageSize = it },
+        imageFormat = imageFormat,
+        onImageFormat = { imageFormat = it },
+        usePassword = usePassword,
+        onUsePassword = { usePassword = it },
+        password = password,
+        onPassword = { password = it.take(64) },
+        showPassword = showPassword,
+        onShowPassword = { showPassword = it },
+        fileName = fileName,
+        onFileName = { fileName = it.take(100) },
+        estimateBytes = estimate,
+        aiPages = aiPages,
+        missingOcr = missingOcr,
+        lastSaved = lastSaved,
+        canOpenSaved = savedUris.isNotEmpty(),
+        onOpenSaved = { openSaved() },
+        onShareSaved = { shareSaved() },
+        ocrWarningCount = ocrWarning?.first,
+        onRetry = { ocrWarning?.second?.let { start(it) } },
+        busy = progress != null,
+        onCancel = { if (job != null) job?.cancel() else onBack() },
+        onSave = { start(ExportAction.SAVE) },
+        onShare = { start(ExportAction.SHARE) },
+        thumbnail = { p, i, m -> ExportThumb(container, docId, p, i, m) },
+    ) {
+        // ------------------------------------------------ progreso
+        val pr = progress
+        ProgressHud(
+            visible = pr != null,
+            message = pr?.message ?: "",
+            progress = pr?.value,
+            onCancel = { job?.cancel() },
+            modifier = Modifier.fillMaxSize(),
+        )
+    }
+}
+
+/** Miniatura de una página (procesado ACTUAL, lo mismo que se exporta), con su versión en la clave de caché. */
+@Composable
+private fun ExportThumb(container: AppContainer, docId: String, p: Page, index: Int, modifier: Modifier) {
+    val context = LocalContext.current
+    val perf = LocalPerf.current
+    // Archivo resuelto en IO (nada de File.exists() en el hilo principal en cada recomposición).
+    // Falso positivo de lint: el valor sí se asigna (tras withContext).
+    @SuppressLint("ProduceStateDoesNotAssignValue")
+    val model by produceState<VersionedFile?>(initialValue = null, p.id, p.thumbFile, p.processedFile, p.edits) {
+        val f = withContext(Dispatchers.IO) { container.documents.displayThumb(docId, p) }
+        value = f
+    }
+    // Decodificación acotada al tamaño de celda.
+    val request = remember(model?.cacheKey, perf.thumbPx) {
+        model?.let {
+            ImageRequest.Builder(context).data(it.file).memoryCacheKey(it.cacheKey)
+                .size(perf.thumbPx).precision(Precision.INEXACT).build()
+        }
+    }
+    if (request != null) {
+        AsyncImage(model = request, contentDescription = "Página ${index + 1}", contentScale = ContentScale.Fit, modifier = modifier)
+    }
+}
+
+internal val ExportKindLabels = listOf("PDF", "Imágenes", "Texto", "Word")
+
+/** Etiqueta corta de cada modo de texto del PDF (valor de la fila "Texto en el PDF"). */
+private fun textModeShort(m: PdfTextMode): String = when (m) {
+    PdfTextMode.SOLO_IMAGEN -> "Solo imagen"
+    PdfTextMode.BUSCABLE -> "Buscable"
+    PdfTextMode.BUSCABLE_CON_TEXTO -> "Buscable + texto"
+    PdfTextMode.SOLO_TEXTO -> "Solo texto"
+    PdfTextMode.RECONSTRUIDO -> "Reconstruido"
+}
+
+private fun imageFormatDescription(f: ImageFormat): String = when (f) {
+    ImageFormat.JPEG -> "Compatible con todo, tamaño reducido."
+    ImageFormat.PNG -> "Sin pérdida, máxima nitidez (archivos más grandes)."
+    ImageFormat.WEBP -> "La mejor relación calidad/tamaño."
+}
+
+private enum class ExportSheetPicker { TEXT_MODE, PLACEMENT, QUALITY, PAGE_SIZE, IMAGE_FORMAT }
+
+/**
+ * Exportar como hoja (maqueta Exportar.dc.html), SIN estado: asa + Cancelar · Exportar, miniaturas, segmento
+ * PDF/Imágenes/Texto/Word, grupo con Texto en el PDF, Calidad (+ tamaño estimado) y Nombre; grupo con Proteger con
+ * contraseña y Más opciones; tarjetas de resultado; abajo Guardar (tonal) | Compartir (acento).
+ */
+@Composable
+internal fun ExportSheetContent(
+    title: String?,
+    pages: List<Page>,
+    kind: ExportKind,
+    onKind: (ExportKind) -> Unit,
+    textMode: PdfTextMode,
+    onTextMode: (PdfTextMode) -> Unit,
+    textPlacement: TextPlacement,
+    onTextPlacement: (TextPlacement) -> Unit,
+    quality: ExportQuality,
+    onQuality: (ExportQuality) -> Unit,
+    pageSize: PageSize,
+    onPageSize: (PageSize) -> Unit,
+    imageFormat: ImageFormat,
+    onImageFormat: (ImageFormat) -> Unit,
+    usePassword: Boolean,
+    onUsePassword: (Boolean) -> Unit,
+    password: String,
+    onPassword: (String) -> Unit,
+    showPassword: Boolean,
+    onShowPassword: (Boolean) -> Unit,
+    fileName: String,
+    onFileName: (String) -> Unit,
+    estimateBytes: Long?,
+    aiPages: Int,
+    missingOcr: Int,
+    lastSaved: String?,
+    canOpenSaved: Boolean,
+    onOpenSaved: () -> Unit,
+    onShareSaved: () -> Unit,
+    ocrWarningCount: Int?,
+    onRetry: () -> Unit,
+    busy: Boolean,
+    onCancel: () -> Unit,
+    onSave: () -> Unit,
+    onShare: () -> Unit,
+    thumbnail: @Composable (Page, Int, Modifier) -> Unit,
+    overlays: @Composable BoxScope.() -> Unit = {},
+) {
+    val ui = MaterialTheme.ui
     val isPdf = kind == ExportKind.PDF
     val isText = kind == ExportKind.TXT || kind == ExportKind.DOCX
     val showQuality = kind == ExportKind.IMAGES || (isPdf && textMode.hasImages)
+    var picker by remember { mutableStateOf<ExportSheetPicker?>(null) }
+    var editingName by remember { mutableStateOf(false) }
+    val ext = when (kind) {
+        ExportKind.PDF -> ".pdf"
+        ExportKind.IMAGES -> ".${imageFormat.ext}"
+        ExportKind.TXT -> ".txt"
+        ExportKind.DOCX -> ".docx"
+    }
 
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        Column(Modifier.fillMaxSize()) {
-            AppTopBar(
-                title = "Exportar",
-                subtitle = d?.let { "${it.title} · ${it.pages.size} ${if (it.pages.size == 1) "página" else "páginas"}" } ?: "Cargando…",
-                onBack = { if (job != null) job?.cancel() else onBack() },
-            )
-
+    // Fondo atenuado detrás de la hoja (simula la pantalla anterior) y la hoja con esquinas de 14 dp.
+    Box(Modifier.fillMaxSize().background(if (ui.isDark) Color(0xFF1C1C1E) else Color(0xFF1C1C1E))) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .padding(top = 10.dp)
+                .clip(SheetShape)
+                .background(ui.groupedBackground),
+        ) {
+            SheetHeader(title = "Exportar", onCancel = onCancel)
             Column(
                 Modifier
                     .weight(1f)
@@ -468,342 +649,288 @@ fun ExportScreen(
                     .verticalScroll(rememberScrollState())
                     .padding(bottom = 16.dp),
             ) {
-                // Miniaturas de lo que se exporta
-                if (d != null && d.pages.isNotEmpty()) {
-                    LazyRow(
-                        contentPadding = PaddingValues(horizontal = 16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        modifier = Modifier.padding(vertical = 8.dp),
-                    ) {
-                        itemsIndexed(d.pages, key = { _, p -> p.id }, contentType = { _, _ -> "thumb" }) { i, p ->
-                            val perf = LocalPerf.current
-                            // Archivo resuelto en IO (nada de File.exists() en el hilo principal en cada recomposición).
-                            // Falso positivo de lint: el valor sí se asigna (tras withContext).
-                            @SuppressLint("ProduceStateDoesNotAssignValue")
-                            // Miniatura del procesado ACTUAL (lo mismo que se exporta), con su versión en la clave de caché.
-                            val model by produceState<VersionedFile?>(initialValue = null, p.id, p.thumbFile, p.processedFile, p.edits) {
-                                val f = withContext(Dispatchers.IO) { container.documents.displayThumb(docId, p) }
-                                value = f
-                            }
-                            // Decodificación acotada al tamaño de celda.
-                            val request = remember(model?.cacheKey, perf.thumbPx) {
-                                model?.let {
-                                    ImageRequest.Builder(context).data(it.file).memoryCacheKey(it.cacheKey)
-                                        .size(perf.thumbPx).precision(Precision.INEXACT).build()
+                // Miniaturas + nombre del documento
+                Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    val shown = pages.take(3)
+                    shown.forEachIndexed { i, p ->
+                        Box(
+                            Modifier
+                                .padding(end = 10.dp)
+                                .size(width = 54.dp, height = 72.dp)
+                                .shadow(2.dp, RoundedCornerShape(6.dp), ambientColor = Color.Black.copy(alpha = 0.3f), spotColor = Color.Black.copy(alpha = 0.3f))
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(if (ui.isDark) Color(0xFF2C2C2E) else Color.White),
+                        ) {
+                            thumbnail(p, i, Modifier.fillMaxSize())
+                            if (i == shown.lastIndex && pages.size > shown.size) {
+                                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.45f)), contentAlignment = Alignment.Center) {
+                                    Text("+${pages.size - shown.size}", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium)
                                 }
-                            }
-                            Box(
-                                Modifier
-                                    .size(width = 74.dp, height = 100.dp)
-                                    .shadow(if (perf.lowEnd) 0.dp else 4.dp, RoundedCornerShape(12.dp))
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(MaterialTheme.colorScheme.surfaceContainerHigh),
-                            ) {
-                                if (request != null) {
-                                    AsyncImage(
-                                        model = request,
-                                        contentDescription = "Página ${i + 1}",
-                                        contentScale = ContentScale.Fit,
-                                        modifier = Modifier.fillMaxSize(),
-                                    )
-                                }
-                                Text(
-                                    "${i + 1}",
-                                    color = Color.White,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier
-                                        .align(Alignment.BottomStart)
-                                        .padding(4.dp)
-                                        .clip(RoundedCornerShape(50))
-                                        .background(Color.Black.copy(alpha = 0.55f))
-                                        .padding(horizontal = 6.dp, vertical = 1.dp),
-                                )
                             }
                         }
+                    }
+                    Column(Modifier.weight(1f).padding(start = 4.dp)) {
+                        Text(title ?: "Cargando…", style = MaterialTheme.typography.titleSmall, color = ui.label, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text(pagesLabel(pages.size), style = MaterialTheme.typography.bodySmall, color = ui.secondaryLabel)
                     }
                 }
 
-                SectionTitle("Formato")
-                Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        FormatCard(Icons.Filled.PictureAsPdf, "PDF", "Imagen, texto buscable o ambos", isPdf, Modifier.weight(1f)) { kind = ExportKind.PDF }
-                        FormatCard(Icons.Filled.Image, "Imágenes", "JPG, PNG o WEBP en HD", kind == ExportKind.IMAGES, Modifier.weight(1f)) { kind = ExportKind.IMAGES }
-                    }
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        FormatCard(Icons.AutoMirrored.Filled.TextSnippet, "Texto (.txt)", "Texto reconocido de todas las páginas", kind == ExportKind.TXT, Modifier.weight(1f)) { kind = ExportKind.TXT }
-                        FormatCard(Icons.Filled.Description, "Word (.docx)", "Editable, un título por página", kind == ExportKind.DOCX, Modifier.weight(1f)) { kind = ExportKind.DOCX }
-                    }
-                }
+                SegmentedControl(
+                    options = ExportKindLabels,
+                    selectedIndex = kind.ordinal,
+                    onSelect = { onKind(ExportKind.entries[it]) },
+                    modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 18.dp),
+                )
 
-                // ------------------------------------------------ PDF: texto
-                AnimatedVisibility(visible = isPdf, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
-                    Column {
-                        SectionTitle("Texto en el PDF")
-                        Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            PdfTextMode.entries.forEach { m ->
-                                TextModeCard(
-                                    icon = textModeIcon(m),
-                                    title = m.label,
-                                    description = textModeDescription(m),
-                                    selected = textMode == m,
-                                ) { textMode = m }
-                            }
-                        }
-                        AnimatedVisibility(visible = textMode == PdfTextMode.BUSCABLE_CON_TEXTO) {
-                            Column {
-                                Text(
-                                    "Páginas de texto reconocido",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(start = 20.dp, top = 12.dp, bottom = 6.dp),
-                                )
-                                ChipRow {
-                                    TextPlacement.entries.forEach { t -> Pill(t.label, textPlacement == t) { textPlacement = t } }
-                                }
-                            }
-                        }
-                        if (textMode == PdfTextMode.RECONSTRUIDO && d != null && aiPages >= 0) {
-                            val total = d.pages.size
-                            InfoLine(
-                                Icons.Filled.AutoAwesome,
-                                when {
-                                    aiPages == 0 -> "Ninguna página está reconocida con IA todavía: se exportarán como imagen. " +
-                                        "Reconócelas con IA para obtener el texto real con la misma disposición."
-                                    aiPages < total -> "${missingAiMessage(total - aiPages).replaceFirstChar { it.uppercase() }}. " +
-                                        "Las otras $aiPages se reconstruyen con texto real."
-                                    else -> "Todas las páginas se reconstruyen con texto real, tablas y la misma disposición."
-                                },
-                            )
-                        }
-                        if (textMode.needsOcr && missingOcr > 0) {
-                            InfoLine(
-                                Icons.Filled.AutoAwesome,
-                                if (missingOcr == 1) "Se reconocerá el texto de 1 página automáticamente al exportar."
-                                else "Se reconocerá el texto de $missingOcr páginas automáticamente al exportar.",
-                            )
-                        }
-                        AnimatedVisibility(visible = textMode.hasImages) {
-                            Column {
-                                SectionTitle("Tamaño de página")
-                                ChipRow {
-                                    PageSize.entries.forEach { s -> Pill(s.label, pageSize == s) { pageSize = s } }
-                                }
-                            }
-                        }
+                // ------------------------------------------------ grupo principal
+                val notes = buildList {
+                    if (estimateBytes != null) {
+                        add("Tamaño estimado: ≈ ${formatBytes(estimateBytes)}" + if (showQuality) " · ${quality.resolutionLabel}" else "")
                     }
-                }
-                AnimatedVisibility(visible = kind == ExportKind.IMAGES, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
-                    Column {
-                        SectionTitle("Tipo de imagen")
-                        ChipRow {
-                            ImageFormat.entries.forEach { f -> Pill(f.label, imageFormat == f) { imageFormat = f } }
-                        }
-                        Text(
-                            when (imageFormat) {
-                                ImageFormat.JPEG -> "JPG: compatible con todo, tamaño reducido."
-                                ImageFormat.PNG -> "PNG: sin pérdida, máxima nitidez (archivos más grandes)."
-                                ImageFormat.WEBP -> "WEBP: la mejor relación calidad/tamaño."
+                    if (showQuality) add(quality.hint)
+                    if (isPdf && textMode == PdfTextMode.RECONSTRUIDO && aiPages >= 0 && pages.isNotEmpty()) {
+                        val total = pages.size
+                        add(
+                            when {
+                                aiPages == 0 -> "Ninguna página está reconocida con IA todavía: se exportarán como imagen. " +
+                                    "Reconócelas con IA para obtener el texto real con la misma disposición."
+                                aiPages < total -> "${missingAiMessage(total - aiPages).replaceFirstChar { it.uppercase() }}. " +
+                                    "Las otras $aiPages se reconstruyen con texto real."
+                                else -> "Todas las páginas se reconstruyen con texto real, tablas y la misma disposición."
                             },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
                         )
                     }
-                }
-                AnimatedVisibility(visible = isText, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
-                    Column {
-                        InfoLine(
-                            Icons.Filled.TextFields,
+                    if (isPdf && textMode.needsOcr && missingOcr > 0) {
+                        add(
+                            if (missingOcr == 1) "Se reconocerá el texto de 1 página automáticamente al exportar."
+                            else "Se reconocerá el texto de $missingOcr páginas automáticamente al exportar.",
+                        )
+                    }
+                    if (isText) {
+                        add(
                             "Incluye el texto reconocido de todas las páginas (con tus correcciones). " +
                                 if (missingOcr > 0) "Las $missingOcr páginas sin reconocer se procesarán ahora." else "Todo el texto está listo.",
                         )
                     }
                 }
-
-                if (showQuality) {
-                    SectionTitle("Calidad")
-                    ChipRow {
-                        ExportQuality.entries.forEach { q -> Pill(q.label, quality == q) { quality = q } }
-                    }
-                    // Qué hace cada calidad: la app guarda el escaneo completo y SOLO aquí se reduce.
-                    Text(
-                        quality.hint,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 6.dp),
-                    )
-                }
-                if (d != null && d.pages.isNotEmpty()) {
-                    val est = remember(d, quality, kind, imageFormat, textMode, textPlacement, aiPages) {
-                        when (kind) {
-                            ExportKind.PDF -> estimatePdfBytes(d, quality, textMode, container.deviceTier.maxWorkingPixels, aiPages)
-                            ExportKind.IMAGES -> estimateBytes(d, quality, imageFormat, container.deviceTier.maxWorkingPixels)
-                            ExportKind.TXT -> estimateTextChars(d) + 64L
-                            ExportKind.DOCX -> estimateTextChars(d) / 3 + 3_000L
+                InsetGroup(
+                    modifier = Modifier.padding(top = 20.dp),
+                    separatorInset = SeparatorInsetPlain,
+                    footer = notes.joinToString("\n").ifEmpty { null },
+                ) {
+                    if (isPdf) {
+                        item { NavigationRow("Texto en el PDF", { picker = ExportSheetPicker.TEXT_MODE }, value = textModeShort(textMode)) }
+                        if (textMode == PdfTextMode.BUSCABLE_CON_TEXTO) {
+                            item { NavigationRow("Páginas de texto", { picker = ExportSheetPicker.PLACEMENT }, value = textPlacement.label) }
                         }
                     }
-                    Row(
-                        Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+                    if (showQuality) {
+                        item { NavigationRow("Calidad", { picker = ExportSheetPicker.QUALITY }, value = quality.label) }
+                    }
+                    item {
+                        NavigationRow("Nombre", { editingName = true }, value = (fileName.ifBlank { title ?: "" }) + ext)
+                    }
+                }
+
+                // ------------------------------------------------ contraseña y más opciones
+                val showMore = (isPdf && textMode.hasImages) || kind == ExportKind.IMAGES
+                if (isPdf || showMore) {
+                    InsetGroup(
+                        modifier = Modifier.padding(top = 22.dp),
+                        separatorInset = SeparatorInsetPlain,
+                        footer = if (isPdf && usePassword) "Pedirá la contraseña al abrir el PDF (mínimo 4 caracteres)." else null,
                     ) {
-                        Box(Modifier.size(8.dp).clip(RoundedCornerShape(50)).background(MaterialTheme.brand.gradient))
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            "Tamaño estimado: ≈ ${formatBytes(est)}" + if (showQuality) " · ${quality.resolutionLabel}" else "",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-
-                AnimatedVisibility(visible = isPdf, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
-                    Column(Modifier.padding(horizontal = 16.dp)) {
-                        Spacer(Modifier.height(12.dp))
-                        OptionSwitch(
-                            Icons.Filled.Lock,
-                            "Proteger con contraseña",
-                            "Pedirá la contraseña al abrir el PDF",
-                            usePassword,
-                        ) { usePassword = it }
-                        AnimatedVisibility(visible = usePassword) {
-                            OutlinedTextField(
-                                value = password,
-                                onValueChange = { password = it.take(64) },
-                                label = { Text("Contraseña") },
-                                singleLine = true,
-                                visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                                trailingIcon = {
-                                    IconButton(onClick = { showPassword = !showPassword }) {
-                                        Icon(
-                                            if (showPassword) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                                            if (showPassword) "Ocultar" else "Mostrar",
-                                        )
-                                    }
-                                },
-                                modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 8.dp),
-                            )
+                        if (isPdf) {
+                            item { ToggleRow("Proteger con contraseña", usePassword, onUsePassword) }
+                            if (usePassword) {
+                                item {
+                                    PasswordRow(password, onPassword, showPassword, onShowPassword)
+                                }
+                            }
                         }
-                    }
-                }
-
-                SectionTitle("Nombre del archivo")
-                OutlinedTextField(
-                    value = fileName,
-                    onValueChange = { fileName = it.take(100) },
-                    singleLine = true,
-                    suffix = {
-                        Text(
-                            when (kind) {
-                                ExportKind.PDF -> ".pdf"
-                                ExportKind.IMAGES -> ".${imageFormat.ext}"
-                                ExportKind.TXT -> ".txt"
-                                ExportKind.DOCX -> ".docx"
-                            },
-                        )
-                    },
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                )
-
-                AnimatedVisibility(visible = lastSaved != null) {
-                    Column(
-                        Modifier
-                            .padding(16.dp)
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(MaterialTheme.brand.success.copy(alpha = 0.12f))
-                            .padding(14.dp),
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.CheckCircle, null, tint = MaterialTheme.brand.success)
-                            Spacer(Modifier.width(10.dp))
-                            Text(lastSaved ?: "", style = MaterialTheme.typography.bodyMedium)
-                        }
-                        if (savedUris.isNotEmpty()) {
-                            Spacer(Modifier.height(10.dp))
-                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                SoftButton("Abrir", onClick = { openSaved() }, icon = Icons.Filled.Visibility, height = 44.dp, modifier = Modifier.weight(1f))
-                                SoftButton("Compartir", onClick = { shareSaved() }, icon = Icons.Filled.Share, height = 44.dp, modifier = Modifier.weight(1f))
+                        if (showMore) {
+                            item {
+                                NavigationRow(
+                                    "Más opciones",
+                                    {
+                                        picker = if (isPdf) ExportSheetPicker.PAGE_SIZE else ExportSheetPicker.IMAGE_FORMAT
+                                    },
+                                    value = if (isPdf) "Tamaño: ${pageSize.label}" else "Formato: ${imageFormat.label}",
+                                )
                             }
                         }
                     }
                 }
 
-                ocrWarning?.let { (count, action) ->
-                    Column(
-                        Modifier
-                            .padding(horizontal = 16.dp, vertical = 4.dp)
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.55f))
-                            .padding(14.dp),
+                // ------------------------------------------------ tarjetas de resultado
+                if (lastSaved != null) {
+                    ResultCard(
+                        icon = AppIcons.Check,
+                        tint = ui.green,
+                        text = lastSaved,
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.FindInPage, null, tint = MaterialTheme.colorScheme.error)
-                            Spacer(Modifier.width(10.dp))
-                            Text(missingTextMessage(count), style = MaterialTheme.typography.bodyMedium)
+                        if (canOpenSaved) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                PrimaryCapsuleButton("Abrir", onClick = onOpenSaved, tonal = true, height = 40.dp, shape = RoundedCornerShape(10.dp), modifier = Modifier.weight(1f))
+                                PrimaryCapsuleButton("Compartir", onClick = onShareSaved, icon = AppIcons.Share, tonal = true, height = 40.dp, shape = RoundedCornerShape(10.dp), modifier = Modifier.weight(1f))
+                            }
                         }
-                        Spacer(Modifier.height(10.dp))
-                        SoftButton(
-                            "Reintentar",
-                            onClick = { start(action) },
-                            icon = Icons.Filled.AutoAwesome,
-                            enabled = progress == null,
-                            height = 44.dp,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
+                    }
+                }
+                if (ocrWarningCount != null) {
+                    ResultCard(icon = AppIcons.Info, tint = ui.orange, text = missingTextMessage(ocrWarningCount)) {
+                        PrimaryCapsuleButton("Reintentar", onClick = onRetry, enabled = !busy, tonal = true, height = 40.dp, shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth())
                     }
                 }
             }
 
-            // ------------------------------------------------ acciones
+            // ------------------------------------------------ Guardar | Compartir
+            val enabled = pages.isNotEmpty() && !busy
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp))
-                    .background(MaterialTheme.colorScheme.surfaceContainer)
                     .navigationBarsPadding()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                    .padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalAlignment = Alignment.CenterVertically,
             ) {
-                val enabled = d != null && d.pages.isNotEmpty() && progress == null
-                SoftButton(
-                    text = "Compartir",
-                    onClick = { start(ExportAction.SHARE) },
-                    icon = Icons.Filled.Share,
-                    enabled = enabled,
-                    height = 54.dp,
-                    modifier = Modifier.weight(1f),
-                )
-                // Texto corto (no cabe "Guardar en Descargas" a 360 dp o con letra grande); el destino
-                // se indica en la tarjeta de éxito.
-                GradientButton(
-                    text = when (kind) {
-                        ExportKind.PDF -> "Guardar PDF"
-                        ExportKind.TXT -> "Guardar .txt"
-                        ExportKind.DOCX -> "Guardar .docx"
-                        ExportKind.IMAGES -> "Guardar"
-                    },
-                    onClick = { start(ExportAction.SAVE) },
-                    icon = Icons.Filled.Download,
-                    enabled = enabled,
-                    height = 54.dp,
-                    modifier = Modifier.weight(1.3f),
-                )
+                // El destino (Descargas / Galería) se indica en la tarjeta de éxito.
+                PrimaryCapsuleButton("Guardar", onClick = onSave, enabled = enabled, tonal = true, shape = RoundedCornerShape(14.dp), modifier = Modifier.weight(1f))
+                PrimaryCapsuleButton("Compartir", onClick = onShare, enabled = enabled, shape = RoundedCornerShape(14.dp), modifier = Modifier.weight(1f))
             }
         }
+        overlays()
+    }
 
-        // ------------------------------------------------ progreso
-        val pr = progress
-        LoadingOverlay(
-            visible = pr != null,
-            message = pr?.message ?: "",
-            progress = pr?.value,
-            onCancel = { job?.cancel() },
-            modifier = Modifier.fillMaxSize(),
+    when (picker) {
+        ExportSheetPicker.TEXT_MODE -> OptionsSheet(
+            title = "Texto en el PDF",
+            options = PdfTextMode.entries,
+            selected = textMode,
+            label = { it.label },
+            description = { textModeDescription(it) },
+            onSelect = onTextMode,
+            onDismiss = { picker = null },
         )
+        ExportSheetPicker.PLACEMENT -> OptionsSheet(
+            title = "Páginas de texto reconocido",
+            options = TextPlacement.entries,
+            selected = textPlacement,
+            label = { it.label },
+            onSelect = onTextPlacement,
+            onDismiss = { picker = null },
+        )
+        ExportSheetPicker.QUALITY -> OptionsSheet(
+            title = "Calidad",
+            options = ExportQuality.entries,
+            selected = quality,
+            label = { it.label },
+            description = { it.hint },
+            footer = "La app guarda el escaneo completo: solo se reduce al exportar.",
+            onSelect = onQuality,
+            onDismiss = { picker = null },
+        )
+        ExportSheetPicker.PAGE_SIZE -> OptionsSheet(
+            title = "Tamaño de página",
+            options = PageSize.entries,
+            selected = pageSize,
+            label = { it.label },
+            onSelect = onPageSize,
+            onDismiss = { picker = null },
+        )
+        ExportSheetPicker.IMAGE_FORMAT -> OptionsSheet(
+            title = "Tipo de imagen",
+            options = ImageFormat.entries,
+            selected = imageFormat,
+            label = { it.label },
+            description = { imageFormatDescription(it) },
+            onSelect = onImageFormat,
+            onDismiss = { picker = null },
+        )
+        null -> Unit
+    }
+    if (editingName) {
+        FileNameDialog(initial = fileName.ifBlank { title ?: "" }, ext = ext, onConfirm = onFileName, onDismiss = { editingName = false })
+    }
+}
+
+/** Fila de contraseña dentro del grupo (campo seguro con botón mostrar/ocultar). */
+@Composable
+private fun PasswordRow(password: String, onPassword: (String) -> Unit, showPassword: Boolean, onShowPassword: (Boolean) -> Unit) {
+    val ui = MaterialTheme.ui
+    var value by remember { mutableStateOf(TextFieldValue(password)) }
+    if (value.text != password) value = TextFieldValue(password, TextRange(password.length))
+    Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(AppIcons.Lock, null, tint = ui.secondaryLabel, modifier = Modifier.size(18.dp))
+        IosTextField(
+            value = value,
+            onValueChange = { value = it; onPassword(it.text) },
+            placeholder = "Contraseña",
+            visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            modifier = Modifier.weight(1f),
+            trailing = {
+                Box(
+                    Modifier
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .clickable(role = Role.Button, onClickLabel = if (showPassword) "Ocultar" else "Mostrar") { onShowPassword(!showPassword) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        if (showPassword) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                        if (showPassword) "Ocultar" else "Mostrar",
+                        tint = ui.secondaryLabel,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+            },
+        )
+    }
+}
+
+/** Alerta para el nombre del archivo (la extensión se muestra debajo). */
+@Composable
+private fun FileNameDialog(initial: String, ext: String, onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
+    var value by remember { mutableStateOf(TextFieldValue(initial, TextRange(0, initial.length))) }
+    IosAlert(
+        title = "Nombre del archivo",
+        message = "Se guardará como «${value.text.ifBlank { "…" }}$ext».",
+        onDismiss = onDismiss,
+        actions = listOf(
+            AlertAction("Cancelar") { },
+            AlertAction("Aceptar", bold = true) { onConfirm(value.text.trim()) },
+        ),
+    ) {
+        IosTextField(
+            value = value,
+            onValueChange = { value = it },
+            placeholder = "Nombre",
+            trailing = { if (value.text.isNotEmpty()) ClearFieldButton { value = TextFieldValue("") } },
+        )
+    }
+}
+
+/** Tarjeta de resultado (guardado / aviso) en el estilo de los grupos: icono de color, texto y acciones. */
+@Composable
+private fun ResultCard(icon: ImageVector, tint: Color, text: String, actions: @Composable () -> Unit) {
+    val ui = MaterialTheme.ui
+    Column(
+        Modifier
+            .padding(start = 20.dp, end = 20.dp, top = 22.dp)
+            .fillMaxWidth()
+            .clip(GroupShape)
+            .background(ui.card)
+            .padding(14.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(28.dp).clip(CircleShape).background(tint), contentAlignment = Alignment.Center) {
+                Icon(icon, null, tint = Color.White, modifier = Modifier.size(16.dp))
+            }
+            Spacer(Modifier.width(12.dp))
+            Text(text, style = MaterialTheme.typography.bodyMedium, color = ui.label)
+        }
+        Spacer(Modifier.height(12.dp))
+        actions()
     }
 }
 
@@ -892,156 +1019,3 @@ private fun formatBytes(b: Long): String = when {
     else -> "$b B"
 }
 
-// =================================================================================================
-// Componentes privados
-// =================================================================================================
-
-@Composable
-private fun SectionTitle(text: String) {
-    Text(
-        text,
-        style = MaterialTheme.typography.titleSmall,
-        fontWeight = FontWeight.Bold,
-        color = MaterialTheme.colorScheme.onSurface,
-        modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 18.dp, bottom = 8.dp),
-    )
-}
-
-@Composable
-private fun InfoLine(icon: ImageVector, text: String) {
-    Row(
-        Modifier
-            .padding(start = 16.dp, end = 16.dp, top = 10.dp)
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(MaterialTheme.brand.gradientStart.copy(alpha = 0.10f))
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(icon, null, tint = MaterialTheme.brand.gradientStart, modifier = Modifier.size(18.dp))
-        Spacer(Modifier.width(10.dp))
-        Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface)
-    }
-}
-
-@Composable
-private fun ChipRow(content: @Composable () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) { content() }
-}
-
-@Composable
-private fun Pill(label: String, selected: Boolean, onClick: () -> Unit) {
-    val fg by animateColorAsState(if (selected) Color.White else MaterialTheme.colorScheme.onSurface, label = "pillFg")
-    val shape = RoundedCornerShape(50)
-    Box(
-        Modifier
-            .clip(shape)
-            .then(
-                if (selected) Modifier.background(MaterialTheme.brand.horizontalGradient)
-                else Modifier.background(MaterialTheme.colorScheme.surfaceContainerHigh).border(1.dp, MaterialTheme.colorScheme.outlineVariant, shape),
-            )
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-    ) {
-        Text(label, color = fg, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium, fontSize = 14.sp)
-    }
-}
-
-/** Tarjeta de modo de texto del PDF: icono, título, descripción y selección única (accesible como radio). */
-@Composable
-private fun TextModeCard(icon: ImageVector, title: String, description: String, selected: Boolean, onClick: () -> Unit) {
-    val primary = MaterialTheme.brand.gradientStart
-    val shape = RoundedCornerShape(18.dp)
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clip(shape)
-            .background(if (selected) primary.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surfaceContainer)
-            .border(
-                if (selected) 2.dp else 1.dp,
-                if (selected) MaterialTheme.brand.gradient else Brush.linearGradient(listOf(MaterialTheme.colorScheme.outlineVariant, MaterialTheme.colorScheme.outlineVariant)),
-                shape,
-            )
-            .selectable(selected = selected, role = Role.RadioButton, onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            Modifier
-                .size(40.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(
-                    if (selected) MaterialTheme.brand.gradient
-                    else Brush.linearGradient(listOf(MaterialTheme.colorScheme.surfaceContainerHighest, MaterialTheme.colorScheme.surfaceContainerHighest)),
-                ),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(icon, null, tint = if (selected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(22.dp))
-        }
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-            Text(description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        RadioButton(selected = selected, onClick = null, colors = RadioButtonDefaults.colors(selectedColor = primary))
-    }
-}
-
-@Composable
-private fun FormatCard(icon: ImageVector, title: String, subtitle: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
-    val primary = MaterialTheme.brand.gradientStart
-    val shape = RoundedCornerShape(20.dp)
-    Column(
-        modifier
-            .clip(shape)
-            .background(if (selected) primary.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surfaceContainer)
-            .border(
-                if (selected) 2.dp else 1.dp,
-                if (selected) MaterialTheme.brand.gradient else Brush.linearGradient(listOf(MaterialTheme.colorScheme.outlineVariant, MaterialTheme.colorScheme.outlineVariant)),
-                shape,
-            )
-            .selectable(selected = selected, role = Role.RadioButton, onClick = onClick)
-            .padding(16.dp),
-    ) {
-        Box(
-            Modifier
-                .size(44.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .background(
-                    if (selected) MaterialTheme.brand.gradient
-                    else Brush.linearGradient(listOf(MaterialTheme.colorScheme.surfaceContainerHighest, MaterialTheme.colorScheme.surfaceContainerHighest)),
-                ),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(icon, null, tint = if (selected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        Spacer(Modifier.height(10.dp))
-        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1)
-        Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-}
-
-@Composable
-private fun OptionSwitch(icon: ImageVector, title: String, subtitle: String, checked: Boolean, onChange: (Boolean) -> Unit) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp)
-            .clip(RoundedCornerShape(16.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainer)
-            .clickable { onChange(!checked) }
-            .padding(horizontal = 14.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(icon, null, tint = MaterialTheme.brand.gradientStart)
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
-            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        Switch(checked = checked, onCheckedChange = onChange, colors = SwitchDefaults.colors(checkedTrackColor = MaterialTheme.brand.gradientStart))
-    }
-}
