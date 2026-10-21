@@ -3,95 +3,91 @@ package com.scannerpromax.ui.settings
 import android.app.ActivityManager
 import android.content.Context
 import android.os.Build
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.AutoAwesome
-import androidx.compose.material.icons.rounded.AutoFixHigh
-import androidx.compose.material.icons.rounded.BrightnessAuto
-import androidx.compose.material.icons.rounded.CameraAlt
-import androidx.compose.material.icons.rounded.ChevronRight
-import androidx.compose.material.icons.rounded.Cloud
-import androidx.compose.material.icons.rounded.DarkMode
-import androidx.compose.material.icons.rounded.Description
-import androidx.compose.material.icons.rounded.HighQuality
-import androidx.compose.material.icons.rounded.Info
-import androidx.compose.material.icons.rounded.LightMode
-import androidx.compose.material.icons.rounded.Memory
-import androidx.compose.material.icons.rounded.Palette
-import androidx.compose.material.icons.rounded.PhoneAndroid
-import androidx.compose.material.icons.rounded.PhotoCamera
-import androidx.compose.material.icons.rounded.Psychology
-import androidx.compose.material.icons.rounded.Speed
-import androidx.compose.material.icons.rounded.TextFields
-import androidx.compose.material.icons.rounded.Tune
-import androidx.compose.material.icons.rounded.CleaningServices
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.RadioButton
-import androidx.compose.material3.RadioButtonDefaults
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
-import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.scannerpromax.ai.RecognitionEngine
 import com.scannerpromax.data.AppSettings
 import com.scannerpromax.di.AppContainer
 import com.scannerpromax.domain.ExportQuality
 import com.scannerpromax.domain.FilterType
 import com.scannerpromax.domain.PageSize
-import com.scannerpromax.ui.components.AppTopBar
-import com.scannerpromax.ui.components.BrandCard
-import com.scannerpromax.ui.components.GradientText
-import com.scannerpromax.ui.theme.brand
+import com.scannerpromax.domain.PdfTextMode
+import com.scannerpromax.ui.components.AppIcons
+import com.scannerpromax.ui.components.CheckRow
+import com.scannerpromax.ui.components.InfoRow
+import com.scannerpromax.ui.components.InsetGroup
+import com.scannerpromax.ui.components.LargeTitleHeader
+import com.scannerpromax.ui.components.NavigationRow
+import com.scannerpromax.ui.components.OptionsSheet
+import com.scannerpromax.ui.components.SeparatorInsetPlain
+import com.scannerpromax.ui.components.SpanishLocale
+import com.scannerpromax.ui.components.ToggleRow
+import com.scannerpromax.ui.theme.LocalPerf
+import com.scannerpromax.ui.theme.SystemBlue
+import com.scannerpromax.ui.theme.SystemGray
+import com.scannerpromax.ui.theme.SystemGreen
+import com.scannerpromax.ui.theme.SystemIndigo
+import com.scannerpromax.ui.theme.SystemOrange
+import com.scannerpromax.ui.theme.SystemPink
+import com.scannerpromax.ui.theme.SystemPurple
+import com.scannerpromax.ui.theme.SystemTeal
+import com.scannerpromax.ui.theme.ui
 import kotlinx.coroutines.launch
 
 /** Qué selector (hoja inferior) está abierto. */
 private enum class Picker { FILTER, PAGE_SIZE, QUALITY, PDF_TEXT }
 
-@OptIn(ExperimentalMaterial3Api::class)
+/** Subpantallas de Ajustes (navegación interna, sin rutas nuevas). */
+internal enum class SettingsPage { MAIN, EXPORT, APPEARANCE, ABOUT }
+
+/** Datos del dispositivo para "Acerca de" (se calculan fuera para poder usar datos falsos en las capturas). */
+@Immutable
+internal data class AboutInfo(
+    val version: String,
+    val device: String,
+    val performance: String,
+    val processor: String,
+    val workingResolution: String,
+)
+
+/**
+ * Ajustes (rediseño estilo Apple, maqueta "Ajustes"): lista agrupada con iconos de color.
+ *  - ESCANEO: Filtro por defecto (hoja), Captura automática, Quitar rayas sueltas, Cámara del teléfono.
+ *  - INTELIGENCIA ARTIFICIAL: Reconocimiento y modelos (pantalla Modelos IA), IA en la nube.
+ *  - GENERAL: Exportación (subpantalla: tamaño, calidad, texto en PDF), Apariencia (tema + color dinámico),
+ *    Acerca de (versión y datos del dispositivo).
+ */
 @Composable
 fun SettingsScreen(
     container: AppContainer,
@@ -105,394 +101,325 @@ fun SettingsScreen(
     // reiniciaba la recolección en cada recomposición.
     val settingsFlow = remember(container) { container.settings.settings }
     val settings by settingsFlow.collectAsStateWithLifecycle(initialValue = AppSettings())
+    val about = remember(container) { aboutInfo(container, context) }
+
+    SettingsContent(
+        settings = settings,
+        about = about,
+        onUpdate = { transform -> scope.launch { runCatching { container.settings.update(transform) } } },
+        onBack = onBack,
+        onOpenAiModels = onOpenAiModels,
+        onOpenCloudAi = onOpenCloudAi,
+    )
+}
+
+/** Contenido de Ajustes sin el contenedor (lo usan [SettingsScreen] y las capturas de prueba). */
+@Composable
+internal fun SettingsContent(
+    settings: AppSettings,
+    about: AboutInfo,
+    onUpdate: ((AppSettings) -> AppSettings) -> Unit,
+    onBack: () -> Unit,
+    onOpenAiModels: () -> Unit,
+    onOpenCloudAi: () -> Unit,
+    initialPage: SettingsPage = SettingsPage.MAIN,
+) {
+    val ui = MaterialTheme.ui
+    val perf = LocalPerf.current
+    var page by rememberSaveable { mutableStateOf(initialPage) }
     var picker by remember { mutableStateOf<Picker?>(null) }
-    val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
+    BackHandler(enabled = page != SettingsPage.MAIN) { page = SettingsPage.MAIN }
 
-    fun update(transform: (AppSettings) -> AppSettings) {
-        scope.launch { runCatching { container.settings.update(transform) } }
-    }
-
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
-        topBar = { AppTopBar(title = "Ajustes", onBack = onBack, scrollBehavior = scrollBehavior) },
-        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
-    ) { inner ->
-        Column(
-            Modifier
-                .fillMaxSize()
-                .padding(inner)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp)
-                .padding(bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(20.dp),
-        ) {
-            SettingsGroup("Escaneo") {
-                ValueRow(
-                    icon = Icons.Rounded.AutoFixHigh,
-                    title = "Filtro por defecto",
-                    value = settings.defaultFilter.uiFilter.label,
-                    onClick = { picker = Picker.FILTER },
-                )
-                GroupDivider()
-                SwitchRow(
-                    icon = Icons.Rounded.CameraAlt,
-                    title = "Captura automática",
-                    subtitle = "Dispara sola cuando el documento está estable y enfocado",
-                    checked = settings.autoCapture,
-                    onCheckedChange = { v -> update { it.copy(autoCapture = v) } },
-                )
-                GroupDivider()
-                SwitchRow(
-                    icon = Icons.Rounded.PhotoCamera,
-                    title = "Usar la cámara del teléfono por defecto",
-                    subtitle = "Abre la app de cámara del sistema (máxima resolución, HDR y nitidez del fabricante) y procesa la foto al volver",
-                    checked = settings.useSystemCamera,
-                    onCheckedChange = { v -> update { it.copy(useSystemCamera = v) } },
-                )
-                GroupDivider()
-                SwitchRow(
-                    icon = Icons.Rounded.CleaningServices,
-                    title = "Quitar rayas automáticamente",
-                    subtitle = "Elimina líneas de dobleces, bolígrafo y bordes en páginas nuevas",
-                    checked = settings.autoRemoveLines,
-                    onCheckedChange = { v -> update { it.copy(autoRemoveLines = v) } },
-                )
+    AnimatedContent(
+        targetState = page,
+        transitionSpec = {
+            val d = perf.duration(280)
+            if (targetState != SettingsPage.MAIN) {
+                (slideInHorizontally(tween(d)) { it } + fadeIn(tween(d))) togetherWith (slideOutHorizontally(tween(d)) { -it / 4 } + fadeOut(tween(d)))
+            } else {
+                (slideInHorizontally(tween(d)) { -it / 4 } + fadeIn(tween(d))) togetherWith (slideOutHorizontally(tween(d)) { it } + fadeOut(tween(d)))
             }
-
-            SettingsGroup("Inteligencia artificial") {
-                ValueRow(
-                    icon = Icons.Rounded.Psychology,
-                    title = "Modelos IA",
-                    value = "Motor: " + settings.recognitionEngine.label,
-                    onClick = onOpenAiModels,
-                )
-                GroupDivider()
-                ValueRow(
-                    icon = Icons.Rounded.Cloud,
-                    title = "IA en la nube (opcional)",
-                    value = settings.recognitionEngine.cloud?.let { "En uso: " + it.label } ?: "DeepSeek o Claude Haiku con tu clave",
-                    onClick = onOpenCloudAi,
-                )
-            }
-
-            SettingsGroup("Exportación") {
-                ValueRow(
-                    icon = Icons.Rounded.Description,
-                    title = "Tamaño de página PDF",
-                    value = settings.pdfPageSize.label,
-                    onClick = { picker = Picker.PAGE_SIZE },
-                )
-                GroupDivider()
-                ValueRow(
-                    icon = Icons.Rounded.HighQuality,
-                    title = "Calidad de exportación",
-                    value = settings.exportQuality.label,
-                    onClick = { picker = Picker.QUALITY },
-                )
-                GroupDivider()
-                ValueRow(
-                    icon = Icons.Rounded.TextFields,
-                    title = "Texto en el PDF",
-                    value = settings.pdfTextMode.label,
-                    onClick = { picker = Picker.PDF_TEXT },
-                )
-            }
-
-            SettingsGroup("Apariencia") {
-                Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        RowIcon(Icons.Rounded.BrightnessAuto)
-                        Spacer(Modifier.width(14.dp))
-                        Text("Tema", style = MaterialTheme.typography.titleSmall)
+        },
+        label = "settingsPage",
+        modifier = Modifier
+            .fillMaxSize()
+            .background(ui.groupedBackground),
+    ) { current ->
+        when (current) {
+            SettingsPage.MAIN -> SettingsPageScaffold(title = "Ajustes", backLabel = "Documentos", onBack = onBack) {
+                InsetGroup(
+                    header = "Escaneo",
+                    footer = "Con la cámara del teléfono se abre la app de cámara del sistema (máxima resolución, HDR y " +
+                        "nitidez del fabricante) y la foto se procesa al volver.",
+                ) {
+                    item {
+                        NavigationRow(
+                            "Filtro por defecto",
+                            icon = AppIcons.FilterHalf,
+                            iconTint = ui.accent,
+                            value = settings.defaultFilter.uiFilter.label,
+                            onClick = { picker = Picker.FILTER },
+                        )
                     }
-                    Spacer(Modifier.height(12.dp))
-                    val options = listOf<Triple<Boolean?, String, ImageVector>>(
-                        Triple(null, "Sistema", Icons.Rounded.BrightnessAuto),
-                        Triple(false, "Claro", Icons.Rounded.LightMode),
-                        Triple(true, "Oscuro", Icons.Rounded.DarkMode),
-                    )
-                    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                        options.forEachIndexed { index, (value, label, icon) ->
-                            SegmentedButton(
+                    item {
+                        ToggleRow(
+                            "Captura automática",
+                            subtitle = "Dispara sola con el documento estable y enfocado",
+                            icon = AppIcons.Bolt,
+                            iconTint = SystemOrange,
+                            checked = settings.autoCapture,
+                            onCheckedChange = { v -> onUpdate { it.copy(autoCapture = v) } },
+                        )
+                    }
+                    item {
+                        ToggleRow(
+                            "Quitar rayas sueltas",
+                            subtitle = "Dobleces, bolígrafo y bordes en páginas nuevas",
+                            icon = AppIcons.Eraser,
+                            iconTint = SystemPurple,
+                            checked = settings.autoRemoveLines,
+                            onCheckedChange = { v -> onUpdate { it.copy(autoRemoveLines = v) } },
+                        )
+                    }
+                    item {
+                        ToggleRow(
+                            "Usar la cámara del teléfono",
+                            icon = AppIcons.Camera,
+                            iconTint = SystemGray,
+                            checked = settings.useSystemCamera,
+                            onCheckedChange = { v -> onUpdate { it.copy(useSystemCamera = v) } },
+                        )
+                    }
+                }
+                InsetGroup(header = "Inteligencia artificial") {
+                    item {
+                        NavigationRow(
+                            "Reconocimiento y modelos",
+                            icon = AppIcons.Text,
+                            iconTint = SystemBlue,
+                            value = engineShortLabel(settings.recognitionEngine),
+                            onClick = onOpenAiModels,
+                        )
+                    }
+                    item {
+                        NavigationRow(
+                            "IA en la nube",
+                            icon = AppIcons.Cloud,
+                            iconTint = SystemTeal,
+                            value = settings.recognitionEngine.cloud?.let { "En uso: " + it.label } ?: "Opcional",
+                            onClick = onOpenCloudAi,
+                        )
+                    }
+                }
+                InsetGroup(header = "General") {
+                    item {
+                        NavigationRow(
+                            "Exportación",
+                            icon = AppIcons.Export,
+                            iconTint = SystemPink,
+                            value = "PDF · " + settings.pdfPageSize.label,
+                            onClick = { page = SettingsPage.EXPORT },
+                        )
+                    }
+                    item {
+                        NavigationRow(
+                            "Apariencia",
+                            icon = AppIcons.Moon,
+                            iconTint = SystemIndigo,
+                            value = themeLabel(settings.darkTheme),
+                            onClick = { page = SettingsPage.APPEARANCE },
+                        )
+                    }
+                    item {
+                        NavigationRow(
+                            "Acerca de",
+                            icon = AppIcons.Info,
+                            iconTint = SystemGray,
+                            onClick = { page = SettingsPage.ABOUT },
+                        )
+                    }
+                }
+            }
+
+            SettingsPage.EXPORT -> SettingsPageScaffold(title = "Exportación", backLabel = "Ajustes", onBack = { page = SettingsPage.MAIN }) {
+                InsetGroup(
+                    header = "PDF",
+                    footer = "Se aplican al exportar y al compartir PDF desde Inicio. La app guarda siempre el escaneo a " +
+                        "resolución completa: la calidad solo reduce el archivo exportado.",
+                ) {
+                    item {
+                        NavigationRow(
+                            "Tamaño de página",
+                            icon = AppIcons.Page,
+                            iconTint = SystemBlue,
+                            value = settings.pdfPageSize.label,
+                            onClick = { picker = Picker.PAGE_SIZE },
+                        )
+                    }
+                    item {
+                        NavigationRow(
+                            "Calidad",
+                            icon = AppIcons.Quality,
+                            iconTint = SystemOrange,
+                            value = settings.exportQuality.label,
+                            onClick = { picker = Picker.QUALITY },
+                        )
+                    }
+                    item {
+                        NavigationRow(
+                            "Texto en el PDF",
+                            icon = AppIcons.Text,
+                            iconTint = SystemGreen,
+                            value = settings.pdfTextMode.label,
+                            onClick = { picker = Picker.PDF_TEXT },
+                        )
+                    }
+                }
+            }
+
+            SettingsPage.APPEARANCE -> SettingsPageScaffold(title = "Apariencia", backLabel = "Ajustes", onBack = { page = SettingsPage.MAIN }) {
+                InsetGroup(header = "Tema", separatorInset = SeparatorInsetPlain) {
+                    listOf<Pair<Boolean?, String>>(null to "Sistema", false to "Claro", true to "Oscuro").forEach { (value, label) ->
+                        item {
+                            CheckRow(
+                                title = label,
                                 selected = settings.darkTheme == value,
-                                onClick = { update { it.copy(darkTheme = value) } },
-                                shape = SegmentedButtonDefaults.itemShape(index, options.size),
-                                icon = { Icon(icon, null, Modifier.size(18.dp)) },
-                                label = { Text(label, maxLines = 1) },
+                                onClick = { onUpdate { it.copy(darkTheme = value) } },
                             )
                         }
                     }
                 }
-                GroupDivider()
                 val dynamicAvailable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
-                SwitchRow(
-                    icon = Icons.Rounded.Palette,
-                    title = "Color dinámico",
-                    subtitle = if (dynamicAvailable) "Usa los colores de tu fondo de pantalla (Material You)"
-                    else "Disponible en Android 12 o superior",
-                    checked = settings.dynamicColor && dynamicAvailable,
-                    enabled = dynamicAvailable,
-                    onCheckedChange = { v -> update { it.copy(dynamicColor = v) } },
-                )
+                InsetGroup(
+                    footer = if (dynamicAvailable) "Toma el color de acento de tu fondo de pantalla (Material You)."
+                    else "Disponible en Android 12 o superior.",
+                ) {
+                    item {
+                        ToggleRow(
+                            "Color dinámico",
+                            icon = AppIcons.Palette,
+                            iconTint = SystemIndigo,
+                            checked = settings.dynamicColor && dynamicAvailable,
+                            enabled = dynamicAvailable,
+                            onCheckedChange = { v -> onUpdate { it.copy(dynamicColor = v) } },
+                        )
+                    }
+                }
             }
 
-            AboutCard(container, context)
+            SettingsPage.ABOUT -> SettingsPageScaffold(title = "Acerca de", backLabel = "Ajustes", onBack = { page = SettingsPage.MAIN }) {
+                InsetGroup(header = "ESCÁNER PRO MAX") {
+                    item { InfoRow("Versión", about.version, icon = AppIcons.Info, iconTint = SystemGray) }
+                }
+                InsetGroup(
+                    header = "Este dispositivo",
+                    footer = "Privacidad: todo se procesa en tu teléfono, sin internet (salvo la IA en la nube, solo si la activas).",
+                ) {
+                    item { InfoRow("Dispositivo", about.device, icon = AppIcons.Phone, iconTint = SystemBlue, stacked = true) }
+                    item { InfoRow("Rendimiento", about.performance, icon = AppIcons.Speed, iconTint = SystemOrange, stacked = true) }
+                    item { InfoRow("Procesador", about.processor, icon = AppIcons.Chip, iconTint = SystemGreen, stacked = true) }
+                    item { InfoRow("Resolución de trabajo", about.workingResolution, icon = AppIcons.Resolution, iconTint = SystemPurple) }
+                }
+            }
         }
     }
 
     when (picker) {
-        Picker.FILTER -> ChoiceSheet(
+        Picker.FILTER -> OptionsSheet(
             title = "Filtro por defecto",
             options = FilterType.visible,
             selected = settings.defaultFilter.uiFilter,
             label = { it.label },
             description = { it.description },
-            onSelect = { v -> update { it.copy(defaultFilter = v) } },
+            onSelect = { v -> onUpdate { it.copy(defaultFilter = v) } },
             onDismiss = { picker = null },
         )
-        Picker.PAGE_SIZE -> ChoiceSheet(
-            title = "Tamaño de página PDF",
+        Picker.PAGE_SIZE -> OptionsSheet(
+            title = "Tamaño de página",
             options = PageSize.entries,
             selected = settings.pdfPageSize,
             label = { it.label },
             description = { pageSizeDescription(it) },
-            onSelect = { v -> update { it.copy(pdfPageSize = v) } },
+            onSelect = { v -> onUpdate { it.copy(pdfPageSize = v) } },
             onDismiss = { picker = null },
         )
-        Picker.QUALITY -> ChoiceSheet(
-            title = "Calidad de exportación",
+        Picker.QUALITY -> OptionsSheet(
+            title = "Calidad",
             options = ExportQuality.entries,
             selected = settings.exportQuality,
             label = { it.label },
             description = { it.resolutionLabel.replaceFirstChar { c -> c.uppercase() } + (if (it.isFullResolution) "" else " · JPEG ${it.jpegQuality} %") + qualityHint(it) },
-            onSelect = { v -> update { it.copy(exportQuality = v) } },
+            onSelect = { v -> onUpdate { it.copy(exportQuality = v) } },
             onDismiss = { picker = null },
         )
-        Picker.PDF_TEXT -> ChoiceSheet(
+        Picker.PDF_TEXT -> OptionsSheet(
             title = "Texto en el PDF",
-            options = com.scannerpromax.domain.PdfTextMode.entries,
+            options = PdfTextMode.entries,
             selected = settings.pdfTextMode,
             label = { it.label },
             description = { it.description },
-            onSelect = { v -> update { it.copy(pdfTextMode = v) } },
+            onSelect = { v -> onUpdate { it.copy(pdfTextMode = v) } },
             onDismiss = { picker = null },
         )
         null -> Unit
     }
 }
 
-// ------------------------------------------------------------------------------- piezas de UI
-
+/** Página de Ajustes: "‹ atrás", título grande y grupos separados 22 dp, con desplazamiento. */
 @Composable
-private fun SettingsGroup(title: String, content: @Composable () -> Unit) {
-    Column {
-        Text(
-            title.uppercase(),
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.brand.gradientStart,
-            modifier = Modifier.padding(start = 8.dp, bottom = 8.dp),
-        )
-        BrandCard(contentPadding = PaddingValues(vertical = 4.dp)) { content() }
-    }
-}
-
-@Composable
-private fun GroupDivider() {
-    HorizontalDivider(Modifier.padding(start = 68.dp), color = MaterialTheme.brand.cardBorder)
-}
-
-@Composable
-private fun RowIcon(icon: ImageVector) {
-    val brand = MaterialTheme.brand
-    Box(
-        Modifier
-            .size(38.dp)
-            .clip(MaterialTheme.shapes.small)
-            .background(brand.gradientStart.copy(alpha = if (brand.isDark) 0.18f else 0.12f)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(icon, contentDescription = null, tint = brand.gradientStart, modifier = Modifier.size(20.dp))
-    }
-}
-
-@Composable
-private fun ValueRow(icon: ImageVector, title: String, value: String, onClick: () -> Unit) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        RowIcon(icon)
-        Spacer(Modifier.width(14.dp))
-        Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleSmall)
-            Text(value, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.brand.accent, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-        Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-}
-
-@Composable
-private fun SwitchRow(
-    icon: ImageVector,
+private fun SettingsPageScaffold(
     title: String,
-    subtitle: String?,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
-    enabled: Boolean = true,
+    backLabel: String,
+    onBack: () -> Unit,
+    content: @Composable ColumnScope.() -> Unit,
 ) {
-    Row(
+    Column(
         Modifier
-            .fillMaxWidth()
-            .selectable(selected = checked, enabled = enabled, role = Role.Switch) { onCheckedChange(!checked) }
-            .padding(horizontal = 16.dp, vertical = 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            .fillMaxSize()
+            .background(MaterialTheme.ui.groupedBackground)
+            .verticalScroll(rememberScrollState())
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .padding(bottom = 32.dp),
+        verticalArrangement = Arrangement.spacedBy(22.dp),
     ) {
-        RowIcon(icon)
-        Spacer(Modifier.width(14.dp))
-        Column(Modifier.weight(1f)) {
-            Text(
-                title,
-                style = MaterialTheme.typography.titleSmall,
-                color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-            )
-            if (subtitle != null) {
-                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-        Spacer(Modifier.width(12.dp))
-        Switch(
-            checked = checked,
-            onCheckedChange = null,
-            enabled = enabled,
-            colors = SwitchDefaults.colors(
-                checkedTrackColor = MaterialTheme.brand.gradientStart,
-                checkedThumbColor = Color.White,
-                checkedBorderColor = Color.Transparent,
-            ),
-        )
+        LargeTitleHeader(title = title, backLabel = backLabel, onBack = onBack)
+        content()
+        Spacer(Modifier.height(0.dp))
     }
 }
 
-@Composable
-private fun AboutCard(container: AppContainer, context: Context) {
+private fun themeLabel(dark: Boolean?): String = when (dark) {
+    null -> "Sistema"
+    false -> "Claro"
+    true -> "Oscuro"
+}
+
+private fun engineShortLabel(e: RecognitionEngine): String = when (e) {
+    RecognitionEngine.DOCUMENT_READER -> "Lector de documentos"
+    RecognitionEngine.VISUAL_ASSISTANT -> "Asistente visual"
+    RecognitionEngine.NUBE_DEEPSEEK -> "Nube · DeepSeek"
+    RecognitionEngine.NUBE_CLAUDE_HAIKU -> "Nube · Haiku"
+    RecognitionEngine.BASIC -> "Básico"
+    else -> e.label
+}
+
+private fun aboutInfo(container: AppContainer, context: Context): AboutInfo {
     val tier = container.deviceTier
-    val version = remember {
-        try {
-            @Suppress("DEPRECATION")
-            context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "1.0"
-        } catch (_: Throwable) {
-            "1.0"
-        }
+    val version = try {
+        @Suppress("DEPRECATION")
+        context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "1.0"
+    } catch (_: Throwable) {
+        "1.0"
     }
-    val memoryClass = remember {
-        (context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager)?.memoryClass ?: 0
-    }
-    Column {
-        Text(
-            "ACERCA DE",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.brand.gradientStart,
-            modifier = Modifier.padding(start = 8.dp, bottom = 8.dp),
-        )
-        BrandCard {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    Modifier
-                        .size(52.dp)
-                        .clip(MaterialTheme.shapes.medium)
-                        .background(MaterialTheme.brand.gradient),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(Icons.Rounded.AutoAwesome, null, tint = Color.White, modifier = Modifier.size(28.dp))
-                }
-                Spacer(Modifier.width(14.dp))
-                Column {
-                    GradientText("ESCÁNER PRO MAX", style = MaterialTheme.typography.titleLarge)
-                    Text("Versión $version", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-            Spacer(Modifier.height(16.dp))
-            InfoLine(Icons.Rounded.PhoneAndroid, "Dispositivo", "${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL} · Android ${Build.VERSION.RELEASE}")
-            InfoLine(
-                Icons.Rounded.Speed,
-                "Rendimiento",
-                if (tier.isLowRam) "Gama baja · modo ligero activado (procesado optimizado)" else "Gama media/alta · máxima calidad",
-            )
-            InfoLine(Icons.Rounded.Memory, "Procesador", "${tier.cores} núcleos · ${memoryClass} MB por app")
-            InfoLine(
-                Icons.Rounded.Tune,
-                "Resolución de trabajo",
-                String.format(com.scannerpromax.ui.components.SpanishLocale, "%.1f MP", tier.maxWorkingPixels / 1_000_000f),
-            )
-            InfoLine(Icons.Rounded.Info, "Privacidad", "Todo se procesa en tu teléfono, sin internet")
-        }
-    }
-}
-
-@Composable
-private fun InfoLine(icon: ImageVector, label: String, value: String) {
-    Row(Modifier.padding(vertical = 6.dp), verticalAlignment = Alignment.Top) {
-        Icon(icon, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.width(12.dp))
-        Column {
-            Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(value, style = MaterialTheme.typography.bodyMedium)
-        }
-    }
-}
-
-/** Hoja inferior de selección única con descripción por opción. */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun <T> ChoiceSheet(
-    title: String,
-    options: List<T>,
-    selected: T,
-    label: (T) -> String,
-    description: (T) -> String?,
-    onSelect: (T) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    val scope = rememberCoroutineScope()
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-    ) {
-        Text(title, style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp))
-        LazyColumn(contentPadding = PaddingValues(bottom = 16.dp), modifier = Modifier.navigationBarsPadding()) {
-            items(options, key = { it.toString() }) { option ->
-                val isSelected = option == selected
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .selectable(selected = isSelected, role = Role.RadioButton) {
-                            onSelect(option)
-                            scope.launch { sheetState.hide() }.invokeOnCompletion { onDismiss() }
-                        }
-                        .padding(horizontal = 24.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    RadioButton(
-                        selected = isSelected,
-                        onClick = null,
-                        colors = RadioButtonDefaults.colors(selectedColor = MaterialTheme.brand.gradientStart),
-                    )
-                    Spacer(Modifier.width(16.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(label(option), style = MaterialTheme.typography.titleSmall)
-                        description(option)?.let {
-                            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                }
-            }
-        }
-    }
+    val memoryClass = (context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager)?.memoryClass ?: 0
+    return AboutInfo(
+        version = version,
+        device = "${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL} · Android ${Build.VERSION.RELEASE}",
+        performance = if (tier.isLowRam) "Gama baja · modo ligero activado (procesado optimizado)" else "Gama media/alta · máxima calidad",
+        processor = "${tier.cores} núcleos · $memoryClass MB por app",
+        workingResolution = String.format(SpanishLocale, "%.1f MP", tier.maxWorkingPixels / 1_000_000f),
+    )
 }
 
 private fun pageSizeDescription(p: PageSize): String = when (p) {
