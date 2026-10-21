@@ -23,7 +23,95 @@ import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 
 /**
- * Colores extra de marca que Material3 no cubre (degradados, estados, bordes sutiles).
+ * Tokens del diseño estilo Apple (rediseño 2026-10). Acceso: `MaterialTheme.ui`.
+ * Los componentes nuevos (ui/components/Ios*.kt) usan SOLO estos tokens.
+ */
+@Immutable
+data class UiColors(
+    /** Fondo de las pantallas con listas agrupadas (#F2F2F7 / negro). */
+    val groupedBackground: Color,
+    /** Tarjetas y celdas de las listas agrupadas (blanco / #1C1C1E). */
+    val card: Color,
+    /** Superficie elevada sobre tarjetas (menús, segmento seleccionado en oscuro). */
+    val elevated: Color,
+    val label: Color,
+    val secondaryLabel: Color,
+    /** Chevrons, marcadores de posición. */
+    val tertiaryLabel: Color,
+    val separator: Color,
+    /** Separador opaco (asa de las hojas, bordes de menú). */
+    val opaqueSeparator: Color,
+    /** Relleno de campos y botones grises (#E3E3E8 / #2C2C2E). */
+    val fill: Color,
+    /** Acento único (índigo, o el del sistema con Color dinámico). */
+    val accent: Color,
+    val onAccent: Color,
+    val green: Color,
+    val red: Color,
+    val orange: Color,
+    /** Fondo de las barras flotantes (cápsula translúcida). */
+    val bar: Color,
+    /** Banda gris entre grupos del menú •••. */
+    val menuGroupGap: Color,
+    /** Fondo del menú ••• (casi opaco). */
+    val menu: Color,
+    val shadow: Color,
+    val isDark: Boolean,
+)
+
+private val LightUi = UiColors(
+    groupedBackground = LightGroupedBackground,
+    card = LightCard,
+    elevated = LightCard,
+    label = LightLabel,
+    secondaryLabel = LightSecondaryLabel,
+    tertiaryLabel = LightTertiaryLabel,
+    separator = LightSeparator,
+    opaqueSeparator = LightOpaqueSeparator,
+    fill = LightFill,
+    accent = AccentIndigo,
+    onAccent = Color.White,
+    green = SystemGreen,
+    red = SystemRed,
+    orange = SystemOrange,
+    bar = Color.White.copy(alpha = 0.86f),
+    menuGroupGap = Color(0x24787880),
+    menu = Color(0xF0FAFAFC),
+    shadow = Color.Black,
+    isDark = false,
+)
+
+private val DarkUi = UiColors(
+    groupedBackground = DarkGroupedBackground,
+    card = DarkCard,
+    elevated = DarkElevated,
+    label = DarkLabel,
+    secondaryLabel = DarkSecondaryLabel,
+    tertiaryLabel = DarkTertiaryLabel,
+    separator = DarkSeparator,
+    opaqueSeparator = DarkOpaqueSeparator,
+    fill = DarkFill,
+    accent = AccentIndigoDark,
+    onAccent = Color.White,
+    green = Color(0xFF30D158),
+    red = SystemRedDark,
+    orange = Color(0xFFFF9F0A),
+    bar = Color(0xFF1C1C1E).copy(alpha = 0.90f),
+    menuGroupGap = Color(0x5C000000),
+    menu = Color(0xF22C2C2E),
+    shadow = Color.Black,
+    isDark = true,
+)
+
+val LocalUiColors = staticCompositionLocalOf { LightUi }
+
+/** Tokens del diseño estilo Apple del tema actual. */
+val MaterialTheme.ui: UiColors
+    @Composable @ReadOnlyComposable get() = LocalUiColors.current
+
+/**
+ * Colores "de marca" de la versión anterior, que siguen usando las pantallas aún no rediseñadas (fase 2).
+ * Ahora derivan del acento único: los "degradados" son de un solo color (sin violeta→turquesa) y sin halos.
  * Acceso: `MaterialTheme.brand`.
  */
 @Immutable
@@ -37,62 +125,45 @@ data class BrandColors(
     val danger: Color,
     /** Borde fino para tarjetas / superficies elevadas. */
     val cardBorder: Color,
-    /** Fondo de tarjeta ligeramente elevado respecto al fondo. */
+    /** Fondo de tarjeta. */
     val card: Color,
     val isDark: Boolean,
 ) {
-    // Los degradados se crean UNA vez por tema (antes un getter creaba un Brush nuevo en cada acceso, en cada
-    // recomposición de cada tarjeta/botón: basura y comparaciones de igualdad fallidas que impedían saltarse
-    // recomposiciones).
+    // Los pinceles se crean UNA vez por tema (no en cada recomposición).
 
-    /** Degradado principal (violeta -> turquesa) en diagonal. */
+    /** Antes degradado violeta→turquesa; ahora color sólido del acento. */
     val gradient: Brush = Brush.linearGradient(listOf(gradientStart, gradientEnd))
 
-    /** Degradado horizontal para textos / barras. */
+    /** Igual que [gradient], en horizontal (textos / barras). */
     val horizontalGradient: Brush = Brush.horizontalGradient(listOf(gradientStart, gradientEnd))
 
-    /** Halo suave para fondos de cabecera. */
-    val backdrop: Brush = Brush.verticalGradient(
-        listOf(gradientStart.copy(alpha = if (isDark) 0.22f else 0.12f), Color.Transparent),
-    )
+    /** Antes halo de cabecera; ahora transparente (sin adornos). */
+    val backdrop: Brush = Brush.verticalGradient(listOf(Color.Transparent, Color.Transparent))
 }
 
-private val DarkBrand = BrandColors(
-    gradientStart = BrandViolet,
-    gradientEnd = BrandTeal,
-    accent = BrandTeal,
-    glow = BrandViolet.copy(alpha = 0.45f),
-    success = SuccessGreen,
-    warning = WarningAmber,
-    danger = DangerRed,
-    cardBorder = Color.White.copy(alpha = 0.07f),
-    card = NightSurface,
-    isDark = true,
+private fun brandFrom(ui: UiColors) = BrandColors(
+    gradientStart = ui.accent,
+    gradientEnd = ui.accent,
+    accent = ui.accent,
+    glow = Color.Transparent,
+    success = ui.green,
+    warning = if (ui.isDark) Color(0xFFFF9F0A) else Color(0xFFC77700),
+    danger = ui.red,
+    cardBorder = ui.separator.copy(alpha = if (ui.isDark) 0.7f else 0.8f),
+    card = ui.card,
+    isDark = ui.isDark,
 )
 
-private val LightBrand = BrandColors(
-    gradientStart = BrandViolet,
-    gradientEnd = BrandTealDeep,
-    accent = BrandTealDeep,
-    glow = BrandViolet.copy(alpha = 0.30f),
-    success = Color(0xFF16A34A),
-    warning = Color(0xFFD97706),
-    danger = Color(0xFFE11D48),
-    cardBorder = Color(0xFF12152A).copy(alpha = 0.07f),
-    card = DaySurface,
-    isDark = false,
-)
+val LocalBrandColors = staticCompositionLocalOf { brandFrom(LightUi) }
 
-val LocalBrandColors = staticCompositionLocalOf { DarkBrand }
-
-/** Colores de marca del tema actual. */
+/** Colores de marca del tema actual (compatibilidad). */
 val MaterialTheme.brand: BrandColors
     @Composable @ReadOnlyComposable get() = LocalBrandColors.current
 
 /**
  * Tema de la app.
  * @param darkTheme null = seguir el sistema.
- * @param dynamicColor usa Material You (Android 12+); el degradado de marca se adapta a esos colores.
+ * @param dynamicColor Android 12+: el acento viene del sistema (Material You); los neutros no cambian.
  */
 @Composable
 fun EscanerTheme(darkTheme: Boolean? = null, dynamicColor: Boolean = false, content: @Composable () -> Unit) {
@@ -100,22 +171,34 @@ fun EscanerTheme(darkTheme: Boolean? = null, dynamicColor: Boolean = false, cont
     val context = LocalContext.current
     val useDynamic = dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
 
-    val scheme: ColorScheme = when {
-        useDynamic && dark -> dynamicDarkColorScheme(context)
-        useDynamic -> dynamicLightColorScheme(context)
-        dark -> DarkScheme
-        else -> LightScheme
-    }
-    val brand = remember(scheme, dark, useDynamic) {
-        val base = if (dark) DarkBrand else LightBrand
-        if (!useDynamic) base else base.copy(
-            gradientStart = scheme.primary,
-            gradientEnd = scheme.tertiary,
-            accent = scheme.tertiary,
-            glow = scheme.primary.copy(alpha = 0.4f),
-            card = scheme.surfaceContainerLow,
+    // Color dinámico: SOLO el acento (y sus contenedores) viene del sistema; los neutros (fondo agrupado,
+    // tarjetas, separadores) se mantienen para conservar el aspecto.
+    val base = if (dark) DarkScheme else LightScheme
+    val scheme: ColorScheme = remember(base, useDynamic, context) {
+        if (useDynamic) {
+        val dyn = if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+        base.copy(
+            primary = dyn.primary,
+            onPrimary = dyn.onPrimary,
+            primaryContainer = dyn.primaryContainer,
+            onPrimaryContainer = dyn.onPrimaryContainer,
+            secondary = dyn.primary,
+            onSecondary = dyn.onPrimary,
+            tertiary = dyn.primary,
+            onTertiary = dyn.onPrimary,
+            tertiaryContainer = dyn.primaryContainer,
+            onTertiaryContainer = dyn.onPrimaryContainer,
+            inversePrimary = dyn.inversePrimary,
         )
+        } else {
+            base
+        }
     }
+    val ui = remember(scheme, dark) {
+        val u = if (dark) DarkUi else LightUi
+        u.copy(accent = scheme.primary, onAccent = scheme.onPrimary)
+    }
+    val brand = remember(ui) { brandFrom(ui) }
 
     // Iconos de barras de sistema acordes al tema elegido en la app (no solo al del sistema).
     val view = LocalView.current
@@ -129,7 +212,7 @@ fun EscanerTheme(darkTheme: Boolean? = null, dynamicColor: Boolean = false, cont
         }
     }
 
-    CompositionLocalProvider(LocalBrandColors provides brand) {
+    CompositionLocalProvider(LocalBrandColors provides brand, LocalUiColors provides ui) {
         MaterialTheme(
             colorScheme = scheme,
             typography = AppTypography,

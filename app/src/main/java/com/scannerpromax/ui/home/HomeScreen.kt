@@ -6,120 +6,92 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.windowInsetsTopHeight
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridScope
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.ArrowForward
-import androidx.compose.material.icons.automirrored.rounded.MenuBook
-import androidx.compose.material.icons.automirrored.rounded.ReceiptLong
-import androidx.compose.material.icons.automirrored.rounded.ViewList
-import androidx.compose.material.icons.rounded.AutoAwesome
-import androidx.compose.material.icons.rounded.Badge
-import androidx.compose.material.icons.rounded.Bolt
-import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.Compress
-import androidx.compose.material.icons.rounded.CoPresent
-import androidx.compose.material.icons.rounded.Description
-import androidx.compose.material.icons.rounded.PhotoCamera
-import androidx.compose.material.icons.rounded.DeleteOutline
-import androidx.compose.material.icons.rounded.DocumentScanner
-import androidx.compose.material.icons.rounded.GridView
-import androidx.compose.material.icons.rounded.PhotoLibrary
-import androidx.compose.material.icons.rounded.Search
-import androidx.compose.material.icons.rounded.SearchOff
-import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextField
-import androidx.compose.material3.TextFieldDefaults
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.produceState
-import com.scannerpromax.data.VersionedFile
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.scannerpromax.data.VersionedFile
 import com.scannerpromax.di.AppContainer
 import com.scannerpromax.domain.Document
 import com.scannerpromax.domain.ScanMode
+import com.scannerpromax.ui.components.AppIcons
 import com.scannerpromax.ui.components.ConfirmDialog
 import com.scannerpromax.ui.components.DocumentActions
 import com.scannerpromax.ui.components.DocumentCard
 import com.scannerpromax.ui.components.DocumentListItem
-import com.scannerpromax.ui.components.EmptyState
-import com.scannerpromax.ui.components.GradientText
+import com.scannerpromax.ui.components.FloatingBar
+import com.scannerpromax.ui.components.FloatingBarContentPadding
+import com.scannerpromax.ui.components.IconCircleButton
+import com.scannerpromax.ui.components.LargeTitleHeader
+import com.scannerpromax.ui.components.ListPosition
 import com.scannerpromax.ui.components.LoadingOverlay
-import com.scannerpromax.ui.components.PrimaryFab
+import com.scannerpromax.ui.components.MenuScrim
+import com.scannerpromax.ui.components.MoreMenu
+import com.scannerpromax.ui.components.MoreMenuItem
+import com.scannerpromax.ui.components.PrimaryCapsuleButton
 import com.scannerpromax.ui.components.RenameDialog
-import com.scannerpromax.ui.components.SectionHeader
+import com.scannerpromax.ui.components.SearchField
+import com.scannerpromax.ui.components.Thumbnail
 import com.scannerpromax.ui.theme.LocalPerf
-import com.scannerpromax.ui.theme.PillShape
-import com.scannerpromax.ui.theme.brand
+import com.scannerpromax.ui.theme.ui
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.DeleteOutline
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.io.File
-import java.util.Calendar
+import kotlinx.coroutines.withContext
 
-/** Acción rápida de la pantalla de inicio. */
-@Immutable
-private data class QuickAction(val title: String, val subtitle: String, val icon: ImageVector, val tint: Color, val onClick: () -> Unit)
-
+/**
+ * Inicio (rediseño estilo Apple, maquetas "Main" y "Menu"): título grande "Documentos" con menú •••, buscador,
+ * "Recientes" + recuento, cuadrícula de 2 columnas (o lista) y cápsula flotante Galería | Escanear.
+ *
+ * Los 6 modos de escaneo ya no están aquí: "Escanear" abre la cámara en modo Documento y el modo se cambia en el
+ * selector de la propia cámara.
+ */
 @Composable
 fun HomeScreen(
     container: AppContainer,
@@ -131,9 +103,6 @@ fun HomeScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val focus = LocalFocusManager.current
-    val brand = MaterialTheme.brand
-    val perf = LocalPerf.current
     val snackbar = remember { SnackbarHostState() }
 
     val documents by container.documents.documents.collectAsStateWithLifecycle()
@@ -178,21 +147,6 @@ fun HomeScreen(
         }
         filtered = result
     }
-    val totalPages = remember(documents) { documents.sumOf { it.pages.size } }
-
-    val quickActions = remember(brand) {
-        listOf(
-            QuickAction("Documento", "Hojas y cartas", Icons.Rounded.Description, brand.gradientStart) { onScan(ScanMode.DOCUMENT) },
-            QuickAction("Libro", "2 páginas", Icons.AutoMirrored.Rounded.MenuBook, brand.gradientStart) { onScan(ScanMode.BOOK) },
-            QuickAction("DNI / Tarjeta", "Anverso y reverso", Icons.Rounded.Badge, brand.gradientEnd) { onScan(ScanMode.ID_CARD) },
-            QuickAction("Recibo", "Tickets largos", Icons.AutoMirrored.Rounded.ReceiptLong, Color(0xFFFFB547)) { onScan(ScanMode.RECEIPT) },
-            QuickAction("Pizarra", "Sin reflejos", Icons.Rounded.CoPresent, Color(0xFF4CC3FF)) { onScan(ScanMode.WHITEBOARD) },
-            QuickAction("Foto", "Color, sin recorte", Icons.Rounded.PhotoCamera, Color(0xFF8BD450)) { onScan(ScanMode.PHOTO) },
-            QuickAction("Galería", "Importar fotos", Icons.Rounded.PhotoLibrary, Color(0xFFFF8A4C)) { pickImages() },
-            QuickAction("Comprimir", "Reducir PDF", Icons.Rounded.Compress, Color(0xFFFF5C9A)) { onCompressPdf() },
-            QuickAction("Ajustes", "Filtro y calidad", Icons.Rounded.Settings, brand.gradientEnd) { onSettings() },
-        )
-    }
 
     fun runBusy(message: String, block: suspend (progress: (Float) -> Unit) -> Unit) {
         if (busyJob != null) return
@@ -236,131 +190,30 @@ fun HomeScreen(
         onDelete = { deleteTarget = doc },
     )
 
-    val gridState = rememberLazyGridState()
-    val fabExpanded by remember { derivedStateOf { gridState.firstVisibleItemIndex < 3 } }
-
     Box(Modifier.fillMaxSize()) {
-        Scaffold(
-            containerColor = MaterialTheme.colorScheme.background,
-            contentWindowInsets = WindowInsets(0, 0, 0, 0),
-            snackbarHost = { SnackbarHost(snackbar, Modifier.navigationBarsPadding()) },
-            floatingActionButton = {
-                PrimaryFab(
-                    onClick = { onScan(ScanMode.DOCUMENT) },
-                    expanded = fabExpanded,
-                    // El halo pulsante solo en el primer uso (sin documentos): ahorra batería y no distrae.
-                    pulse = documents.isEmpty() && perf.richEffects,
-                    modifier = Modifier.navigationBarsPadding(),
-                )
-            },
-        ) { inner ->
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .padding(inner),
-            ) {
-                // Halo de marca detrás de la cabecera.
-                Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .height(320.dp)
-                        .background(brand.backdrop),
-                )
-                LazyVerticalGrid(
-                    state = gridState,
-                    columns = if (gridMode) GridCells.Adaptive(minSize = 150.dp) else GridCells.Fixed(1),
-                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 128.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .statusBarsPadding(),
-                ) {
-                    fullItem("header") {
-                        Header(
-                            docCount = documents.size,
-                            pageCount = totalPages,
-                            lowRam = container.deviceTier.isLowRam,
-                            onSettings = onSettings,
-                        )
-                    }
-                    fullItem("search") {
-                        SearchField(query = query, onQueryChange = { query = it }, onClear = { query = ""; focus.clearFocus() })
-                    }
-                    if (query.isBlank()) {
-                        fullItem("hero") { HeroScanCard(onClick = { onScan(ScanMode.DOCUMENT) }) }
-                        fullItem("quick") { QuickActionsGrid(quickActions) }
-                    }
-                    fullItem("recentHeader") {
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
-                            SectionHeader(
-                                title = if (query.isBlank()) "Recientes" else "Resultados",
-                                subtitle = when {
-                                    filtered.isEmpty() -> null
-                                    filtered.size == 1 -> "1 documento"
-                                    else -> "${filtered.size} documentos"
-                                },
-                                modifier = Modifier.weight(1f),
-                            )
-                            if (documents.isNotEmpty()) {
-                                IconButton(onClick = { gridMode = !gridMode }) {
-                                    Icon(
-                                        if (gridMode) Icons.AutoMirrored.Rounded.ViewList else Icons.Rounded.GridView,
-                                        contentDescription = if (gridMode) "Ver como lista" else "Ver como cuadrícula",
-                                    )
-                                }
-                            }
-                        }
-                    }
-                    when {
-                        documents.isEmpty() -> fullItem("empty") {
-                            EmptyState(
-                                title = "Tu primer escaneo te espera",
-                                message = "Escanea documentos, libros, DNI o recibos. Los recortamos y mejoramos automáticamente para que se vean perfectos.",
-                                // Sin botón propio: la tarjeta principal y el botón flotante ya invitan a escanear.
-                                actionLabel = null,
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                        }
-                        filtered.isEmpty() -> fullItem("noResults") { NoResults(query) }
-                        else -> items(filtered, key = { it.id }, contentType = { if (gridMode) "card" else "row" }) { doc ->
-                            // Miniatura del procesado ACTUAL de la primera página (con su versión para la caché), en IO.
-                            val first = doc.pages.firstOrNull()
-                            val thumb by produceState<VersionedFile?>(null, doc.id, first?.id, first?.thumbFile, first?.processedFile, first?.edits) {
-                                value = first?.let { p -> withContext(Dispatchers.IO) { container.documents.displayThumb(doc.id, p) } }
-                            }
-                            // Misma instancia mientras el documento no cambie: la tarjeta se salta la recomposición.
-                            val actions = remember(doc) { actionsFor(doc) }
-                            // Sin animación de recolocación si el sistema tiene "Quitar animaciones".
-                            val itemModifier = if (perf.reduceMotion) Modifier else Modifier.animateItem()
-                            if (gridMode) {
-                                DocumentCard(
-                                    title = doc.title,
-                                    pageCount = doc.pages.size,
-                                    updatedAt = doc.updatedAt,
-                                    thumbnail = thumb,
-                                    mode = doc.mode,
-                                    onClick = { onOpenDocument(doc.id) },
-                                    actions = actions,
-                                    modifier = itemModifier,
-                                )
-                            } else {
-                                DocumentListItem(
-                                    title = doc.title,
-                                    pageCount = doc.pages.size,
-                                    updatedAt = doc.updatedAt,
-                                    thumbnail = thumb,
-                                    mode = doc.mode,
-                                    onClick = { onOpenDocument(doc.id) },
-                                    actions = actions,
-                                    modifier = itemModifier,
-                                )
-                            }
-                        }
-                    }
+        HomeContent(
+            documents = documents,
+            filtered = filtered,
+            query = query,
+            onQueryChange = { query = it },
+            gridMode = gridMode,
+            onToggleGrid = { gridMode = !gridMode },
+            actionsFor = { doc -> actionsFor(doc) },
+            thumbnail = { doc, modifier ->
+                // Miniatura del procesado ACTUAL de la primera página (con su versión para la caché), en IO.
+                val first = doc.pages.firstOrNull()
+                val thumb by produceState<VersionedFile?>(null, doc.id, first?.id, first?.thumbFile, first?.processedFile, first?.edits) {
+                    value = first?.let { p -> withContext(Dispatchers.IO) { container.documents.displayThumb(doc.id, p) } }
                 }
-            }
-        }
+                Thumbnail(thumb, doc.mode, modifier, sizePx = if (gridMode) 0 else 200)
+            },
+            onOpenDocument = onOpenDocument,
+            onScan = { onScan(ScanMode.DOCUMENT) },
+            onPickImages = pickImages,
+            onCompressPdf = onCompressPdf,
+            onSettings = onSettings,
+            snackbar = snackbar,
+        )
         LoadingOverlay(
             visible = busyMessage != null,
             message = busyMessage.orEmpty(),
@@ -395,217 +248,222 @@ fun HomeScreen(
     }
 }
 
+/**
+ * Contenido visual de Inicio, sin dependencias del contenedor (lo usan [HomeScreen] y las capturas de prueba).
+ * [thumbnail] dibuja la miniatura de un documento ocupando el modifier recibido.
+ */
+@Composable
+internal fun HomeContent(
+    documents: List<Document>,
+    filtered: List<Document>,
+    query: String,
+    onQueryChange: (String) -> Unit,
+    gridMode: Boolean,
+    onToggleGrid: () -> Unit,
+    actionsFor: (Document) -> DocumentActions,
+    thumbnail: @Composable (Document, Modifier) -> Unit,
+    onOpenDocument: (String) -> Unit,
+    onScan: () -> Unit,
+    onPickImages: () -> Unit,
+    onCompressPdf: () -> Unit,
+    onSettings: () -> Unit,
+    snackbar: SnackbarHostState,
+    menuInitiallyOpen: Boolean = false,
+) {
+    val ui = MaterialTheme.ui
+    val perf = LocalPerf.current
+    var menuOpen by rememberSaveable { mutableStateOf(menuInitiallyOpen) }
+    val gridState = rememberLazyGridState()
+    val scrolled by remember { derivedStateOf { gridState.firstVisibleItemIndex > 0 || gridState.firstVisibleItemScrollOffset > 0 } }
+    val totalPages = remember(documents) { documents.sumOf { it.pages.size } }
+    val searching = query.isNotBlank()
+
+    val menuGroups = listOf(
+        // "Seleccionar" y "Ordenar" de la maqueta no se muestran: la app no tiene selección múltiple ni orden
+        // configurable (siempre por fecha de modificación) y el rediseño no añade funciones.
+        listOf(
+            if (gridMode) MoreMenuItem("Ver como lista", AppIcons.List, onClick = onToggleGrid)
+            else MoreMenuItem("Ver como cuadrícula", AppIcons.Grid, onClick = onToggleGrid),
+        ),
+        listOf(
+            MoreMenuItem("Importar fotos", AppIcons.ImportPhotos, onClick = onPickImages),
+            MoreMenuItem("Comprimir PDF", AppIcons.Compress, onClick = onCompressPdf),
+        ),
+        listOf(MoreMenuItem("Ajustes", AppIcons.Settings, onClick = onSettings)),
+    )
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(ui.groupedBackground),
+    ) {
+        val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+        val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+        LazyVerticalGrid(
+            state = gridState,
+            columns = GridCells.Fixed(if (gridMode) 2 else 1),
+            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = statusTop, bottom = FloatingBarContentPadding + navBottom),
+            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(14.dp),
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            fullItem("header") {
+                LargeTitleHeader(
+                    title = "Documentos",
+                    // El margen lateral ya lo da la lista.
+                    horizontalPadding = 0.dp,
+                    actions = {
+                        Box {
+                            IconCircleButton(AppIcons.More, contentDescription = "Más opciones", onClick = { menuOpen = true })
+                            MoreMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }, groups = menuGroups)
+                        }
+                    },
+                )
+            }
+            fullItem("search") {
+                SearchField(
+                    query = query,
+                    onQueryChange = onQueryChange,
+                    placeholder = "Buscar documentos o texto",
+                    modifier = Modifier.padding(top = 14.dp),
+                )
+            }
+            if (documents.isNotEmpty()) {
+                fullItem("recentHeader") {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(top = 20.dp, bottom = 14.dp),
+                        verticalAlignment = Alignment.Bottom,
+                    ) {
+                        Text(
+                            if (searching) "Resultados" else "Recientes",
+                            style = MaterialTheme.typography.titleLarge,
+                            color = ui.label,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text(
+                            if (searching) countLabel(filtered.size, "resultado", "resultados")
+                            else countLabel(documents.size, "documento", "documentos") + " · " + countLabel(totalPages, "página", "páginas"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = ui.secondaryLabel,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(start = 12.dp, bottom = 2.dp),
+                        )
+                    }
+                }
+            }
+            when {
+                documents.isEmpty() -> fullItem("empty") {
+                    QuietMessage(
+                        title = "Sin documentos",
+                        message = "Pulsa Escanear para digitalizar tu primer documento o importa fotos desde la galería.",
+                    )
+                }
+                filtered.isEmpty() -> fullItem("noResults") {
+                    QuietMessage(
+                        title = "Sin resultados",
+                        message = "No encontramos «${query.trim()}» en los títulos ni en el texto reconocido.",
+                    )
+                }
+                else -> itemsIndexed(filtered, key = { _, d -> d.id }, contentType = { _, _ -> if (gridMode) "card" else "row" }) { index, doc ->
+                    // Misma instancia mientras el documento no cambie: la tarjeta se salta la recomposición.
+                    val actions = remember(doc) { actionsFor(doc) }
+                    // Sin animación de recolocación si el sistema tiene "Quitar animaciones".
+                    val itemModifier = if (perf.reduceMotion) Modifier else Modifier.animateItem()
+                    if (gridMode) {
+                        DocumentCard(
+                            title = doc.title,
+                            pageCount = doc.pages.size,
+                            updatedAt = doc.updatedAt,
+                            thumbnail = null,
+                            mode = doc.mode,
+                            onClick = { onOpenDocument(doc.id) },
+                            actions = actions,
+                            modifier = itemModifier.padding(bottom = 18.dp),
+                            thumbnailContent = { thumbnail(doc, Modifier.fillMaxSize()) },
+                        )
+                    } else {
+                        val position = when {
+                            filtered.size == 1 -> ListPosition.Single
+                            index == 0 -> ListPosition.First
+                            index == filtered.lastIndex -> ListPosition.Last
+                            else -> ListPosition.Middle
+                        }
+                        DocumentListItem(
+                            title = doc.title,
+                            pageCount = doc.pages.size,
+                            updatedAt = doc.updatedAt,
+                            thumbnail = null,
+                            mode = doc.mode,
+                            onClick = { onOpenDocument(doc.id) },
+                            actions = actions,
+                            position = position,
+                            modifier = itemModifier,
+                            thumbnailContent = { thumbnail(doc, Modifier.fillMaxSize()) },
+                        )
+                    }
+                }
+            }
+        }
+
+        // Al desplazar, la barra de estado se cubre con el fondo para que el contenido no pase bajo los iconos.
+        if (scrolled) {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .windowInsetsTopHeight(WindowInsets.statusBars)
+                    .background(ui.groupedBackground.copy(alpha = 0.94f)),
+            )
+        }
+
+        FloatingBar(Modifier.align(Alignment.BottomCenter)) {
+            IconCircleButton(
+                icon = AppIcons.Gallery,
+                contentDescription = "Importar de la galería",
+                onClick = onPickImages,
+                size = 52.dp,
+                iconSize = 24.dp,
+                containerColor = if (ui.isDark) ui.fill else ui.groupedBackground,
+                elevation = 0.dp,
+            )
+            PrimaryCapsuleButton(text = "Escanear", icon = AppIcons.Scan, onClick = onScan)
+        }
+
+        SnackbarHost(
+            snackbar,
+            Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(bottom = 92.dp),
+        )
+
+        MenuScrim(visible = menuOpen)
+    }
+}
+
+/** Estado vacío sobrio: título y una línea gris centrados, sin ilustraciones. */
+@Composable
+private fun QuietMessage(title: String, message: String) {
+    val ui = MaterialTheme.ui
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(top = 72.dp, start = 24.dp, end = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Icon(AppIcons.Document, contentDescription = null, tint = ui.tertiaryLabel, modifier = Modifier.size(44.dp))
+        Spacer(Modifier.height(14.dp))
+        Text(title, style = MaterialTheme.typography.titleLarge, color = ui.label, textAlign = TextAlign.Center)
+        Spacer(Modifier.height(6.dp))
+        Text(message, style = MaterialTheme.typography.bodyMedium, color = ui.secondaryLabel, textAlign = TextAlign.Center)
+    }
+}
+
+private fun countLabel(n: Int, one: String, many: String) = if (n == 1) "1 $one" else "$n $many"
+
 private const val SEARCH_DEBOUNCE_MS = 150L
 
 private fun LazyGridScope.fullItem(key: String, content: @Composable () -> Unit) {
     item(key = key, span = { GridItemSpan(maxLineSpan) }, contentType = key) { content() }
-}
-
-// ----------------------------------------------------------------------------------- secciones
-
-@Composable
-private fun Header(docCount: Int, pageCount: Int, lowRam: Boolean, onSettings: () -> Unit) {
-    val greeting = remember {
-        when (Calendar.getInstance().get(Calendar.HOUR_OF_DAY)) {
-            in 5..11 -> "Buenos días"
-            in 12..19 -> "Buenas tardes"
-            else -> "Buenas noches"
-        }
-    }
-    Column(Modifier.padding(top = 12.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(greeting, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                GradientText(
-                    "ESCÁNER PRO MAX",
-                    style = MaterialTheme.typography.headlineLarge.copy(fontWeight = FontWeight.Black),
-                )
-            }
-            Surface(
-                onClick = onSettings,
-                shape = CircleShape,
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                border = BorderStroke(1.dp, MaterialTheme.brand.cardBorder),
-                modifier = Modifier.size(48.dp),
-            ) {
-                Box(contentAlignment = Alignment.Center) { Icon(Icons.Rounded.Settings, contentDescription = "Ajustes") }
-            }
-        }
-        Spacer(Modifier.height(6.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                when (docCount) {
-                    0 -> "Escanea, mejora y comparte en segundos"
-                    1 -> "1 documento · $pageCount ${if (pageCount == 1) "página" else "páginas"}"
-                    else -> "$docCount documentos · $pageCount páginas"
-                },
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.weight(1f, fill = false),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (lowRam) {
-                Spacer(Modifier.width(8.dp))
-                Surface(shape = PillShape, color = MaterialTheme.brand.accent.copy(alpha = 0.15f), contentColor = MaterialTheme.brand.accent) {
-                    Row(Modifier.padding(horizontal = 8.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Rounded.Bolt, null, Modifier.size(14.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Modo ligero", style = MaterialTheme.typography.labelSmall)
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun SearchField(query: String, onQueryChange: (String) -> Unit, onClear: () -> Unit) {
-    TextField(
-        value = query,
-        onValueChange = onQueryChange,
-        placeholder = { Text("Buscar documentos o texto…") },
-        leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
-        trailingIcon = {
-            AnimatedVisibility(query.isNotEmpty(), enter = fadeIn(), exit = fadeOut()) {
-                IconButton(onClick = onClear) { Icon(Icons.Rounded.Close, contentDescription = "Limpiar búsqueda") }
-            }
-        },
-        singleLine = true,
-        shape = PillShape,
-        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-        colors = TextFieldDefaults.colors(
-            focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-            unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainer,
-            focusedIndicatorColor = Color.Transparent,
-            unfocusedIndicatorColor = Color.Transparent,
-            disabledIndicatorColor = Color.Transparent,
-        ),
-        modifier = Modifier.fillMaxWidth(),
-    )
-}
-
-/** Tarjeta principal con degradado: escanear documento. */
-@Composable
-private fun HeroScanCard(onClick: () -> Unit) {
-    val brand = MaterialTheme.brand
-    Surface(onClick = onClick, shape = MaterialTheme.shapes.extraLarge, color = Color.Transparent, contentColor = Color.White) {
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .background(brand.gradient),
-        ) {
-            // Círculos decorativos translúcidos.
-            Box(
-                Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(top = 0.dp)
-                    .size(150.dp)
-                    .clip(CircleShape)
-                    .background(Brush.radialGradient(listOf(Color.White.copy(alpha = 0.22f), Color.Transparent))),
-            )
-            Row(Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Rounded.AutoAwesome, null, Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Mejora mágica + OCR", style = MaterialTheme.typography.labelMedium)
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    Text("Escanear documento", style = MaterialTheme.typography.headlineSmall)
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "Bordes automáticos, sin sombras y nitidez HD incluso con poca luz.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = Color.White.copy(alpha = 0.88f),
-                    )
-                }
-                Spacer(Modifier.width(12.dp))
-                Box(
-                    Modifier
-                        .size(64.dp)
-                        .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.2f)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(Icons.Rounded.DocumentScanner, contentDescription = null, modifier = Modifier.size(32.dp))
-                }
-            }
-            Icon(
-                Icons.AutoMirrored.Rounded.ArrowForward,
-                contentDescription = null,
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(12.dp)
-                    .size(18.dp),
-                tint = Color.White.copy(alpha = 0.8f),
-            )
-        }
-    }
-}
-
-@Composable
-private fun QuickActionsGrid(actions: List<QuickAction>) {
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        actions.chunked(3).forEach { row ->
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                row.forEach { action -> QuickActionTile(action, Modifier.weight(1f)) }
-                repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
-            }
-        }
-    }
-}
-
-@Composable
-private fun QuickActionTile(action: QuickAction, modifier: Modifier = Modifier) {
-    val brand = MaterialTheme.brand
-    Surface(
-        onClick = action.onClick,
-        modifier = modifier,
-        shape = MaterialTheme.shapes.large,
-        color = brand.card,
-        border = BorderStroke(1.dp, brand.cardBorder),
-    ) {
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 14.dp)) {
-            Box(
-                Modifier
-                    .size(42.dp)
-                    .clip(MaterialTheme.shapes.medium)
-                    .background(action.tint.copy(alpha = if (brand.isDark) 0.18f else 0.14f)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(action.icon, contentDescription = null, tint = action.tint, modifier = Modifier.size(24.dp))
-            }
-            Spacer(Modifier.height(10.dp))
-            Text(action.title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(
-                action.subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-    }
-}
-
-@Composable
-private fun NoResults(query: String) {
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .padding(vertical = 40.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Icon(Icons.Rounded.SearchOff, null, Modifier.size(48.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.height(12.dp))
-        Text("Sin resultados", style = MaterialTheme.typography.titleMedium)
-        Text(
-            "No encontramos «${query.trim()}» en títulos ni en el texto reconocido.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.padding(horizontal = 24.dp),
-        )
-    }
 }

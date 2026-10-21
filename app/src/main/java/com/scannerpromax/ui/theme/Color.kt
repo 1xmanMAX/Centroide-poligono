@@ -5,116 +5,127 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.ui.graphics.Color
 
 // ---------------------------------------------------------------------------------------------
-// Paleta de marca ESCÁNER PRO MAX: violeta eléctrico + turquesa sobre azul noche profundo.
+// Paleta estilo Apple (rediseño 2026-10): fondo agrupado gris claro, tarjetas blancas, UN acento índigo y
+// grises de sistema. Sin degradados ni halos. Modo oscuro: negro puro + tarjetas #1C1C1E.
 // ---------------------------------------------------------------------------------------------
 
-val BrandViolet = Color(0xFF6C5CFF)
-val BrandVioletLight = Color(0xFF9D92FF)
-val BrandVioletDeep = Color(0xFF4B3BE0)
-val BrandTeal = Color(0xFF00D1B2)
-val BrandTealLight = Color(0xFF5CF2D9)
-val BrandTealDeep = Color(0xFF00A88F)
-val BrandPink = Color(0xFFFF5C9A)
-val BrandAmber = Color(0xFFFFB547)
+// Acento
+val AccentIndigo = Color(0xFF4F46E5)
+val AccentIndigoDark = Color(0xFF7C74FF)
 
-val NightBg = Color(0xFF0B0F1A)
-val NightSurface = Color(0xFF121726)
-val NightSurface2 = Color(0xFF181E30)
-val NightSurface3 = Color(0xFF1F263B)
-val NightSurface4 = Color(0xFF283049)
-val NightOutline = Color(0xFF2E3650)
-val NightOutlineVariant = Color(0xFF232A40)
-val NightOnSurface = Color(0xFFE9ECF8)
-val NightOnSurfaceVariant = Color(0xFFA3AAC4)
+// Claro
+val LightGroupedBackground = Color(0xFFF2F2F7)
+val LightCard = Color(0xFFFFFFFF)
+val LightLabel = Color(0xFF1C1C1E)
+val LightSecondaryLabel = Color(0xFF6E6E73)
+val LightTertiaryLabel = Color(0xFFAEAEB2)
+val LightSeparator = Color(0xFFE5E5EA)
+val LightOpaqueSeparator = Color(0xFFC7C7CC)
+val LightFill = Color(0xFFE3E3E8)
+val LightElevated = Color(0xFFEFEFF4)
 
-val DayBg = Color(0xFFF6F7FC)
-val DaySurface = Color(0xFFFFFFFF)
-val DaySurface2 = Color(0xFFF0F1F9)
-val DaySurface3 = Color(0xFFE9EBF6)
-val DaySurface4 = Color(0xFFE1E4F2)
-val DayOutline = Color(0xFFCBD0E3)
-val DayOutlineVariant = Color(0xFFE2E5F1)
-val DayOnSurface = Color(0xFF12152A)
-val DayOnSurfaceVariant = Color(0xFF5B6180)
+// Oscuro
+val DarkGroupedBackground = Color(0xFF000000)
+val DarkCard = Color(0xFF1C1C1E)
+val DarkLabel = Color(0xFFFFFFFF)
+val DarkSecondaryLabel = Color(0x99EBEBF5) // #EBEBF5 al 60 %
+val DarkTertiaryLabel = Color(0x4DEBEBF5) // #EBEBF5 al 30 %
+val DarkSeparator = Color(0xFF38383A)
+val DarkOpaqueSeparator = Color(0xFF48484A)
+val DarkFill = Color(0xFF2C2C2E)
+val DarkElevated = Color(0xFF2C2C2E)
 
-val SuccessGreen = Color(0xFF22C55E)
-val WarningAmber = Color(0xFFF59E0B)
-val DangerRed = Color(0xFFFF4D67)
+// Colores de sistema (iconos de Ajustes, estados)
+val SystemGreen = Color(0xFF34C759)
+val SystemRed = Color(0xFFFF3B30)
+val SystemRedDark = Color(0xFFFF453A)
+val SystemOrange = Color(0xFFFF9500)
+val SystemBlue = Color(0xFF007AFF)
+val SystemPurple = Color(0xFFAF52DE)
+val SystemPink = Color(0xFFFF2D55)
+val SystemIndigo = Color(0xFF5856D6)
+val SystemTeal = Color(0xFF30B0C7)
+val SystemGray = Color(0xFF8E8E93)
 
-internal val DarkScheme = darkColorScheme(
-    primary = BrandVioletLight,
-    onPrimary = Color(0xFF1A0E73),
-    primaryContainer = Color(0xFF3B2FB8),
-    onPrimaryContainer = Color(0xFFE5E1FF),
-    secondary = BrandTeal,
-    onSecondary = Color(0xFF00382F),
-    secondaryContainer = Color(0xFF00524A),
-    onSecondaryContainer = Color(0xFF8FFBE6),
-    tertiary = BrandPink,
-    onTertiary = Color(0xFF5C0A2E),
-    tertiaryContainer = Color(0xFF7A1745),
-    onTertiaryContainer = Color(0xFFFFD9E4),
-    error = DangerRed,
-    onError = Color(0xFF4A0010),
-    errorContainer = Color(0xFF6B0F22),
-    onErrorContainer = Color(0xFFFFDADF),
-    background = NightBg,
-    onBackground = NightOnSurface,
-    surface = NightBg,
-    onSurface = NightOnSurface,
-    surfaceVariant = NightSurface3,
-    onSurfaceVariant = NightOnSurfaceVariant,
-    surfaceTint = BrandViolet,
-    inverseSurface = NightOnSurface,
-    inverseOnSurface = NightBg,
-    inversePrimary = BrandViolet,
-    outline = NightOutline,
-    outlineVariant = NightOutlineVariant,
-    scrim = Color.Black,
-    surfaceBright = NightSurface4,
-    surfaceDim = NightBg,
-    surfaceContainerLowest = Color(0xFF080B14),
-    surfaceContainerLow = NightSurface,
-    surfaceContainer = NightSurface2,
-    surfaceContainerHigh = NightSurface3,
-    surfaceContainerHighest = NightSurface4,
-)
+// Compatibilidad con pantallas aún no rediseñadas.
+val SuccessGreen = SystemGreen
+val WarningAmber = Color(0xFFFF9F0A)
+val DangerRed = SystemRed
 
 internal val LightScheme = lightColorScheme(
-    primary = BrandViolet,
+    primary = AccentIndigo,
     onPrimary = Color.White,
-    primaryContainer = Color(0xFFE6E2FF),
-    onPrimaryContainer = Color(0xFF1E1180),
-    secondary = BrandTealDeep,
+    primaryContainer = Color(0xFFE6E5FB),
+    onPrimaryContainer = Color(0xFF2B2591),
+    secondary = AccentIndigo,
     onSecondary = Color.White,
-    secondaryContainer = Color(0xFFC6F7EE),
-    onSecondaryContainer = Color(0xFF00382F),
-    tertiary = Color(0xFFE0447F),
+    secondaryContainer = LightFill,
+    onSecondaryContainer = LightLabel,
+    tertiary = AccentIndigo,
     onTertiary = Color.White,
-    tertiaryContainer = Color(0xFFFFD9E4),
-    onTertiaryContainer = Color(0xFF5C0A2E),
-    error = Color(0xFFE11D48),
+    tertiaryContainer = Color(0xFFE6E5FB),
+    onTertiaryContainer = Color(0xFF2B2591),
+    error = SystemRed,
     onError = Color.White,
-    errorContainer = Color(0xFFFFE0E6),
-    onErrorContainer = Color(0xFF5F0016),
-    background = DayBg,
-    onBackground = DayOnSurface,
-    surface = DayBg,
-    onSurface = DayOnSurface,
-    surfaceVariant = DaySurface3,
-    onSurfaceVariant = DayOnSurfaceVariant,
-    surfaceTint = BrandViolet,
-    inverseSurface = Color(0xFF1C2033),
-    inverseOnSurface = Color(0xFFF1F2FA),
-    inversePrimary = BrandVioletLight,
-    outline = DayOutline,
-    outlineVariant = DayOutlineVariant,
+    errorContainer = Color(0xFFFFE5E3),
+    onErrorContainer = Color(0xFF5F0B05),
+    background = LightGroupedBackground,
+    onBackground = LightLabel,
+    surface = LightGroupedBackground,
+    onSurface = LightLabel,
+    surfaceVariant = LightFill,
+    onSurfaceVariant = LightSecondaryLabel,
+    surfaceTint = Color.Transparent,
+    inverseSurface = Color(0xFF2C2C2E),
+    inverseOnSurface = Color.White,
+    inversePrimary = AccentIndigoDark,
+    outline = LightOpaqueSeparator,
+    outlineVariant = LightSeparator,
     scrim = Color.Black,
-    surfaceBright = DaySurface,
-    surfaceDim = DaySurface4,
-    surfaceContainerLowest = DaySurface,
-    surfaceContainerLow = DaySurface,
-    surfaceContainer = DaySurface2,
-    surfaceContainerHigh = DaySurface3,
-    surfaceContainerHighest = DaySurface4,
+    surfaceBright = LightCard,
+    surfaceDim = LightFill,
+    surfaceContainerLowest = LightCard,
+    surfaceContainerLow = LightCard,
+    surfaceContainer = LightCard,
+    surfaceContainerHigh = LightElevated,
+    surfaceContainerHighest = LightFill,
+)
+
+internal val DarkScheme = darkColorScheme(
+    primary = AccentIndigoDark,
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFF2E2A6B),
+    onPrimaryContainer = Color(0xFFE2E0FF),
+    secondary = AccentIndigoDark,
+    onSecondary = Color.White,
+    secondaryContainer = DarkFill,
+    onSecondaryContainer = DarkLabel,
+    tertiary = AccentIndigoDark,
+    onTertiary = Color.White,
+    tertiaryContainer = Color(0xFF2E2A6B),
+    onTertiaryContainer = Color(0xFFE2E0FF),
+    error = SystemRedDark,
+    onError = Color.White,
+    errorContainer = Color(0xFF5C1210),
+    onErrorContainer = Color(0xFFFFDAD6),
+    background = DarkGroupedBackground,
+    onBackground = DarkLabel,
+    surface = DarkGroupedBackground,
+    onSurface = DarkLabel,
+    surfaceVariant = DarkFill,
+    onSurfaceVariant = DarkSecondaryLabel,
+    surfaceTint = Color.Transparent,
+    inverseSurface = Color(0xFFF2F2F7),
+    inverseOnSurface = LightLabel,
+    inversePrimary = AccentIndigo,
+    outline = DarkOpaqueSeparator,
+    outlineVariant = DarkSeparator,
+    scrim = Color.Black,
+    surfaceBright = Color(0xFF3A3A3C),
+    surfaceDim = DarkGroupedBackground,
+    surfaceContainerLowest = DarkCard,
+    surfaceContainerLow = DarkCard,
+    surfaceContainer = DarkElevated,
+    surfaceContainerHigh = DarkElevated,
+    surfaceContainerHighest = Color(0xFF3A3A3C),
 )
