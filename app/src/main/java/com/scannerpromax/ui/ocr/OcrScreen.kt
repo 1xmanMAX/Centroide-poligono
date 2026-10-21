@@ -115,11 +115,28 @@ import com.scannerpromax.imaging.BitmapIO
 import com.scannerpromax.ocr.OcrText
 import com.scannerpromax.pdf.PdfPageInput
 import com.scannerpromax.pdf.binaryHintFor
-import com.scannerpromax.ui.components.AppTopBar
-import com.scannerpromax.ui.components.GradientButton
-import com.scannerpromax.ui.components.LoadingOverlay
-import com.scannerpromax.ui.components.SoftButton
-import com.scannerpromax.ui.theme.brand
+import com.scannerpromax.ui.components.AlertAction
+import com.scannerpromax.ui.components.AppIcons
+import com.scannerpromax.ui.components.IconCircleButton
+import com.scannerpromax.ui.components.IconTile
+import com.scannerpromax.ui.components.IosAlert
+import com.scannerpromax.ui.components.LargeTitleHeader
+import com.scannerpromax.ui.components.MoreMenu
+import com.scannerpromax.ui.components.MoreMenuItem
+import com.scannerpromax.ui.components.PrimaryCapsuleButton
+import com.scannerpromax.ui.components.ProgressHud
+import com.scannerpromax.ui.theme.GroupShape
+import com.scannerpromax.ui.theme.PillShape
+import com.scannerpromax.ui.theme.ui
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.semantics.Role
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -133,7 +150,7 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /** Línea tocada en la imagen y, si el OCR trae palabras, la palabra concreta. */
-private data class Selection(val line: OcrLine, val word: OcrWord?)
+internal data class Selection(val line: OcrLine, val word: OcrWord?)
 
 private enum class PdfAction { SHARE, SAVE }
 
@@ -148,9 +165,8 @@ fun OcrScreen(
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
-    val brand = MaterialTheme.brand
-    val primary = brand.gradientStart
-    val secondary = brand.gradientEnd
+    val primary = MaterialTheme.ui.accent
+    val secondary = MaterialTheme.ui.accent
 
     val doc by remember(docId) { container.documents.observe(docId) }.collectAsState(initial = null)
     val pages = doc?.pages.orEmpty()
@@ -457,66 +473,244 @@ fun OcrScreen(
         if (exportJob != null) exportJob?.cancel() else guardEdits(onBack)
     }
 
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        Column(Modifier.fillMaxSize().imePadding()) {
-            AppTopBar(
-                title = if (wholeDoc) "Texto del documento" else "Texto reconocido",
-                subtitle = title,
-                onBack = { guardEdits(onBack) },
-                actions = {
-                    if (!wholeDoc) {
-                        IconButton(
-                            enabled = !running && image != null,
-                            onClick = {
-                                if (result?.editedText != null || edited) confirmRecognize = true else recognize(currentPageId)
-                            },
-                        ) {
-                            Icon(Icons.Filled.Refresh, "Volver a reconocer")
-                        }
-                    }
-                },
-            )
+    // Contador fuera del hilo principal y con espera mientras se escribe (sin Regex ni listas intermedias).
+    // Falso positivo de lint: el valor sí se asigna (tras withContext).
+    @SuppressLint("ProduceStateDoesNotAssignValue")
+    val words by produceState(initialValue = 0, shownText) {
+        if (!wholeDoc) delay(250)
+        val n = withContext(Dispatchers.Default) { countWords(shownText) }
+        value = n
+    }
+    val hasText = shownText.isNotBlank()
+    val menuGroups = listOf(
+        listOfNotNull(
+            if (!wholeDoc) {
+                MoreMenuItem("Volver a reconocer", AppIcons.Rotate, enabled = !running && image != null) {
+                    if (result?.editedText != null || edited) confirmRecognize = true else recognize(currentPageId)
+                }
+            } else null,
+            if (!wholeDoc && (aiEngineOn || aiStatus != null)) {
+                MoreMenuItem(if (readByAi) "Volver a leer con IA" else "Leer con IA", AppIcons.Sparkles, enabled = !running && image != null && aiStatus == null) {
+                    guardEdits { readWithAi() }
+                }
+            } else null,
+        ),
+        listOf(
+            MoreMenuItem("Guardar .txt", AppIcons.Download, enabled = hasText) { withStorage { saveTxt() } },
+            MoreMenuItem("PDF con texto…", AppIcons.Document, enabled = pages.isNotEmpty() && exportJob == null) { guardEdits { askPdfAction = true } },
+        ),
+    )
 
-            // ------------------------------------------------ selector de página / todo el documento
-            if (pages.size > 1) {
-                LazyRow(
-                    contentPadding = PaddingValues(horizontal = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+    OcrContent(
+        docTitle = title,
+        wholeDoc = wholeDoc,
+        pageCount = pages.size,
+        currentPageIndex = pages.indexOfFirst { it.id == currentPageId },
+        onSelectAll = {
+            guardEdits {
+                wholeDoc = true
+                if (docText.isEmpty()) runWholeDocument()
+            }
+        },
+        onSelectPage = { i ->
+            pages.getOrNull(i)?.let { p ->
+                guardEdits {
+                    wholeDoc = false
+                    currentPageId = p.id
+                }
+            }
+        },
+        imageContent = {
+            val img = image
+            if (img == null) {
+                CircularProgressIndicator(color = MaterialTheme.ui.secondaryLabel, strokeWidth = 3.dp)
+            } else {
+                OcrImage(image = img, result = result, selected = selected, onSelect = { selected = it }, primary = primary, secondary = secondary)
+            }
+            androidx.compose.animation.AnimatedVisibility(
+                visible = running,
+                enter = fadeIn(), exit = fadeOut(),
+                modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp),
+            ) {
+                Column(
+                    Modifier
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color.Black.copy(alpha = 0.7f))
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    item(key = "__all__") {
-                        FilterChip(
-                            selected = wholeDoc,
-                            onClick = {
-                                guardEdits {
-                                    wholeDoc = true
-                                    if (docText.isEmpty()) runWholeDocument()
-                                }
-                            },
-                            label = { Text("Todo el documento") },
-                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.LibraryBooks, null, Modifier.size(18.dp)) },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = primary.copy(alpha = 0.18f),
-                                selectedLabelColor = MaterialTheme.colorScheme.onSurface,
-                            ),
-                        )
-                    }
-                    itemsIndexed(pages, key = { _, p -> p.id }) { i, p ->
-                        FilterChip(
-                            selected = !wholeDoc && p.id == currentPageId,
-                            onClick = {
-                                guardEdits {
-                                    wholeDoc = false
-                                    currentPageId = p.id
-                                }
-                            },
-                            label = { Text("Pág. ${i + 1}") },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = primary.copy(alpha = 0.18f),
-                                selectedLabelColor = MaterialTheme.colorScheme.onSurface,
-                            ),
-                        )
-                    }
+                    Text(status, color = Color.White, style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.height(8.dp))
+                    LinearProgressIndicator(Modifier.width(180.dp).clip(RoundedCornerShape(50)), color = Color.White, trackColor = Color.White.copy(alpha = 0.25f))
+                }
+            }
+        },
+        aiRow = if (aiEngineOn || aiStatus != null) {
+            {
+                AiReadRow(
+                    status = aiStatus,
+                    readByAi = readByAi,
+                    enabled = !running && image != null,
+                    accent = primary,
+                    onRead = { guardEdits { readWithAi() } },
+                    onCancel = { container.aiQueue.cancel(docId, currentPageId) },
+                )
+            }
+        } else null,
+        selection = selected,
+        onCopyWord = { w -> clipboard.setText(AnnotatedString(w)); toast("Palabra copiada") },
+        onCopyLine = { l -> clipboard.setText(AnnotatedString(l)); toast("Línea copiada") },
+        onCloseSelection = { selected = null },
+        docProgress = docProgress,
+        status = status,
+        onCancelDoc = { docJob?.cancel() },
+        textLabel = when {
+            wholeDoc -> "Todas las páginas"
+            result?.editedText != null -> "Texto corregido"
+            else -> "Texto completo"
+        },
+        counts = "$words palabras · ${shownText.length} caracteres",
+        text = shownText,
+        onTextChange = { if (!wholeDoc) text = it },
+        placeholder = when {
+            wholeDoc && docProgress != null -> "Reconociendo el documento…"
+            running -> "Reconociendo…"
+            else -> "No se encontró texto. Prueba el filtro «Blanco y negro» o «Texto resaltado» y vuelve a reconocer."
+        },
+        supporting = if (!wholeDoc && result != null) {
+            if (edited) "Cambios sin guardar" else "Puedes corregir el texto: se usará en el PDF buscable y en las exportaciones"
+        } else null,
+        docPages = docPages,
+        menuGroups = menuGroups,
+        onBack = { guardEdits(onBack) },
+        hasText = hasText,
+        onCopy = {
+            clipboard.setText(AnnotatedString(shownText))
+            toast("Texto copiado")
+        },
+        onShare = { shareText() },
+        showSave = !wholeDoc,
+        saveEnabled = edited,
+        onSave = { saveEdited() },
+    ) {
+        val ep = exportProgress
+        ProgressHud(
+            visible = ep != null,
+            message = ep?.second ?: "",
+            progress = ep?.first,
+            onCancel = { exportJob?.cancel() },
+            modifier = Modifier.fillMaxSize(),
+        )
+    }
+
+    pendingAction?.let { action ->
+        IosAlert(
+            title = "¿Guardar el texto corregido?",
+            message = "Has corregido el texto de esta página. Si no lo guardas, se perderán los cambios.",
+            onDismiss = { pendingAction = null },
+            actions = listOf(
+                AlertAction("Guardar", bold = true) { saveEdited(then = action) },
+                AlertAction("Descartar", destructive = true) {
+                    text = result?.displayText.orEmpty()
+                    action()
+                },
+                AlertAction("Seguir editando") { },
+            ),
+        )
+    }
+
+    if (confirmRecognize) {
+        IosAlert(
+            title = "¿Volver a reconocer?",
+            message = "Se descartarán tus correcciones de esta página y se reconocerá el texto de nuevo.",
+            onDismiss = { confirmRecognize = false },
+            actions = listOf(
+                AlertAction("Cancelar") { },
+                AlertAction("Reconocer", bold = true) { recognize(currentPageId) },
+            ),
+        )
+    }
+
+    if (askPdfAction) {
+        IosAlert(
+            title = "Exportar PDF con texto",
+            message = "PDF buscable de todo el documento con páginas del texto reconocido" +
+                (if (pages.size > 1) " tras cada página." else ".") + " Se usarán tus correcciones.",
+            onDismiss = { askPdfAction = false },
+            actions = listOf(
+                AlertAction("Guardar en Descargas", bold = true) { withStorage { exportPdfWithText(PdfAction.SAVE) } },
+                AlertAction("Compartir") { exportPdfWithText(PdfAction.SHARE) },
+                AlertAction("Cancelar") { },
+            ),
+        )
+    }
+}
+
+/**
+ * Texto reconocido SIN estado: cabecera grande con ••• (volver a reconocer, leer con IA, .txt, PDF con texto),
+ * selector Todo · 1 · 2…, imagen con las líneas, lectura con IA, selección, texto editable y abajo
+ * Copiar · Compartir · Guardar.
+ */
+@Composable
+internal fun OcrContent(
+    docTitle: String,
+    wholeDoc: Boolean,
+    pageCount: Int,
+    currentPageIndex: Int,
+    onSelectAll: () -> Unit,
+    onSelectPage: (Int) -> Unit,
+    imageContent: @Composable BoxScope.() -> Unit,
+    aiRow: (@Composable () -> Unit)?,
+    selection: Selection?,
+    onCopyWord: (String) -> Unit,
+    onCopyLine: (String) -> Unit,
+    onCloseSelection: () -> Unit,
+    docProgress: Float?,
+    status: String,
+    onCancelDoc: () -> Unit,
+    textLabel: String,
+    counts: String,
+    text: String,
+    onTextChange: (String) -> Unit,
+    placeholder: String,
+    supporting: String?,
+    docPages: List<String>,
+    menuGroups: List<List<MoreMenuItem>>,
+    onBack: () -> Unit,
+    hasText: Boolean,
+    onCopy: () -> Unit,
+    onShare: () -> Unit,
+    showSave: Boolean,
+    saveEnabled: Boolean,
+    onSave: () -> Unit,
+    overlays: @Composable BoxScope.() -> Unit = {},
+) {
+    val ui = MaterialTheme.ui
+    var menu by remember { mutableStateOf(false) }
+    Box(Modifier.fillMaxSize().background(ui.groupedBackground)) {
+        Column(Modifier.fillMaxSize().statusBarsPadding().imePadding()) {
+            LargeTitleHeader(
+                title = if (wholeDoc) "Texto del documento" else "Texto reconocido",
+                backLabel = "Documento",
+                onBack = onBack,
+                subtitle = docTitle,
+                titleStyle = MaterialTheme.typography.headlineLarge,
+            ) {
+                Box {
+                    IconCircleButton(AppIcons.More, "Más opciones del texto", { menu = true }, size = 36.dp, iconSize = 18.dp)
+                    MoreMenu(expanded = menu, onDismissRequest = { menu = false }, groups = menuGroups, width = 260.dp)
+                }
+            }
+
+            // ------------------------------------------------ selector Todo · página
+            if (pageCount > 1) {
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 20.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                ) {
+                    item(key = "__all__") { PagePill("Todo el documento", wholeDoc, onSelectAll) }
+                    items(pageCount, key = { it }) { i -> PagePill("Pág. ${i + 1}", !wholeDoc && i == currentPageIndex) { onSelectPage(i) } }
                 }
             }
 
@@ -524,158 +718,86 @@ fun OcrScreen(
                 // ------------------------------------------------ imagen con cajas de líneas / palabras
                 Box(
                     Modifier
+                        .padding(top = 12.dp)
                         .weight(0.46f)
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp)
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(MaterialTheme.colorScheme.surfaceContainerLowest),
+                        .padding(horizontal = 20.dp)
+                        .clip(GroupShape)
+                        .background(ui.card),
                     contentAlignment = Alignment.Center,
-                ) {
-                    val img = image
-                    if (img == null) {
-                        CircularProgressIndicator(color = primary)
-                    } else {
-                        OcrImage(
-                            image = img,
-                            result = result,
-                            selected = selected,
-                            onSelect = { selected = it },
-                            primary = primary,
-                            secondary = secondary,
-                        )
-                    }
-                    androidx.compose.animation.AnimatedVisibility(
-                        visible = running,
-                        enter = fadeIn(), exit = fadeOut(),
-                        modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp),
-                    ) {
-                        Column(
-                            Modifier
-                                .clip(RoundedCornerShape(16.dp))
-                                .background(Color.Black.copy(alpha = 0.7f))
-                                .padding(horizontal = 16.dp, vertical = 10.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                        ) {
-                            Text(status, color = Color.White, style = MaterialTheme.typography.bodyMedium)
-                            Spacer(Modifier.height(8.dp))
-                            LinearProgressIndicator(Modifier.width(180.dp).clip(RoundedCornerShape(50)), color = secondary)
-                        }
-                    }
-                }
-
-                // ---- Lectura con IA: progreso / en cola / volver a leer
-                if (aiEngineOn || aiStatus != null) {
-                    AiReadRow(
-                        status = aiStatus,
-                        readByAi = readByAi,
-                        enabled = !running && image != null,
-                        accent = primary,
-                        onRead = { guardEdits { readWithAi() } },
-                        onCancel = { container.aiQueue.cancel(docId, currentPageId) },
-                    )
-                }
-
+                    content = imageContent,
+                )
+                aiRow?.invoke()
                 // Palabra / línea seleccionada
                 AnimatedVisibility(
-                    visible = selected != null,
+                    visible = selection != null,
                     enter = slideInVertically { -it / 2 } + fadeIn(),
                     exit = slideOutVertically { -it / 2 } + fadeOut(),
                 ) {
-                    val sel = selected
+                    val sel = selection
                     Row(
                         Modifier
-                            .padding(start = 12.dp, end = 12.dp, top = 10.dp)
+                            .padding(start = 20.dp, end = 20.dp, top = 10.dp)
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(Brush.horizontalGradient(listOf(primary.copy(alpha = 0.18f), secondary.copy(alpha = 0.18f))))
-                            .padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+                            .clip(GroupShape)
+                            .background(ui.card)
+                            .padding(start = 14.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Column(Modifier.weight(1f)) {
                             sel?.word?.let {
-                                Text(it.text, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(it.text, style = MaterialTheme.typography.titleSmall, color = ui.label, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
-                            Text(
-                                sel?.line?.text ?: "",
-                                style = MaterialTheme.typography.bodySmall,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                            Text(sel?.line?.text ?: "", style = MaterialTheme.typography.bodySmall, color = ui.secondaryLabel, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         }
-                        sel?.word?.let { w ->
-                            TextButton(onClick = { clipboard.setText(AnnotatedString(w.text)); toast("Palabra copiada") }) {
-                                Text("Palabra", color = primary)
-                            }
-                        }
-                        IconButton(onClick = {
-                            sel?.let { clipboard.setText(AnnotatedString(it.line.text)); toast("Línea copiada") }
-                        }) { Icon(Icons.Filled.ContentCopy, "Copiar línea", tint = primary) }
-                        IconButton(onClick = { selected = null }) { Icon(Icons.Filled.Close, "Cerrar") }
+                        sel?.word?.let { w -> SmallTextButton("Palabra") { onCopyWord(w.text) } }
+                        IconCircleButton(AppIcons.Copy, "Copiar línea", { sel?.let { onCopyLine(it.line.text) } }, size = 36.dp, iconSize = 18.dp, containerColor = Color.Transparent, contentColor = ui.accent, elevation = 0.dp)
+                        IconCircleButton(AppIcons.Close, "Cerrar", onCloseSelection, size = 36.dp, iconSize = 16.dp, containerColor = Color.Transparent, contentColor = ui.secondaryLabel, elevation = 0.dp)
                     }
                 }
             } else {
                 // ------------------------------------------------ progreso del documento completo
                 AnimatedVisibility(visible = docProgress != null) {
-                    Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 6.dp)) {
-                        Text(status, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Spacer(Modifier.height(8.dp))
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(status, style = MaterialTheme.typography.bodyMedium, color = ui.secondaryLabel, modifier = Modifier.weight(1f))
+                            SmallTextButton("Cancelar", onCancelDoc)
+                        }
                         LinearProgressIndicator(
                             progress = { docProgress ?: 0f },
-                            modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(50)),
-                            color = secondary,
+                            modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(50)),
+                            color = ui.accent,
+                            trackColor = ui.fill,
+                            drawStopIndicator = {},
                         )
-                        TextButton(onClick = { docJob?.cancel() }, modifier = Modifier.align(Alignment.End)) { Text("Cancelar") }
                     }
                 }
             }
 
             // ------------------------------------------------ texto (editable por página)
-            // Contador fuera del hilo principal y con espera mientras se escribe (sin Regex ni listas intermedias).
-            // Falso positivo de lint: el valor sí se asigna (tras withContext).
-            @SuppressLint("ProduceStateDoesNotAssignValue")
-            val words by produceState(initialValue = 0, shownText) {
-                if (!wholeDoc) delay(250)
-                val n = withContext(Dispatchers.Default) { countWords(shownText) }
-                value = n
-            }
             Row(
-                Modifier.fillMaxWidth().padding(start = 18.dp, end = 18.dp, top = 12.dp, bottom = 4.dp),
+                Modifier.fillMaxWidth().padding(start = 36.dp, end = 36.dp, top = 16.dp, bottom = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(Icons.Filled.TextFields, null, tint = primary, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    when {
-                        wholeDoc -> "Todas las páginas"
-                        result?.editedText != null -> "Texto corregido"
-                        else -> "Texto completo"
-                    },
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.weight(1f),
-                )
-                Text(
-                    "$words palabras · ${shownText.length} caracteres",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                Text(textLabel.uppercase(), style = MaterialTheme.typography.bodySmall, color = ui.secondaryLabel, modifier = Modifier.weight(1f))
+                Text(counts, style = MaterialTheme.typography.bodySmall, color = ui.secondaryLabel)
             }
-            if (wholeDoc) {
-                // Documento completo: una entrada por página en una lista virtualizada (un único TextField con
-                // 100 mil caracteres se maqueta y pinta entero en el hilo principal: jank o casi ANR en gama baja).
-                Box(
-                    Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp)
-                        .clip(RoundedCornerShape(18.dp))
-                        .background(MaterialTheme.colorScheme.surfaceContainer),
-                ) {
+            Box(
+                Modifier
+                    .weight(if (wholeDoc) 1f else 0.54f)
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp)
+                    .clip(GroupShape)
+                    .background(ui.card),
+            ) {
+                if (wholeDoc) {
+                    // Documento completo: una entrada por página en una lista virtualizada (un único TextField con
+                    // 100 mil caracteres se maqueta y pinta entero en el hilo principal: jank o casi ANR en gama baja).
                     if (docPages.isEmpty()) {
                         Text(
                             if (docProgress != null) "Reconociendo el documento…" else "No se encontró texto.",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = ui.secondaryLabel,
                             modifier = Modifier.padding(16.dp),
                         )
                     } else {
@@ -686,143 +808,86 @@ fun OcrScreen(
                         ) {
                             itemsIndexed(docPages, contentType = { _, _ -> "page" }) { _, pageText ->
                                 SelectionContainer {
-                                    Text(pageText, style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 21.sp))
+                                    Text(pageText, style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 21.sp), color = ui.label)
                                 }
                             }
                         }
                     }
-                }
-            } else OutlinedTextField(
-                value = shownText,
-                onValueChange = { if (!wholeDoc) text = it },
-                readOnly = wholeDoc,
-                placeholder = {
-                    Text(
-                        when {
-                            wholeDoc && docProgress != null -> "Reconociendo el documento…"
-                            running -> "Reconociendo…"
-                            else -> "No se encontró texto. Prueba el filtro «Blanco y negro» o «Texto resaltado» y vuelve a reconocer."
+                } else {
+                    val style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 21.sp, color = ui.label)
+                    BasicTextField(
+                        value = text,
+                        onValueChange = onTextChange,
+                        textStyle = style,
+                        cursorBrush = SolidColor(ui.accent),
+                        modifier = Modifier.fillMaxSize(),
+                        decorationBox = { inner ->
+                            Box(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(14.dp)) {
+                                if (text.isEmpty()) Text(placeholder, style = style, color = ui.tertiaryLabel)
+                                inner()
+                            }
                         },
                     )
-                },
-                supportingText = if (!wholeDoc && result != null) {
-                    { Text(if (edited) "Cambios sin guardar" else "Puedes corregir el texto: se usará en el PDF buscable y en las exportaciones") }
-                } else null,
-                textStyle = MaterialTheme.typography.bodyMedium.copy(lineHeight = 21.sp),
-                shape = RoundedCornerShape(18.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = primary,
-                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainer,
-                    focusedContainerColor = MaterialTheme.colorScheme.surfaceContainer,
-                ),
-                modifier = Modifier
-                    .weight(if (wholeDoc) 1f else 0.54f)
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp),
-            )
+                }
+            }
+            if (supporting != null) {
+                Text(
+                    supporting,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (saveEnabled) ui.orange else ui.secondaryLabel,
+                    modifier = Modifier.padding(start = 36.dp, end = 36.dp, top = 6.dp),
+                )
+            }
 
-            // ------------------------------------------------ acciones
+            // ------------------------------------------------ Copiar · Compartir · Guardar
             Row(
                 Modifier
                     .fillMaxWidth()
                     .navigationBarsPadding()
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    .padding(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                val hasText = shownText.isNotBlank()
-                OcrAction(Icons.Filled.ContentCopy, "Copiar", hasText, Modifier.weight(1f)) {
-                    clipboard.setText(AnnotatedString(shownText))
-                    toast("Texto copiado")
-                }
-                OcrAction(Icons.Filled.Share, "Compartir", hasText, Modifier.weight(1f)) { shareText() }
-                OcrAction(Icons.AutoMirrored.Filled.TextSnippet, "Guardar .txt", hasText, Modifier.weight(1f)) { withStorage { saveTxt() } }
-                OcrAction(Icons.Filled.PictureAsPdf, "PDF + texto", pages.isNotEmpty() && exportJob == null, Modifier.weight(1f)) {
-                    guardEdits { askPdfAction = true }
-                }
-                if (!wholeDoc) {
-                    if (edited) {
-                        GradientButton("Guardar", onClick = { saveEdited() }, icon = Icons.Filled.Save, height = 52.dp, modifier = Modifier.weight(1.25f))
-                    } else {
-                        SoftButton("Guardar", onClick = {}, icon = Icons.Filled.Save, enabled = false, height = 52.dp, modifier = Modifier.weight(1.25f))
-                    }
+                PrimaryCapsuleButton("Copiar", onClick = onCopy, icon = AppIcons.Copy, enabled = hasText, tonal = true, height = 48.dp, modifier = Modifier.weight(1f))
+                PrimaryCapsuleButton("Compartir", onClick = onShare, icon = AppIcons.Share, enabled = hasText, tonal = true, height = 48.dp, modifier = Modifier.weight(1f))
+                if (showSave) {
+                    PrimaryCapsuleButton("Guardar", onClick = onSave, enabled = saveEnabled, height = 48.dp, modifier = Modifier.weight(1f))
                 }
             }
         }
-
-        val ep = exportProgress
-        LoadingOverlay(
-            visible = ep != null,
-            message = ep?.second ?: "",
-            progress = ep?.first,
-            onCancel = { exportJob?.cancel() },
-            modifier = Modifier.fillMaxSize(),
-        )
+        overlays()
     }
+}
 
-    pendingAction?.let { action ->
-        AlertDialog(
-            onDismissRequest = { pendingAction = null },
-            title = { Text("¿Guardar el texto corregido?") },
-            text = { Text("Has corregido el texto de esta página. Si no lo guardas, se perderán los cambios.") },
-            confirmButton = {
-                TextButton(onClick = { pendingAction = null; saveEdited(then = action) }) { Text("Guardar") }
-            },
-            dismissButton = {
-                Row {
-                    TextButton(onClick = {
-                        pendingAction = null
-                        text = result?.displayText.orEmpty()
-                        action()
-                    }) { Text("Descartar", color = MaterialTheme.colorScheme.error) }
-                    TextButton(onClick = { pendingAction = null }) { Text("Seguir editando") }
-                }
-            },
-            shape = MaterialTheme.shapes.extraLarge,
-        )
-    }
+@Composable
+private fun PagePill(label: String, selected: Boolean, onClick: () -> Unit) {
+    val ui = MaterialTheme.ui
+    Text(
+        label,
+        color = if (selected) ui.groupedBackground else ui.label,
+        fontSize = 14.sp,
+        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+        style = MaterialTheme.typography.labelLarge,
+        modifier = Modifier
+            .clip(PillShape)
+            .background(if (selected) ui.label else ui.fill)
+            .selectable(selected = selected, role = Role.Tab, onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+    )
+}
 
-    if (confirmRecognize) {
-        AlertDialog(
-            onDismissRequest = { confirmRecognize = false },
-            title = { Text("¿Volver a reconocer?") },
-            text = { Text("Se descartarán tus correcciones de esta página y se reconocerá el texto de nuevo.") },
-            confirmButton = {
-                TextButton(onClick = { confirmRecognize = false; recognize(currentPageId) }) { Text("Reconocer") }
-            },
-            dismissButton = { TextButton(onClick = { confirmRecognize = false }) { Text("Cancelar") } },
-            shape = MaterialTheme.shapes.extraLarge,
-        )
-    }
-
-    if (askPdfAction) {
-        AlertDialog(
-            onDismissRequest = { askPdfAction = false },
-            icon = { Icon(Icons.Filled.PictureAsPdf, null, tint = primary) },
-            title = { Text("Exportar PDF con texto") },
-            text = {
-                Text(
-                    "PDF buscable de todo el documento con páginas del texto reconocido" +
-                        (if (pages.size > 1) " tras cada página." else ".") + " Se usarán tus correcciones.",
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = { askPdfAction = false; withStorage { exportPdfWithText(PdfAction.SAVE) } }) {
-                    Icon(Icons.Filled.Download, null, Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Guardar")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { askPdfAction = false; exportPdfWithText(PdfAction.SHARE) }) {
-                    Icon(Icons.Filled.Share, null, Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Compartir")
-                }
-            },
-            shape = MaterialTheme.shapes.extraLarge,
-        )
-    }
+@Composable
+private fun SmallTextButton(label: String, onClick: () -> Unit) {
+    Text(
+        label,
+        color = MaterialTheme.ui.accent,
+        fontSize = 15.sp,
+        style = MaterialTheme.typography.bodyMedium,
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+    )
 }
 
 /**
@@ -925,23 +990,6 @@ private fun OcrImage(
     }
 }
 
-@Composable
-private fun OcrAction(icon: ImageVector, label: String, enabled: Boolean, modifier: Modifier, onClick: () -> Unit) {
-    Column(
-        modifier
-            .height(52.dp)
-            .clip(RoundedCornerShape(16.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-            .clickable(enabled = enabled, onClick = onClick)
-            .padding(vertical = 6.dp, horizontal = 2.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
-    ) {
-        val fg = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-        Icon(icon, null, tint = fg, modifier = Modifier.size(18.dp))
-        Text(label, color = fg, fontSize = 10.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-    }
-}
 
 private fun fit(container: IntSize, w: Int, h: Int, pad: Float): Rect {
     if (container.width <= 0 || container.height <= 0 || w <= 0 || h <= 0) return Rect.Zero
@@ -963,6 +1011,7 @@ private fun countWords(text: String): Int {
 }
 
 
+
 /** Fila de la lectura con IA: "Leyendo con IA… 40 %" (cancelable), "En cola" o el botón "Volver a leer con IA". */
 @Composable
 private fun AiReadRow(
@@ -973,42 +1022,43 @@ private fun AiReadRow(
     onRead: () -> Unit,
     onCancel: () -> Unit,
 ) {
+    val ui = MaterialTheme.ui
     Row(
         Modifier
-            .padding(start = 12.dp, end = 12.dp, top = 8.dp)
+            .padding(start = 20.dp, end = 20.dp, top = 10.dp)
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(accent.copy(alpha = 0.10f))
-            .padding(start = 12.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
+            .clip(GroupShape)
+            .background(ui.card)
+            .padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(Icons.Filled.AutoAwesome, null, tint = accent, modifier = Modifier.size(18.dp))
-        Spacer(Modifier.width(8.dp))
+        IconTile(AppIcons.Sparkles, accent)
+        Spacer(Modifier.width(10.dp))
         when (status) {
             is AiRecognitionQueue.PageStatus.Running -> {
                 Column(Modifier.weight(1f).padding(vertical = 6.dp)) {
-                    Text("Leyendo con IA… ${status.percent} % · ${status.label}", style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Spacer(Modifier.height(4.dp))
-                    LinearProgressIndicator(progress = { status.fraction }, modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(50)), color = accent)
+                    Text("Leyendo con IA… ${status.percent} % · ${status.label}", style = MaterialTheme.typography.bodySmall, color = ui.label, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(5.dp))
+                    LinearProgressIndicator(progress = { status.fraction }, modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(50)), color = accent, trackColor = ui.fill, drawStopIndicator = {})
                 }
-                TextButton(onClick = onCancel) { Text("Cancelar") }
+                SmallTextButton("Cancelar", onCancel)
             }
             AiRecognitionQueue.PageStatus.Queued -> {
-                Text("En cola para leer con IA", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
-                TextButton(onClick = onCancel) { Text("Cancelar") }
+                Text("En cola para leer con IA", style = MaterialTheme.typography.bodySmall, color = ui.label, modifier = Modifier.weight(1f))
+                SmallTextButton("Cancelar", onCancel)
             }
             AiRecognitionQueue.PageStatus.WaitingNetwork -> {
-                Text("Esperando conexión para leer con IA en la nube", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
-                TextButton(onClick = onCancel) { Text("Cancelar") }
+                Text("Esperando conexión para leer con IA en la nube", style = MaterialTheme.typography.bodySmall, color = ui.label, modifier = Modifier.weight(1f))
+                SmallTextButton("Cancelar", onCancel)
             }
             null -> {
                 Text(
                     if (readByAi) "Texto leído con IA" else "Texto del OCR básico",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = ui.secondaryLabel,
                     modifier = Modifier.weight(1f),
                 )
-                TextButton(onClick = onRead, enabled = enabled) { Text(if (readByAi) "Volver a leer con IA" else "Leer con IA") }
+                if (enabled) SmallTextButton(if (readByAi) "Volver a leer" else "Leer con IA", onRead)
             }
         }
     }
