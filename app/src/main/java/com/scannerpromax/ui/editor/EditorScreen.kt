@@ -113,21 +113,35 @@ import com.scannerpromax.domain.Adjustments
 import com.scannerpromax.domain.EraseMode
 import com.scannerpromax.domain.FilterType
 import com.scannerpromax.domain.Quad
-import com.scannerpromax.ui.components.AppTopBar
-import com.scannerpromax.ui.components.GradientButton
-import com.scannerpromax.ui.components.LoadingOverlay
 import com.scannerpromax.ui.theme.LocalPerf
-import com.scannerpromax.ui.theme.brand
+import com.scannerpromax.ui.components.AlertAction
+import com.scannerpromax.ui.components.AppIcons
+import com.scannerpromax.ui.components.InsetGroup
+import com.scannerpromax.ui.components.IosAlert
+import com.scannerpromax.ui.components.NavigationRow
+import com.scannerpromax.ui.components.ProgressHud
+import com.scannerpromax.ui.components.SegmentedControl
+import com.scannerpromax.ui.components.SeparatorInsetPlain
+import com.scannerpromax.ui.components.ToggleRow
+import com.scannerpromax.ui.theme.ForcedDarkTheme
+import com.scannerpromax.ui.theme.PillShape
+import com.scannerpromax.ui.theme.ui
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.semantics.contentDescription
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 private enum class EditorTool(val label: String, val icon: ImageVector) {
-    CROP("Recortar", Icons.Filled.Crop),
-    FILTERS("Filtros", Icons.Filled.AutoAwesome),
-    CLEAN("Limpiar", Icons.Filled.CleaningServices),
-    ROTATE("Rotar", Icons.AutoMirrored.Filled.RotateRight),
+    CROP("Recortar", AppIcons.Crop),
+    FILTERS("Filtros", AppIcons.Filters),
+    CLEAN("Limpiar", AppIcons.Clean),
+    ROTATE("Rotar", AppIcons.Rotate),
 }
 
 /** Qué ajustes copiar al resto de páginas con "Aplicar a todas". */
@@ -172,11 +186,10 @@ fun EditorScreen(
     var bulkMessage by remember { mutableStateOf("") }
     var bulkJob by remember { mutableStateOf<Job?>(null) }
 
-    val brand = MaterialTheme.brand
     val perf = LocalPerf.current
-    val primary = brand.gradientStart
-    val secondary = brand.gradientEnd
-    val errorColor = MaterialTheme.colorScheme.error
+    val primary = MaterialTheme.ui.accent
+    val secondary = MaterialTheme.ui.accent
+    val errorColor = MaterialTheme.ui.red
 
     fun toast(msg: String) = Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
 
@@ -323,34 +336,33 @@ fun EditorScreen(
     val canApplyAll = pages.size > 1
     val pageLabel = if (pages.size > 1 && pageIndex >= 0) "Página ${pageIndex + 1} de ${pages.size}" else null
 
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+    ForcedDarkTheme {
+    Box(Modifier.fillMaxSize().background(EditorBackground)) {
         Column(Modifier.fillMaxSize()) {
-            // ------------------------------------------------ barra superior
-            AppTopBar(
-                title = if (erasing) "Borrado manual" else "Editar página",
-                subtitle = if (erasing) "1 dedo: borrar · 2 dedos: zoom" else listOfNotNull(tool.label, pageLabel).joinToString(" · "),
-                onBack = { requestExit() },
-                actions = {
-                    GradientButton(
-                        text = "Guardar",
-                        onClick = { saveAndExit() },
-                        icon = Icons.Filled.Check,
-                        enabled = !session.loading && quadValid && bulkJob == null,
-                        loading = session.saving,
-                        height = 40.dp,
-                        modifier = Modifier.padding(end = 8.dp),
-                    )
+            // ------------------------------------------------ barra superior: Cancelar | ‹ Página X de N › | Listo
+            EditorTopBar(
+                title = when {
+                    erasing -> "Borrado manual"
+                    pageLabel != null -> pageLabel
+                    else -> "Editar página"
                 },
+                canPrev = !erasing && !session.loading && !session.saving && bulkJob == null && pageIndex > 0,
+                canNext = !erasing && !session.loading && !session.saving && bulkJob == null && pageIndex >= 0 && pageIndex < pages.size - 1,
+                showPager = pages.size > 1 && pageIndex >= 0 && !erasing,
+                onPrev = { goToPage(pageIndex - 1) },
+                onNext = { goToPage(pageIndex + 1) },
+                onCancel = { requestExit() },
+                onDone = { saveAndExit() },
+                doneEnabled = !session.loading && quadValid && bulkJob == null,
+                saving = session.saving,
             )
 
-            // ------------------------------------------------ área de imagen
+            // ------------------------------------------------ vista previa centrada
             Box(
                 Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .padding(horizontal = 8.dp)
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(MaterialTheme.colorScheme.surfaceContainerLowest),
+                    .padding(horizontal = 12.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 val src = session.sourceImage
@@ -358,7 +370,7 @@ fun EditorScreen(
                     // Mientras se abre la imagen de trabajo ya se ve el procesado guardado (resultado final, al instante).
                     (session.loading || src == null) && session.preview != null && tool != EditorTool.CROP ->
                         PreviewImage(session, showOriginal = false)
-                    session.loading || src == null -> CircularProgressIndicator(color = primary)
+                    session.loading || src == null -> CircularProgressIndicator(color = Color.White.copy(alpha = 0.7f), strokeWidth = 3.dp)
                     tool == EditorTool.CROP -> CropTool(
                         image = src,
                         quad = session.workingQuad(),
@@ -377,61 +389,32 @@ fun EditorScreen(
                         brushRadius = brushRadius,
                         mode = eraseMode,
                         onStroke = { session.addStroke(it) },
-                        accent = brand.accent,
+                        accent = primary,
                     )
                     else -> PreviewImage(session, showOriginal)
                 }
 
-                // Navegación entre páginas (guarda automáticamente al cambiar)
-                if (pages.size > 1 && pageIndex >= 0 && !erasing && !session.loading) {
-                    PageSwitcher(
-                        index = pageIndex,
-                        count = pages.size,
-                        enabled = !session.saving && bulkJob == null,
-                        onPrev = { goToPage(pageIndex - 1) },
-                        onNext = { goToPage(pageIndex + 1) },
-                        modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
-                    )
-                }
-
                 // Indicador de procesamiento: en su propio ámbito de recomposición (cambia 2 veces por vista previa).
-                ProcessingBadge(session, hidden = tool == EditorTool.CROP, modifier = Modifier.align(Alignment.TopEnd).padding(12.dp))
+                ProcessingBadge(session, hidden = tool == EditorTool.CROP, modifier = Modifier.align(Alignment.TopEnd).padding(8.dp))
+            }
 
-                // Antes / después: mantener pulsado
-                if (!session.loading && tool != EditorTool.CROP && !erasing) {
-                    Row(
-                        Modifier
-                            .align(Alignment.BottomEnd)
-                            .padding(12.dp)
-                            .heightIn(min = 40.dp)
-                            .clip(RoundedCornerShape(50))
-                            .background(if (showOriginal) primary else Color.Black.copy(alpha = 0.6f))
-                            .pointerInput(Unit) {
-                                detectTapGestures(onPress = {
-                                    showOriginal = true
-                                    tryAwaitRelease()
-                                    showOriginal = false
-                                })
-                            }
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(Icons.Filled.Compare, null, tint = Color.White, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text(if (showOriginal) "Original" else "Mantén para ver el original", color = Color.White, fontSize = 12.sp)
-                    }
+            // Antes / después: mantener pulsado. En borrado manual, la ayuda de gestos.
+            Box(Modifier.fillMaxWidth().height(34.dp), contentAlignment = Alignment.Center) {
+                when {
+                    erasing -> Text("1 dedo: borrar · 2 dedos: zoom", color = Color.White.copy(alpha = 0.55f), fontSize = 12.sp, style = MaterialTheme.typography.bodySmall)
+                    !session.loading && tool != EditorTool.CROP -> HoldForOriginal(showOriginal) { showOriginal = it }
                 }
             }
 
-            // ------------------------------------------------ panel de herramienta
+            // ------------------------------------------------ panel de la herramienta (encima de las herramientas)
             // Altura mínima común + animateContentSize: la imagen no salta al cambiar de herramienta.
             Box(
                 Modifier
                     .fillMaxWidth()
-                    .padding(top = 8.dp)
-                    .heightIn(min = 150.dp)
+                    .padding(top = 4.dp)
+                    .heightIn(min = 132.dp)
                     .then(if (perf.reduceMotion) Modifier else Modifier.animateContentSize(tween(perf.duration(220)))),
-                contentAlignment = Alignment.TopCenter,
+                contentAlignment = Alignment.Center,
             ) {
                 AnimatedContent(
                     targetState = if (erasing) null else tool,
@@ -485,16 +468,13 @@ fun EditorScreen(
                 }
             }
 
-            // ------------------------------------------------ pestañas
+            // ------------------------------------------------ 4 herramientas
             Row(
                 Modifier
                     .fillMaxWidth()
                     .navigationBarsPadding()
-                    .padding(horizontal = 12.dp, vertical = 8.dp)
-                    .clip(RoundedCornerShape(22.dp))
-                    .background(MaterialTheme.colorScheme.surfaceContainer)
-                    .padding(6.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly,
+                    .padding(start = 24.dp, end = 24.dp, top = 10.dp, bottom = 12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 EditorTool.entries.forEach { t ->
                     ToolTab(t, selected = t == tool && !erasing, enabled = !session.loading) { selectTool(t) }
@@ -502,12 +482,12 @@ fun EditorScreen(
             }
         }
 
-        LoadingOverlay(
+        ProgressHud(
             visible = session.saving && bulkProgress == null,
             message = if (session.previewFinal && session.previewEdits == session.edits) "Guardando…" else "Procesando la página en alta calidad…",
             modifier = Modifier.fillMaxSize(),
         )
-        LoadingOverlay(
+        ProgressHud(
             visible = bulkProgress != null,
             message = bulkMessage,
             progress = bulkProgress,
@@ -517,22 +497,126 @@ fun EditorScreen(
     }
 
     if (confirmExit) {
-        AlertDialog(
-            onDismissRequest = { confirmExit = false },
-            title = { Text("¿Guardar los cambios?") },
-            text = { Text("Has editado esta página. ¿Quieres guardar los cambios antes de salir?") },
-            confirmButton = { TextButton(onClick = { confirmExit = false; saveAndExit() }) { Text("Guardar") } },
-            dismissButton = {
-                Row {
-                    TextButton(onClick = { confirmExit = false; onBack() }) {
-                        Text("Descartar", color = MaterialTheme.colorScheme.error)
-                    }
-                    TextButton(onClick = { confirmExit = false }) { Text("Seguir editando") }
-                }
-            },
-            shape = MaterialTheme.shapes.extraLarge,
+        IosAlert(
+            title = "¿Guardar los cambios?",
+            message = "Has editado esta página. ¿Quieres guardar los cambios antes de salir?",
+            onDismiss = { confirmExit = false },
+            actions = listOf(
+                AlertAction("Guardar", bold = true) { saveAndExit() },
+                AlertAction("Descartar", destructive = true) { onBack() },
+                AlertAction("Seguir editando") { },
+            ),
         )
     }
+    }
+}
+
+/** Fondo del editor (casi negro, como Fotos). */
+internal val EditorBackground = Color(0xFF0A0A0A)
+private val PanelFill = Color.White.copy(alpha = 0.10f)
+private val Dim = Color.White.copy(alpha = 0.6f)
+
+/** Barra superior del editor: "Cancelar" · "‹ Página X de N ›" · cápsula "Listo". */
+@Composable
+internal fun EditorTopBar(
+    title: String,
+    canPrev: Boolean,
+    canNext: Boolean,
+    showPager: Boolean,
+    onPrev: () -> Unit,
+    onNext: () -> Unit,
+    onCancel: () -> Unit,
+    onDone: () -> Unit,
+    doneEnabled: Boolean,
+    saving: Boolean,
+) {
+    val ui = MaterialTheme.ui
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .statusBarsPadding()
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+    ) {
+        Text(
+            "Cancelar",
+            color = Color.White,
+            fontSize = 17.sp,
+            style = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier
+                .align(Alignment.CenterStart)
+                .clip(RoundedCornerShape(8.dp))
+                .clickable(role = Role.Button, onClick = onCancel)
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+        )
+        Row(Modifier.align(Alignment.Center), verticalAlignment = Alignment.CenterVertically) {
+            if (showPager) PagerArrow(AppIcons.Back, "Página anterior", canPrev, onPrev)
+            Text(
+                title,
+                color = Color.White.copy(alpha = 0.85f),
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.titleSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (showPager) PagerArrow(AppIcons.Chevron, "Página siguiente", canNext, onNext)
+        }
+        Row(
+            Modifier
+                .align(Alignment.CenterEnd)
+                .height(34.dp)
+                .clip(PillShape)
+                .background(ui.accent)
+                .clickable(enabled = doneEnabled && !saving, role = Role.Button, onClick = onDone)
+                .graphicsLayer { alpha = if (doneEnabled) 1f else 0.45f }
+                .padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (saving) {
+                CircularProgressIndicator(Modifier.size(14.dp), color = Color.White, strokeWidth = 2.dp)
+                Spacer(Modifier.width(6.dp))
+            }
+            Text("Listo", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleSmall)
+        }
+    }
+}
+
+@Composable
+private fun PagerArrow(icon: ImageVector, label: String, enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .size(36.dp)
+            .clip(CircleShape)
+            .clickable(enabled = enabled, role = Role.Button, onClickLabel = label, onClick = onClick)
+            .semantics { contentDescription = label },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon, null, tint = Color.White.copy(alpha = if (enabled) 0.85f else 0.25f), modifier = Modifier.size(16.dp))
+    }
+}
+
+/** "Mantén pulsado para ver el original": mientras se pulsa se muestra la foto sin procesar. */
+@Composable
+internal fun HoldForOriginal(showing: Boolean, onShow: (Boolean) -> Unit) {
+    Text(
+        if (showing) "Original" else "Mantén pulsado para ver el original",
+        color = if (showing) Color.White else Color.White.copy(alpha = 0.55f),
+        fontSize = 12.sp,
+        fontWeight = if (showing) FontWeight.SemiBold else FontWeight.Normal,
+        style = MaterialTheme.typography.bodySmall,
+        modifier = Modifier
+            .clip(PillShape)
+            .background(if (showing) PanelFill else Color.Transparent)
+            .pointerInput(Unit) {
+                detectTapGestures(onPress = {
+                    onShow(true)
+                    tryAwaitRelease()
+                    onShow(false)
+                })
+            }
+            .semantics { contentDescription = "Mantén pulsado para ver el original" }
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+    )
 }
 
 /**
@@ -619,221 +703,124 @@ private fun ProcessingBadge(session: EditorSession, hidden: Boolean, modifier: M
     }
 }
 
-/** Píldora "‹ 2 / 5 ›" para cambiar de página dentro del editor. */
-@Composable
-private fun PageSwitcher(index: Int, count: Int, enabled: Boolean, onPrev: () -> Unit, onNext: () -> Unit, modifier: Modifier = Modifier) {
-    Row(
-        modifier.clip(RoundedCornerShape(50)).background(Color.Black.copy(alpha = 0.6f)),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        val prevOk = enabled && index > 0
-        val nextOk = enabled && index < count - 1
-        Box(
-            Modifier.size(44.dp).clickable(enabled = prevOk, role = Role.Button, onClickLabel = "Página anterior", onClick = onPrev),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, "Página anterior", tint = Color.White.copy(alpha = if (prevOk) 1f else 0.35f))
-        }
-        Text("${index + 1} / $count", color = Color.White, style = MaterialTheme.typography.labelLarge)
-        Box(
-            Modifier.size(44.dp).clickable(enabled = nextOk, role = Role.Button, onClickLabel = "Página siguiente", onClick = onNext),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, "Página siguiente", tint = Color.White.copy(alpha = if (nextOk) 1f else 0.35f))
-        }
-    }
-}
-
-/** Botón compacto tipo chip para acciones secundarias de los paneles. */
-@Composable
-private fun ChipAction(icon: ImageVector, label: String, onClick: () -> Unit, modifier: Modifier = Modifier, selected: Boolean = false) {
-    val brand = MaterialTheme.brand
-    Row(
-        modifier
-            .heightIn(min = 40.dp)
-            .clip(RoundedCornerShape(50))
-            .background(if (selected) brand.gradientStart.copy(alpha = 0.16f) else MaterialTheme.colorScheme.surfaceContainerHigh)
-            .border(1.dp, if (selected) brand.gradientStart.copy(alpha = 0.5f) else brand.cardBorder, RoundedCornerShape(50))
-            .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(icon, null, tint = brand.gradientStart, modifier = Modifier.size(18.dp))
-        Spacer(Modifier.width(6.dp))
-        Text(label, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-    }
-}
-
 // =================================================================================================
-// Paneles
+// Paneles (oscuros, estilo Fotos)
 // =================================================================================================
 
+/** Herramienta de la barra inferior: icono 24 + etiqueta 11; la activa en blanco, el resto al 60 %. */
 @Composable
 private fun ToolTab(tool: EditorTool, selected: Boolean, enabled: Boolean, onClick: () -> Unit) {
-    val primary = MaterialTheme.brand.gradientStart
-    val secondary = MaterialTheme.brand.gradientEnd
-    val fg by animateColorAsState(if (selected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant, label = "tabFg")
+    val fg by animateColorAsState(if (selected) Color.White else Dim, label = "tabFg")
     Column(
         Modifier
-            .clip(RoundedCornerShape(16.dp))
-            .then(if (selected) Modifier.background(MaterialTheme.brand.gradient) else Modifier)
-            .clickable(enabled = enabled, role = Role.Tab, onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 8.dp),
+            .width(72.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .selectable(selected = selected, enabled = enabled, role = Role.Tab, onClick = onClick)
+            .graphicsLayer { alpha = if (enabled) 1f else 0.4f }
+            .padding(vertical = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Icon(tool.icon, tool.label, tint = fg, modifier = Modifier.size(22.dp))
-        Spacer(Modifier.height(2.dp))
-        Text(tool.label, color = fg, fontSize = 11.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium)
+        Icon(tool.icon, null, tint = fg, modifier = Modifier.size(24.dp))
+        Spacer(Modifier.height(5.dp))
+        Text(tool.label, color = fg, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.labelSmall)
     }
 }
 
+/** Botón de panel: icono + etiqueta sobre relleno blanco 10 %, radio 14. */
 @Composable
 private fun PanelButton(icon: ImageVector, label: String, modifier: Modifier = Modifier, enabled: Boolean = true, busy: Boolean = false, onClick: () -> Unit) {
     Column(
         modifier
-            .clip(RoundedCornerShape(16.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-            .clickable(enabled = enabled && !busy, onClick = onClick)
-            .padding(vertical = 12.dp, horizontal = 8.dp)
-            .graphicsLayer { alpha = if (enabled) 1f else 0.4f },
+            .clip(RoundedCornerShape(14.dp))
+            .background(PanelFill)
+            .clickable(enabled = enabled && !busy, role = Role.Button, onClick = onClick)
+            .graphicsLayer { alpha = if (enabled) 1f else 0.4f }
+            .padding(vertical = 12.dp, horizontal = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
-            if (busy) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-            else Icon(icon, null, tint = MaterialTheme.brand.gradientStart)
+        Box(Modifier.size(22.dp), contentAlignment = Alignment.Center) {
+            if (busy) CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 2.dp)
+            else Icon(icon, null, tint = Color.White, modifier = Modifier.size(22.dp))
         }
-        Spacer(Modifier.height(4.dp))
-        Text(label, style = MaterialTheme.typography.labelMedium, textAlign = TextAlign.Center, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Spacer(Modifier.height(5.dp))
+        Text(label, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium, style = MaterialTheme.typography.labelMedium, textAlign = TextAlign.Center, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
+}
+
+/** Acción de texto discreta ("Ajustes finos", "Aplicar a todas"). */
+@Composable
+private fun TextAction(label: String, onClick: () -> Unit, highlighted: Boolean = false) {
+    Text(
+        label,
+        color = if (highlighted) Color.White else Color.White.copy(alpha = 0.7f),
+        fontSize = 13.sp,
+        fontWeight = if (highlighted) FontWeight.SemiBold else FontWeight.Medium,
+        style = MaterialTheme.typography.labelMedium,
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 10.dp),
+    )
 }
 
 @Composable
 private fun CropPanel(detecting: Boolean, invalid: Boolean, onAuto: () -> Unit, onFull: () -> Unit, onReset: () -> Unit) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
-        if (invalid) {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 6.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.errorContainer)
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(Icons.Filled.WarningAmber, null, tint = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    "Las esquinas se cruzan: ajústalas o usa Auto-detectar",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onErrorContainer,
-                )
-            }
-        } else {
-            Text(
-                "Arrastra las esquinas o los lados. La lupa te ayuda a ajustar con precisión.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
-            )
-        }
+    val ui = MaterialTheme.ui
+    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            if (invalid) "Las esquinas se cruzan: ajústalas o usa Auto-detectar"
+            else "Arrastra las esquinas o los lados. La lupa te ayuda a ajustar con precisión.",
+            color = if (invalid) ui.red else Color.White.copy(alpha = 0.6f),
+            fontSize = 12.sp,
+            fontWeight = if (invalid) FontWeight.SemiBold else FontWeight.Normal,
+            style = MaterialTheme.typography.bodySmall,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(bottom = 10.dp),
+        )
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            PanelButton(Icons.Filled.AutoAwesome, "Auto-detectar", Modifier.weight(1f), busy = detecting, onClick = onAuto)
-            PanelButton(Icons.Filled.CropFree, "Página completa", Modifier.weight(1f), onClick = onFull)
-            PanelButton(Icons.Filled.Refresh, "Restablecer", Modifier.weight(1f), onClick = onReset)
+            PanelButton(AppIcons.Sparkles, "Auto-detectar", Modifier.weight(1f), busy = detecting, onClick = onAuto)
+            PanelButton(AppIcons.Resolution, "Página completa", Modifier.weight(1f), onClick = onFull)
+            PanelButton(AppIcons.Rotate, "Restablecer", Modifier.weight(1f), onClick = onReset)
         }
     }
 }
 
 @Composable
 private fun FiltersPanel(session: EditorSession, onApplyAll: (() -> Unit)?) {
-    val primary = MaterialTheme.brand.gradientStart
     val edits = session.edits
-    // Solo el filtro (estable entre movimientos de slider): las tarjetas no se recomponen al ajustar.
+    // Solo el filtro (estable entre movimientos de slider): las miniaturas no se recomponen al ajustar.
     // Los filtros antiguos de páginas guardadas se muestran como su equivalente visible.
     val selectedFilter = edits.filter.uiFilter
-    Column(Modifier.fillMaxWidth()) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+        Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
             for (f in FilterType.visible) {
                 val selected = selectedFilter == f
-                val thumb = session.filterThumbs[f]
-                Column(
-                    Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(16.dp))
-                        .clickable(role = Role.RadioButton) { if (edits.filter != f) session.setFilter(f) }
-                        .semantics { this.selected = selected },
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Box(
-                        Modifier
-                            .fillMaxWidth()
-                            .height(112.dp)
-                            .clip(RoundedCornerShape(16.dp))
-                            .then(
-                                if (selected) Modifier.border(2.5.dp, MaterialTheme.brand.gradient, RoundedCornerShape(16.dp))
-                                else Modifier.border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(16.dp)),
-                            )
-                            .background(MaterialTheme.colorScheme.surfaceContainerHigh),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        if (thumb != null) {
-                            Image(thumb, f.label, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize().padding(3.dp).clip(RoundedCornerShape(13.dp)))
-                        } else {
-                            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                        }
-                        if (selected) {
-                            Box(
-                                Modifier.align(Alignment.TopEnd).padding(6.dp).size(22.dp).clip(CircleShape)
-                                    .background(MaterialTheme.brand.gradient),
-                                contentAlignment = Alignment.Center,
-                            ) { Icon(Icons.Filled.Check, null, tint = Color.White, modifier = Modifier.size(14.dp)) }
-                        }
-                    }
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        f.label,
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                        color = if (selected) primary else MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
+                FilterThumb(
+                    label = f.label,
+                    thumb = session.filterThumbs[f],
+                    selected = selected,
+                    onClick = { if (edits.filter != f) session.setFilter(f) },
+                )
             }
         }
-        Spacer(Modifier.height(8.dp))
         val adj = edits.adjustments
         // Los ajustes finos van plegados por defecto: en pantallas pequeñas la imagen necesita el espacio.
         var showFine by rememberSaveable { mutableStateOf(false) }
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            ChipAction(
-                icon = if (showFine) Icons.Filled.ExpandLess else Icons.Filled.Tune,
-                label = if (adj != Adjustments()) "Ajustes finos •" else "Ajustes finos",
-                onClick = { showFine = !showFine },
-                selected = showFine,
-                modifier = Modifier.weight(1f, fill = false),
-            )
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+            TextAction(if (adj != Adjustments()) "Ajustes finos •" else "Ajustes finos", { showFine = !showFine }, highlighted = showFine)
             if (onApplyAll != null) {
-                ChipAction(Icons.Filled.DoneAll, "Aplicar a todas", onApplyAll, Modifier.weight(1f, fill = false))
+                Text("·", color = Color.White.copy(alpha = 0.5f), fontSize = 13.sp)
+                TextAction("Aplicar a todas", onApplyAll)
             }
         }
         AnimatedVisibility(visible = showFine, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
-            Column(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
-                AdjustSlider(Icons.Filled.BrightnessMedium, "Brillo", adj.brightness) { session.setAdjustments(adj.copy(brightness = it)) }
-                AdjustSlider(Icons.Filled.Contrast, "Contraste", adj.contrast) { session.setAdjustments(adj.copy(contrast = it)) }
-                AdjustSlider(Icons.Filled.Deblur, "Nitidez", adj.sharpness) { session.setAdjustments(adj.copy(sharpness = it)) }
+            Column(Modifier.padding(horizontal = 20.dp)) {
+                AdjustSlider("Brillo", adj.brightness) { session.setAdjustments(adj.copy(brightness = it)) }
+                AdjustSlider("Contraste", adj.contrast) { session.setAdjustments(adj.copy(contrast = it)) }
+                AdjustSlider("Nitidez", adj.sharpness) { session.setAdjustments(adj.copy(sharpness = it)) }
                 if (adj != Adjustments()) {
-                    TextButton(onClick = { session.setAdjustments(Adjustments()) }, modifier = Modifier.align(Alignment.End)) {
-                        Icon(Icons.Filled.Refresh, null, Modifier.size(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Restablecer ajustes")
+                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+                        TextAction("Restablecer ajustes", { session.setAdjustments(Adjustments()) })
                     }
                 }
             }
@@ -841,29 +828,79 @@ private fun FiltersPanel(session: EditorSession, onApplyAll: (() -> Unit)?) {
     }
 }
 
+/** Miniatura de filtro (72×92, radio 10) con aro blanco si está elegida y su nombre debajo. */
 @Composable
-private fun AdjustSlider(icon: ImageVector, label: String, value: Float, onChange: (Float) -> Unit) {
+internal fun FilterThumb(label: String, thumb: ImageBitmap?, selected: Boolean, onClick: () -> Unit, placeholder: @Composable () -> Unit = {}) {
+    Column(
+        Modifier
+            .width(96.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .selectable(selected = selected, role = Role.RadioButton, onClick = onClick),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Box(
+            Modifier
+                .size(width = 72.dp, height = 92.dp)
+                .border(2.dp, if (selected) Color.White else Color.Transparent, RoundedCornerShape(10.dp))
+                .padding(3.dp)
+                .clip(RoundedCornerShape(7.dp))
+                .background(Color.White.copy(alpha = 0.08f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (thumb != null) {
+                Image(thumb, label, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            } else {
+                placeholder()
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            label,
+            color = if (selected) Color.White else Dim,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            style = MaterialTheme.typography.labelMedium,
+            textAlign = TextAlign.Center,
+            maxLines = 2,
+        )
+    }
+}
+
+@Composable
+private fun AdjustSlider(label: String, value: Float, onChange: (Float) -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().height(40.dp)) {
-        Icon(icon, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.width(8.dp))
-        Text(label, style = MaterialTheme.typography.labelLarge, modifier = Modifier.width(78.dp))
-        Slider(
+        Text(label, color = Color.White, fontSize = 13.sp, style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(78.dp))
+        DarkSlider(
             value = value,
             onValueChange = { v -> onChange(if (kotlin.math.abs(v) < 0.04f) 0f else v) },
             valueRange = -1f..1f,
             modifier = Modifier.weight(1f),
-            colors = SliderDefaults.colors(
-                thumbColor = MaterialTheme.brand.gradientStart,
-                activeTrackColor = MaterialTheme.brand.gradientStart,
-            ),
         )
         Text(
             "${if (value > 0) "+" else ""}${(value * 100).roundToInt()}",
+            color = Dim,
+            fontSize = 12.sp,
             style = MaterialTheme.typography.labelMedium,
             modifier = Modifier.width(40.dp),
             textAlign = TextAlign.End,
         )
     }
+}
+
+/** Deslizador estilo iOS sobre fondo oscuro: pulgar blanco, pista activa en el acento. */
+@Composable
+private fun DarkSlider(value: Float, onValueChange: (Float) -> Unit, valueRange: ClosedFloatingPointRange<Float>, modifier: Modifier = Modifier) {
+    Slider(
+        value = value,
+        onValueChange = onValueChange,
+        valueRange = valueRange,
+        modifier = modifier,
+        colors = SliderDefaults.colors(
+            thumbColor = Color.White,
+            activeTrackColor = MaterialTheme.ui.accent,
+            inactiveTrackColor = Color.White.copy(alpha = 0.2f),
+        ),
+    )
 }
 
 @Composable
@@ -875,76 +912,45 @@ private fun CleanPanel(
     onApplyAll: (() -> Unit)?,
 ) {
     val e = session.edits
-    val primary = MaterialTheme.brand.gradientStart
-    val secondary = MaterialTheme.brand.gradientEnd
-    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
-        CleanSwitch(Icons.Filled.LayersClear, "Quitar rayas automáticamente", "Dobleces, marcas de bolígrafo y bordes", e.autoRemoveLines) {
-            session.update(e.copy(autoRemoveLines = it))
-        }
-        CleanSwitch(Icons.Filled.Grain, "Quitar ruido", "Puntos, granulado y suciedad", e.autoDenoise) {
-            session.update(e.copy(autoDenoise = it))
-        }
-        CleanSwitch(Icons.Filled.Straighten, "Enderezar texto", "Corrige unos grados de inclinación", e.autoDeskew) {
-            onDeskew(it)
-        }
-        CleanSwitch(Icons.Filled.GridOn, "Enderezar hoja curvada", "Aplana hojas dobladas usando las líneas de tablas y cuadrículas", e.autoDewarp) {
-            onDewarp(it)
-        }
-        CleanSwitch(Icons.AutoMirrored.Filled.Notes, "Conservar cuadrícula / renglones", "Las líneas del cuaderno salen finas y claras; desactívalo para quitarlas", e.keepRuling) {
-            session.update(e.copy(keepRuling = it))
-        }
-        Spacer(Modifier.height(6.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-        Row(
-            Modifier
-                .weight(1f)
-                .height(52.dp)
-                .clip(RoundedCornerShape(16.dp))
-                .background(androidx.compose.ui.graphics.Brush.horizontalGradient(listOf(primary.copy(alpha = 0.16f), secondary.copy(alpha = 0.16f))))
-                .border(1.dp, MaterialTheme.brand.horizontalGradient, RoundedCornerShape(16.dp))
-                .clickable(onClick = onManual)
-                .padding(horizontal = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(Icons.Filled.Brush, null, tint = primary)
-            Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f)) {
-                Text("Borrado manual", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyLarge)
-                Text(
-                    if (e.eraseStrokes.isEmpty()) "Quita a mano rayas o manchas que queden"
-                    else "${e.eraseStrokes.size} ${if (e.eraseStrokes.size == 1) "trazo aplicado" else "trazos aplicados"}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(max = 300.dp)
+            .verticalScroll(rememberScrollState()),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        InsetGroup(separatorInset = SeparatorInsetPlain, horizontalPadding = 16.dp) {
+            item {
+                ToggleRow("Quitar rayas automáticamente", e.autoRemoveLines, { session.update(e.copy(autoRemoveLines = it)) }, subtitle = "Dobleces, marcas de bolígrafo y bordes")
+            }
+            item {
+                ToggleRow("Quitar ruido", e.autoDenoise, { session.update(e.copy(autoDenoise = it)) }, subtitle = "Puntos, granulado y suciedad")
+            }
+            item { ToggleRow("Enderezar texto", e.autoDeskew, onDeskew, subtitle = "Corrige unos grados de inclinación") }
+            item {
+                ToggleRow("Enderezar hoja curvada", e.autoDewarp, onDewarp, subtitle = "Aplana hojas dobladas usando las líneas de tablas y cuadrículas")
+            }
+            item {
+                ToggleRow(
+                    "Conservar cuadrícula / renglones", e.keepRuling, { session.update(e.copy(keepRuling = it)) },
+                    subtitle = "Las líneas del cuaderno salen finas y claras; desactívalo para quitarlas",
                 )
             }
         }
-        if (onApplyAll != null) {
-            Spacer(Modifier.width(8.dp))
-            ChipAction(Icons.Filled.DoneAll, "A todas", onApplyAll, Modifier.height(52.dp))
+        Spacer(Modifier.height(10.dp))
+        InsetGroup(horizontalPadding = 16.dp) {
+            item {
+                NavigationRow(
+                    title = "Borrado manual",
+                    subtitle = if (e.eraseStrokes.isEmpty()) "Quita a mano rayas o manchas que queden"
+                    else "${e.eraseStrokes.size} ${if (e.eraseStrokes.size == 1) "trazo aplicado" else "trazos aplicados"}",
+                    icon = AppIcons.Eraser,
+                    iconTint = MaterialTheme.ui.accent,
+                    onClick = onManual,
+                )
+            }
         }
-        }
-    }
-}
-
-@Composable
-private fun CleanSwitch(icon: ImageVector, title: String, subtitle: String, checked: Boolean, onChange: (Boolean) -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).clickable(role = Role.Switch) { onChange(!checked) }.padding(horizontal = 6.dp, vertical = 2.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(icon, null, tint = MaterialTheme.brand.gradientStart, modifier = Modifier.size(22.dp))
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
-            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        Switch(
-            checked = checked,
-            onCheckedChange = onChange,
-            colors = SwitchDefaults.colors(checkedTrackColor = MaterialTheme.brand.gradientStart),
-        )
+        if (onApplyAll != null) TextAction("Aplicar limpieza a todas las páginas", onApplyAll)
     }
 }
 
@@ -961,71 +967,42 @@ private fun ErasePanel(
     onClear: () -> Unit,
     onDone: () -> Unit,
 ) {
-    val primary = MaterialTheme.brand.gradientStart
-    val secondary = MaterialTheme.brand.gradientEnd
-    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            ModeChoice(Icons.Filled.Healing, "Reparar", mode == EraseMode.HEAL, Modifier.weight(1f)) { onMode(EraseMode.HEAL) }
-            ModeChoice(Icons.Filled.FormatPaint, "Pintar blanco", mode == EraseMode.WHITE, Modifier.weight(1f)) { onMode(EraseMode.WHITE) }
-        }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp)) {
+        SegmentedControl(
+            options = listOf("Reparar", "Pintar blanco"),
+            selectedIndex = if (mode == EraseMode.HEAL) 0 else 1,
+            onSelect = { onMode(if (it == 0) EraseMode.HEAL else EraseMode.WHITE) },
+        )
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
-            Text("Pincel", style = MaterialTheme.typography.labelLarge, modifier = Modifier.width(56.dp))
-            Slider(
-                value = brushRadius,
-                onValueChange = onBrushRadius,
-                valueRange = 0.004f..0.06f,
-                modifier = Modifier.weight(1f),
-            )
+            Text("Pincel", color = Color.White, fontSize = 13.sp, style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(56.dp))
+            DarkSlider(value = brushRadius, onValueChange = onBrushRadius, valueRange = 0.004f..0.06f, modifier = Modifier.weight(1f))
             Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
                 val d = (8f + (brushRadius - 0.004f) / (0.06f - 0.004f) * 28f).dp
-                Box(Modifier.size(d).clip(CircleShape).background(MaterialTheme.brand.gradient))
+                Box(Modifier.size(d).clip(CircleShape).border(1.5.dp, Color.White, CircleShape))
             }
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            PanelButton(Icons.AutoMirrored.Filled.Undo, "Deshacer", Modifier.weight(1f), enabled = canUndo, onClick = onUndo)
-            PanelButton(Icons.AutoMirrored.Filled.Redo, "Rehacer", Modifier.weight(1f), enabled = canRedo, onClick = onRedo)
-            PanelButton(Icons.Filled.Delete, "Borrar todo", Modifier.weight(1f), enabled = canUndo, onClick = onClear)
-            PanelButton(Icons.Filled.Check, "Listo", Modifier.weight(1f), onClick = onDone)
+            PanelButton(AppIcons.Undo, "Deshacer", Modifier.weight(1f), enabled = canUndo, onClick = onUndo)
+            PanelButton(AppIcons.Redo, "Rehacer", Modifier.weight(1f), enabled = canRedo, onClick = onRedo)
+            PanelButton(AppIcons.Trash, "Borrar todo", Modifier.weight(1f), enabled = canUndo, onClick = onClear)
+            PanelButton(AppIcons.Check, "Listo", Modifier.weight(1f), onClick = onDone)
         }
-    }
-}
-
-@Composable
-private fun ModeChoice(icon: ImageVector, label: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
-    val primary = MaterialTheme.brand.gradientStart
-    val secondary = MaterialTheme.brand.gradientEnd
-    Row(
-        modifier
-            .height(48.dp)
-            .clip(RoundedCornerShape(50))
-            .then(
-                if (selected) Modifier.background(MaterialTheme.brand.horizontalGradient)
-                else Modifier.background(MaterialTheme.colorScheme.surfaceContainerHigh),
-            )
-            .clickable(role = Role.RadioButton, onClick = onClick)
-            .padding(horizontal = 12.dp),
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        val fg = if (selected) Color.White else MaterialTheme.colorScheme.onSurface
-        Icon(icon, null, tint = fg, modifier = Modifier.size(18.dp))
-        Spacer(Modifier.width(6.dp))
-        Text(label, color = fg, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
 @Composable
 private fun RotatePanel(rotation: Int, onLeft: () -> Unit, onRight: () -> Unit) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
             "Rotación: $rotation°",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(bottom = 6.dp),
+            color = Color.White.copy(alpha = 0.6f),
+            fontSize = 13.sp,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(bottom = 10.dp),
         )
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            PanelButton(Icons.AutoMirrored.Filled.RotateLeft, "Girar a la izquierda", Modifier.weight(1f), onClick = onLeft)
-            PanelButton(Icons.AutoMirrored.Filled.RotateRight, "Girar a la derecha", Modifier.weight(1f), onClick = onRight)
+            PanelButton(AppIcons.Rotate, "Girar a la izquierda", Modifier.weight(1f), onClick = onLeft)
+            PanelButton(AppIcons.RotateRight, "Girar a la derecha", Modifier.weight(1f), onClick = onRight)
         }
     }
 }

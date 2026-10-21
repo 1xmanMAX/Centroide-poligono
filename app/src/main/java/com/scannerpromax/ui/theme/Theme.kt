@@ -10,6 +10,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.ReadOnlyComposable
@@ -219,6 +220,39 @@ fun EscanerTheme(darkTheme: Boolean? = null, dynamicColor: Boolean = false, cont
             shapes = AppShapes,
             content = content,
         )
+    }
+}
+
+/**
+ * Fuerza la apariencia oscura (tokens [UiColors] oscuros y esquema M3 oscuro) en una parte de la app, con el mismo
+ * acento: cámara y editor (estilo app Fotos). Pone los iconos de la barra de estado en claro mientras está visible y
+ * restaura el valor anterior al salir.
+ */
+@Composable
+fun ForcedDarkTheme(content: @Composable () -> Unit) {
+    val current = MaterialTheme.ui
+    val accent = if (current.isDark || current.accent != AccentIndigo) current.accent else AccentIndigoDark
+    val ui = remember(accent) { DarkUi.copy(accent = accent, onAccent = Color.White) }
+    val scheme = remember(accent) { DarkScheme.copy(primary = accent, onPrimary = Color.White) }
+    val brand = remember(ui) { brandFrom(ui) }
+    val view = LocalView.current
+    val context = LocalContext.current
+    if (!view.isInEditMode) {
+        DisposableEffect(Unit) {
+            val window = context.findActivity()?.window
+            val controller = window?.let { WindowCompat.getInsetsController(it, view) }
+            val prevStatus = controller?.isAppearanceLightStatusBars
+            val prevNav = controller?.isAppearanceLightNavigationBars
+            controller?.isAppearanceLightStatusBars = false
+            controller?.isAppearanceLightNavigationBars = false
+            onDispose {
+                if (prevStatus != null) controller.isAppearanceLightStatusBars = prevStatus
+                if (prevNav != null) controller.isAppearanceLightNavigationBars = prevNav
+            }
+        }
+    }
+    CompositionLocalProvider(LocalBrandColors provides brand, LocalUiColors provides ui) {
+        MaterialTheme(colorScheme = scheme, typography = AppTypography, shapes = AppShapes, content = content)
     }
 }
 

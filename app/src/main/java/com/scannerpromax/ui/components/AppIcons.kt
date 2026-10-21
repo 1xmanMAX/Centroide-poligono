@@ -62,6 +62,17 @@ object AppIcons {
     val Speed by lazy { stroke("Speed", "M4 16a8 8 0 1 1 16 0M12 16l4-5", width = 2f) }
     val Chip by lazy { stroke("Chip", rect(6f, 6f, 12f, 12f, 2f) + "M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4", width = 2f) }
     val Resolution by lazy { stroke("Resolution", "M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5", width = 2f) }
+    // Herramientas del editor (maqueta Editor.dc.html).
+    val Crop by lazy { stroke("Crop", "M6 2v14a2 2 0 0 0 2 2h14M2 6h14a2 2 0 0 1 2 2v14", width = 1.9f) }
+    val Filters by lazy { stroke("Filters", "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 3v18M3.5 9h17", width = 1.9f) }
+    val Clean by lazy { stroke("Clean", "M20 20H9l-5-5 9-9 7 7-5 5M9 9l7 7", width = 1.9f) }
+    val Rotate by lazy { stroke("Rotate", "M3 12a9 9 0 1 0 3-6.7M3 3v6h6", width = 1.9f) }
+    val RotateRight by lazy { stroke("RotateRight", "M21 12a9 9 0 1 1-3-6.7M21 3v6h-6", width = 1.9f) }
+    val Undo by lazy { stroke("Undo", "M9 14L4 9l5-5M4 9h11a5 5 0 0 1 0 10h-3", width = 1.9f) }
+    val Redo by lazy { stroke("Redo", "M15 14l5-5-5-5M20 9H9a5 5 0 0 0 0 10h3", width = 1.9f) }
+    val Lock by lazy { stroke("Lock", rect(5f, 11f, 14f, 10f, 2f) + "M8 11V7a4 4 0 0 1 8 0v4", width = 2f) }
+    val Copy by lazy { stroke("Copy", rect(9f, 9f, 11f, 11f, 2f) + "M5 15V5a2 2 0 0 1 2-2h8", width = 1.9f) }
+    val Sparkles by lazy { stroke("Sparkles", "M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8zM19 15l.8 2.2 2.2.8-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z", width = 1.7f) }
     val Shield by lazy { stroke("Shield", "M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z", width = 2f) }
 
     private fun circle(cx: Float, cy: Float, r: Float) =

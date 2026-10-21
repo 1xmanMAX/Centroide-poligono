@@ -103,6 +103,7 @@ import com.scannerpromax.ui.components.MoreMenu
 import com.scannerpromax.ui.components.MoreMenuItem
 import com.scannerpromax.ui.components.PrimaryCapsuleButton
 import com.scannerpromax.ui.theme.LocalPerf
+import com.scannerpromax.ui.theme.ForcedDarkTheme
 import com.scannerpromax.ui.theme.PillShape
 import com.scannerpromax.ui.theme.SystemBlue
 import com.scannerpromax.ui.theme.SystemGreen
@@ -150,7 +151,7 @@ internal fun CameraScaffold(
     hintArea: @Composable () -> Unit,
     controls: @Composable ColumnScope.() -> Unit,
     overlays: @Composable BoxScope.() -> Unit = {},
-) {
+) = ForcedDarkTheme {
     BoxWithConstraints(Modifier.fillMaxSize().background(Color.Black)) {
         val topInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
         val bottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
