@@ -232,7 +232,7 @@ fun PageCountBadge(count: Int, modifier: Modifier = Modifier) {
     Box(
         modifier
             .clip(RoundedCornerShape(8.dp))
-            .background(Color(0xB81C1C1E))
+            .background(if (MaterialTheme.ui.isDark) Color(0xFF48484A) else Color(0xB81C1C1E))
             .padding(horizontal = 7.dp, vertical = 2.dp),
     ) {
         Text(count.toString(), style = MaterialTheme.typography.labelSmall, color = Color.White)

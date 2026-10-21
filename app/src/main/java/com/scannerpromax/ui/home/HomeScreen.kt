@@ -278,19 +278,7 @@ internal fun HomeContent(
     val totalPages = remember(documents) { documents.sumOf { it.pages.size } }
     val searching = query.isNotBlank()
 
-    val menuGroups = listOf(
-        // "Seleccionar" y "Ordenar" de la maqueta no se muestran: la app no tiene selección múltiple ni orden
-        // configurable (siempre por fecha de modificación) y el rediseño no añade funciones.
-        listOf(
-            if (gridMode) MoreMenuItem("Ver como lista", AppIcons.List, onClick = onToggleGrid)
-            else MoreMenuItem("Ver como cuadrícula", AppIcons.Grid, onClick = onToggleGrid),
-        ),
-        listOf(
-            MoreMenuItem("Importar fotos", AppIcons.ImportPhotos, onClick = onPickImages),
-            MoreMenuItem("Comprimir PDF", AppIcons.Compress, onClick = onCompressPdf),
-        ),
-        listOf(MoreMenuItem("Ajustes", AppIcons.Settings, onClick = onSettings)),
-    )
+    val menuGroups = homeMenuGroups(gridMode, onToggleGrid, onPickImages, onCompressPdf, onSettings)
 
     Box(
         Modifier
@@ -441,6 +429,29 @@ internal fun HomeContent(
         MenuScrim(visible = menuOpen)
     }
 }
+
+/**
+ * Opciones del menú ••• de Inicio (maqueta "Menu"), en grupos separados por la banda gris.
+ * "Seleccionar" y "Ordenar" de la maqueta NO se muestran: la app no tiene selección múltiple ni orden configurable
+ * (siempre por fecha de modificación) y el rediseño no añade funciones.
+ */
+internal fun homeMenuGroups(
+    gridMode: Boolean,
+    onToggleGrid: () -> Unit,
+    onPickImages: () -> Unit,
+    onCompressPdf: () -> Unit,
+    onSettings: () -> Unit,
+): List<List<MoreMenuItem>> = listOf(
+    listOf(
+        if (gridMode) MoreMenuItem("Ver como lista", AppIcons.List, onClick = onToggleGrid)
+        else MoreMenuItem("Ver como cuadrícula", AppIcons.Grid, onClick = onToggleGrid),
+    ),
+    listOf(
+        MoreMenuItem("Importar fotos", AppIcons.ImportPhotos, onClick = onPickImages),
+        MoreMenuItem("Comprimir PDF", AppIcons.Compress, onClick = onCompressPdf),
+    ),
+    listOf(MoreMenuItem("Ajustes", AppIcons.Settings, onClick = onSettings)),
+)
 
 /** Estado vacío sobrio: título y una línea gris centrados, sin ilustraciones. */
 @Composable

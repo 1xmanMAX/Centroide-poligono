@@ -76,7 +76,7 @@ private val LightUi = UiColors(
     orange = SystemOrange,
     bar = Color.White.copy(alpha = 0.86f),
     menuGroupGap = Color(0x24787880),
-    menu = Color(0xF0FAFAFC),
+    menu = Color(0xFAFAFAFC),
     shadow = Color.Black,
     isDark = false,
 )
@@ -98,7 +98,7 @@ private val DarkUi = UiColors(
     orange = Color(0xFFFF9F0A),
     bar = Color(0xFF1C1C1E).copy(alpha = 0.90f),
     menuGroupGap = Color(0x5C000000),
-    menu = Color(0xF22C2C2E),
+    menu = Color(0xFF2C2C2E),
     shadow = Color.Black,
     isDark = true,
 )

@@ -70,6 +70,8 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
+    // Recursos Android en los tests JVM: los necesitan las capturas de pantalla con Robolectric (src/test/.../screenshots).
+    testOptions { unitTests { isIncludeAndroidResources = true } }
     // Release = perfil de referencia (src/main/baseline-prof.txt) compilado a assets/dexopt/baseline.prof;
     // ProfileInstaller lo aplica al instalar para que ART precompile las rutas calientes (sin jank en el 1er uso).
     packaging {
@@ -160,6 +162,12 @@ dependencies {
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.31.0")
 
     testImplementation("junit:junit:4.13.2")
+    // Capturas de pantalla del rediseño en la JVM (Robolectric + gráficos nativos). Solo se ejecutan con
+    // ./gradlew testDebugUnitTest -Pscreenshots=DIR --tests '*screenshots*' (ver el final de este archivo).
+    testImplementation(composeBom)
+    testImplementation("org.robolectric:robolectric:4.14.1")
+    testImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
     // Tests JVM con los modelos ONNX del banco (si existen): misma API Java que la de Android.
     testImplementation("com.microsoft.onnxruntime:onnxruntime:1.31.0")
 }
@@ -188,7 +196,16 @@ tasks.withType<Test>().configureEach {
         "r2appOut" to "r2app.out", "r2appOnly" to "r2app.only", "r2appPort" to "r2app.port", "r2appStage" to "r2app.stage",
         // ZipEntryFetcherTest contra el AAR real de Maven Central (red): -PortReal=DIR
         "ortReal" to "ort.real",
+        // Capturas del rediseño (src/test/.../screenshots): carpeta de salida de los PNG.
+        "screenshots" to "screenshots.out",
     ).forEach { (p, sp) ->
         (project.findProperty(p) as String?)?.let { systemProperty(sp, it) }
     }
+}
+
+// Las capturas de pantalla (Robolectric, lentas y con descarga de android-all la primera vez) NO forman parte de
+// testDebugUnitTest normal: solo corren si se pasa -Pscreenshots=DIR.
+//   ./gradlew testDebugUnitTest -Pscreenshots=/tmp/claude-0/bench/rediseno --tests '*screenshots*'
+tasks.withType<Test>().configureEach {
+    if (project.findProperty("screenshots") == null) exclude("**/screenshots/**")
 }

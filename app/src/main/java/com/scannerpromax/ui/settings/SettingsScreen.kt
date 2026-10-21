@@ -149,8 +149,9 @@ internal fun SettingsContent(
             SettingsPage.MAIN -> SettingsPageScaffold(title = "Ajustes", backLabel = "Documentos", onBack = onBack) {
                 InsetGroup(
                     header = "Escaneo",
-                    footer = "Con la cámara del teléfono se abre la app de cámara del sistema (máxima resolución, HDR y " +
-                        "nitidez del fabricante) y la foto se procesa al volver.",
+                    footer = "La captura automática dispara sola con el documento estable y enfocado. Quitar rayas sueltas " +
+                        "limpia dobleces, bolígrafo y bordes en las páginas nuevas. La cámara del teléfono abre la app de " +
+                        "cámara del sistema (máxima resolución, HDR y nitidez del fabricante) y procesa la foto al volver.",
                 ) {
                     item {
                         NavigationRow(
@@ -164,7 +165,6 @@ internal fun SettingsContent(
                     item {
                         ToggleRow(
                             "Captura automática",
-                            subtitle = "Dispara sola con el documento estable y enfocado",
                             icon = AppIcons.Bolt,
                             iconTint = SystemOrange,
                             checked = settings.autoCapture,
@@ -174,7 +174,6 @@ internal fun SettingsContent(
                     item {
                         ToggleRow(
                             "Quitar rayas sueltas",
-                            subtitle = "Dobleces, bolígrafo y bordes en páginas nuevas",
                             icon = AppIcons.Eraser,
                             iconTint = SystemPurple,
                             checked = settings.autoRemoveLines,
@@ -194,7 +193,7 @@ internal fun SettingsContent(
                 InsetGroup(header = "Inteligencia artificial") {
                     item {
                         NavigationRow(
-                            "Reconocimiento y modelos",
+                            "Reconocimiento",
                             icon = AppIcons.Text,
                             iconTint = SystemBlue,
                             value = engineShortLabel(settings.recognitionEngine),
@@ -206,7 +205,7 @@ internal fun SettingsContent(
                             "IA en la nube",
                             icon = AppIcons.Cloud,
                             iconTint = SystemTeal,
-                            value = settings.recognitionEngine.cloud?.let { "En uso: " + it.label } ?: "Opcional",
+                            value = if (settings.recognitionEngine.cloud != null) "Activa" else "Opcional",
                             onClick = onOpenCloudAi,
                         )
                     }
@@ -270,7 +269,7 @@ internal fun SettingsContent(
                             "Texto en el PDF",
                             icon = AppIcons.Text,
                             iconTint = SystemGreen,
-                            value = settings.pdfTextMode.label,
+                            value = settings.pdfTextMode.label.substringBefore(" ("),
                             onClick = { picker = Picker.PDF_TEXT },
                         )
                     }
