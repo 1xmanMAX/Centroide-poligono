@@ -170,6 +170,9 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-test-manifest")
     // Tests JVM con los modelos ONNX del banco (si existen): misma API Java que la de Android.
     testImplementation("com.microsoft.onnxruntime:onnxruntime:1.31.0")
+    // OpenCV de escritorio (nativo incluido) para tests JVM de imaging con imágenes sintéticas (detección, orientación):
+    // las clases Java de org.opencv:opencv (Android) llaman a este nativo, igual que el banco de pruebas.
+    testImplementation("org.openpnp:opencv:4.9.0-0")
 }
 
 // Tests JVM con pdfbox-android (PDF reconstruido): sus recursos (cmaps, glyphlist) van en los assets del AAR, que en

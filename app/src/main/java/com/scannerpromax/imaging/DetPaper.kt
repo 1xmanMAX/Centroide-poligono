@@ -69,7 +69,11 @@ internal object DetPaper {
     }
 
     /** Rasgos de un cuadrilátero frente a la hoja: tinta dentro, fondo ajeno dentro, hoja cubierta, papel crudo dentro. */
-    class Fit(val inkIn: Double, val bgIn: Double, val cov: Double, val paperIn: Double, val area: Double)
+    class Fit(
+        val inkIn: Double, val bgIn: Double, val cov: Double, val paperIn: Double, val area: Double,
+        /** Densidad de tinta (por píxel de hoja) dentro y fuera del cuadrilátero. */
+        val densIn: Double, val densOut: Double,
+    )
 
     /** Peso (negativo) de un píxel ajeno dentro del cuadrilátero y de un píxel de texto fuera. */
     const val K_BG = 1.5f
@@ -265,6 +269,7 @@ internal object DetPaper {
         return Fit(
             inkIn = ink.toDouble() / max(1, m.inkCount), bgIn = (area - f) / ar, cov = f.toDouble() / max(1, m.filledCount),
             paperIn = c / ar, area = area.toDouble() / (m.w.toDouble() * m.h),
+            densIn = ink.toDouble() / max(1, f), densOut = (m.inkCount - ink).toDouble() / max(1, m.filledCount - f),
         )
     }
 

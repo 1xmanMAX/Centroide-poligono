@@ -317,7 +317,13 @@ class DocumentRepository(
                             (det?.first == null || (det.second ?: 0f) < RESCUE_CONFIDENCE ||
                                 nearlyFull(det.first!!, bmp.width, bmp.height))
                         val quad = det?.first?.let { toSpace(it, bmp.width, bmp.height, pw, ph) }
-                        defaultEdits(m, quad)
+                        val base = defaultEdits(m, quad)
+                        // Hoja girada 90° (renglones verticales) o del revés: se endereza SOLO si es muy fiable; el giro
+                        // queda en las ediciones (el usuario lo cambia o deshace en el editor y la IA no vuelve a girar)
+                        val rot = if (autoDetect && (m == ScanMode.DOCUMENT || m == ScanMode.RECEIPT)) {
+                            runCatching { processor.autoOrientation(bmp, det?.first) }.getOrDefault(0)
+                        } else 0
+                        if (rot != 0) base.copy(rotation = rot) else base
                     }
                     val (processedName, thumbName) = try {
                         renderAndSave(docId, pageId, bmp, edits, pw, ph)

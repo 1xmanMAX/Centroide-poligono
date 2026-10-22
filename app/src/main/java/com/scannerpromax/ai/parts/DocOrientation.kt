@@ -67,6 +67,13 @@ object DocOrientation {
 
     /** Voto de 5 recortes: media de probabilidades → (ángulo, confianza). */
     fun predict(img: Rgb, runner: Runner): Result {
+        val p = predictProbs(img, runner)
+        val best = (0 until 4).maxByOrNull { p[it] } ?: 0
+        return Result(ANGLES[best], p[best])
+    }
+
+    /** Voto de 5 recortes: probabilidades medias de que la imagen TENGA un giro horario de 0/90/180/270. */
+    fun predictProbs(img: Rgb, runner: Runner): FloatArray {
         val p = FloatArray(4)
         val crops = voteCrops(img.w, img.h)
         for (c in crops) {
@@ -74,8 +81,7 @@ object DocOrientation {
             for (k in 0 until 4) p[k] += r.getOrElse(k) { 0f }
         }
         for (k in 0 until 4) p[k] /= crops.size
-        val best = (0 until 4).maxByOrNull { p[it] } ?: 0
-        return Result(ANGLES[best], p[best])
+        return p
     }
 
     /** Giro antihorario a aplicar (0 si no hay que girar o la confianza no llega). */

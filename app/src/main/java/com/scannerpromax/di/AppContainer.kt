@@ -31,7 +31,16 @@ class AppContainer(context: Context) {
         NativeLibs.ensureOpenCv()
         // Registra el contexto para que la super-resolución (FSRCNN en assets) pueda cargarse al primer uso.
         ImageEnhancer.init(appContext)
-        PageProcessor(deviceTier)
+        PageProcessor(deviceTier).also { p ->
+            // Orientación automática de páginas nuevas: si está descargada la "Maquetación de páginas", el modelo
+            // doc_ori apoya a la orientación por renglones (sin el modelo, sólo renglones; nunca se descarga aquí)
+            p.orientationModel = { bmp -> orientationEngine.takeIf { it.isReady() }?.orientationProbs(bmp) }
+        }
+    }
+
+    /** Modelo de orientación (doc_ori) para la tubería normal: se carga al primer uso y sólo si está descargado. */
+    private val orientationEngine by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        com.scannerpromax.ai.parts.LayoutEngine(models, threads = 2)
     }
     val pageProcessor: PageProcessor by pageProcessorLazy
 

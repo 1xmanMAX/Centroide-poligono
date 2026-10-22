@@ -188,7 +188,7 @@ class DocumentDetector(private val tier: DeviceTier) {
                 // (la hoja encontrada tampoco puede tener papel con contenido alrededor: sería otro marco)
                 val r = runCatching { refineSheet(rgbSmall, frame) }.getOrNull()?.takeIf { !printedFrame(it.pts, buf) && !(buf.scanLike && scanInside(it.pts, buf)) }
                 if (r != null || det0 == null) {
-                    val c = paperArbitrate(rgbSmall, r, buf.scanLike) ?: return null
+                    val c = paperArbitrate(rgbSmall, r, buf) ?: return null
                     val pts = scaleToFrame(c.pts, rgbSmall.cols(), rgbSmall.rows(), fullW, fullH)
                     if (grayCrop != null) refineCorners(fullW, fullH, grayCrop, pts)
                     clampPts(pts, fullW, fullH)
@@ -205,7 +205,7 @@ class DocumentDetector(private val tier: DeviceTier) {
             // (Un contorno con borde de contraste ya no se "corrige" buscando otra hoja a partir del contenido: en el banco
             // de pruebas eso desplazaba hacia dentro hojas correctas sobre mesas claras o tarjetas con texto alrededor.
             // Los marcos impresos y la falta de contorno sí pasan por [refineSheet], arriba.)
-            val cand = paperArbitrate(rgbSmall, cand0, buf.scanLike) ?: return null
+            val cand = paperArbitrate(rgbSmall, cand0, buf) ?: return null
             val pts = scaleToFrame(cand.pts, rgbSmall.cols(), rgbSmall.rows(), fullW, fullH)
             if (grayCrop != null) refineCorners(fullW, fullH, grayCrop, pts)
             clampPts(pts, fullW, fullH)
@@ -225,8 +225,8 @@ class DocumentDetector(private val tier: DeviceTier) {
      * fuera y su interior es el mismo papel) o recorta la hoja dejando texto fuera. El ajuste debe ser limpio: casi todo
      * el texto dentro, casi nada de fondo y casi toda la hoja. Escaneos: sin cambios. Devuelve [e] si no aplica.
      */
-    private fun paperArbitrate(rgbSmall: Mat, e: Candidate?, scanLike: Boolean): Candidate? {
-        if (!paperFit || scanLike) return e
+    private fun paperArbitrate(rgbSmall: Mat, e: Candidate?, b: Buffers): Candidate? {
+        if (!paperFit || b.scanLike) return e
         val m = runCatching { DetPaper.analyze(rgbSmall) }.getOrNull() ?: return e
         val p = runCatching { DetPaper.quad(m) }.getOrNull() ?: return e
         val fp = DetPaper.fit(m, p)
@@ -234,10 +234,12 @@ class DocumentDetector(private val tier: DeviceTier) {
         if (fp.inkIn < PAPER_P_INK || fp.bgIn > PAPER_P_BG || fp.cov < PAPER_P_COV || fp.area < 0.1 || DetPaper.maxCos(p) > 0.5) return e
         val replace = if (e == null || e.conf < PAPER_USE_CONF) true else {
             val fe = DetPaper.fit(m, e.pts)
-            debugLog?.invoke("paper: E ink=%.3f bg=%.3f cov=%.3f paperIn=%.3f conf=%.2f".format(java.util.Locale.ROOT, fe.inkIn, fe.bgIn, fe.cov, fe.paperIn, e.conf))
-            fe.bgIn > PAPER_E_BG ||
-                (fe.inkIn < PAPER_E_INNER_INK && fe.paperIn >= PAPER_E_INNER_PAPER) ||
-                (fe.cov < PAPER_E_COV && fe.inkIn < PAPER_E_COV_INK)
+            debugLog?.invoke("paper: E ink=%.3f bg=%.3f cov=%.3f paperIn=%.3f conf=%.2f dIn=%.4f dOut=%.4f".format(java.util.Locale.ROOT, fe.inkIn, fe.bgIn, fe.cov, fe.paperIn, e.conf, fe.densIn, fe.densOut))
+            // (recuadro interior o recorte: sólo si los lados de [e] NO separan materiales distintos, es decir, van por
+            // dentro del mismo papel; una tarjeta o un tique sobre una mesa clara sí separan y se quedan como están)
+            (fe.bgIn > PAPER_E_BG && fe.bgIn < PAPER_E_BG_MAX && fe.inkIn >= PAPER_E_BG_INK) ||
+                (((fe.inkIn < PAPER_E_INNER_INK && fe.paperIn >= PAPER_E_INNER_PAPER) || (fe.cov < PAPER_E_COV && fe.inkIn < PAPER_E_COV_INK)) &&
+                    fe.densOut >= PAPER_E_OUT_DENS && fe.densOut >= PAPER_E_OUT_REL * fe.densIn && !separatesMaterials(e.pts, b))
         }
         if (!replace) return e
         debugLog?.invoke("paper: se usa el ajuste por papel")
@@ -1776,6 +1778,11 @@ class DocumentDetector(private val tier: DeviceTier) {
         private const val PAPER_USE_CONF = 0.35
         /** Candidato por bordes deficiente: fondo ajeno dentro, recuadro interior (tinta fuera + mismo papel) o recorte. */
         private const val PAPER_E_BG = 0.15
+        private const val PAPER_E_BG_MAX = 0.5
+        /** Recuadro interior / recorte: el papel de fuera también tiene texto (densidad absoluta y relativa a la de dentro). */
+        private const val PAPER_E_OUT_DENS = 0.01
+        private const val PAPER_E_OUT_REL = 0.16
+        private const val PAPER_E_BG_INK = 0.6
         private const val PAPER_E_INNER_INK = 0.93
         private const val PAPER_E_INNER_PAPER = 0.75
         private const val PAPER_E_COV = 0.92

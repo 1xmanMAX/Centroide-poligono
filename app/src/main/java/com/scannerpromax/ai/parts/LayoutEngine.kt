@@ -29,6 +29,17 @@ class LayoutEngine(private val models: ModelManager, private val threads: Int = 
     /** Orientación con voto de 5 recortes (null si no hay modelo o falla). */
     @Synchronized
     fun orientation(page: Bitmap): DocOrientation.Result? {
+        val p = orientationProbs(page) ?: return null
+        val best = (0 until 4).maxByOrNull { p[it] } ?: 0
+        return DocOrientation.Result(best * 90, p[best])
+    }
+
+    /**
+     * Probabilidades (voto de 5 recortes) de que la página TENGA un giro horario de 0/90/180/270; null si no hay modelo o
+     * falla. La tubería normal las usa como apoyo de la orientación por renglones ([com.scannerpromax.imaging.PageProcessor.orientationModel]).
+     */
+    @Synchronized
+    fun orientationProbs(page: Bitmap): FloatArray? {
         val f = models.storage.readyFile(ModelCatalog.PAGE_LAYOUT, ModelCatalog.ORIENTATION_FILE) ?: return null
         return try {
             val net = orientation ?: Dnn.readNetFromONNX(f.absolutePath).also {
@@ -36,7 +47,7 @@ class LayoutEngine(private val models: ModelManager, private val threads: Int = 
                 orientation = it
             }
             val img = toRgb(page, ORIENTATION_SIDE)
-            DocOrientation.predict(img) { chw ->
+            DocOrientation.predictProbs(img) { chw ->
                 val blob = Mat(intArrayOf(1, 3, 224, 224), CvType.CV_32F)
                 try {
                     blob.put(intArrayOf(0, 0, 0, 0), chw)
