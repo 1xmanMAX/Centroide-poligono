@@ -151,7 +151,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarData
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.ui.unit.Dp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -177,7 +179,8 @@ fun ReviewScreen(
     onBack: () -> Unit,
     onEditPage: (pageId: String) -> Unit,
     onAddPages: (ScanMode) -> Unit,
-    onExport: () -> Unit,
+    /** [pageIds] = solo esas páginas (modo selección), en el orden del documento; null = todas. */
+    onExport: (pageIds: List<String>?) -> Unit,
     onOcr: (pageId: String) -> Unit,
 ) {
     val context = LocalContext.current
@@ -218,6 +221,9 @@ fun ReviewScreen(
     var reopenViewerPageId by rememberSaveable { mutableStateOf<String?>(null) }
     // Páginas eliminadas a la espera de "Deshacer" (no se muestran aunque el repositorio aún las tenga).
     val pendingDeletes = remember { mutableStateListOf<String>() }
+    // Modo selección (estilo Fotos de iOS): pulsación larga en una página. Sobrevive a ir a Exportar y volver.
+    var selectionMode by rememberSaveable { mutableStateOf(false) }
+    var selectedIds by rememberSaveable(stateSaver = StringListSaver) { mutableStateOf(emptyList<String>()) }
     val gridState = rememberLazyGridState()
     val reorder = remember(gridState) {
         GridReorderState(gridState) { fromKey, toKey ->
@@ -233,6 +239,8 @@ fun ReviewScreen(
     }
     LaunchedEffect(doc?.pages, pendingDeletes.size) {
         if (reorder.draggingKey == null) syncOrder()
+        // Las páginas que ya no existen dejan de estar seleccionadas.
+        if (doc != null) selectedIds = PageSelection.prune(selectedIds, order.map { it.id })
     }
 
     // Auto-scroll al arrastrar una página cerca del borde superior/inferior de la rejilla.
@@ -295,37 +303,48 @@ fun ReviewScreen(
         commitOrder(order.map { it.id })
     }
 
-    /** Borrado optimista con "Deshacer" en lugar de un diálogo de confirmación. */
-    fun deleteWithUndo(page: Page) {
-        if (page.id in pendingDeletes) return
-        pendingDeletes.add(page.id)
-        order.removeAll { it.id == page.id }
+    /** Borrado optimista (una o varias páginas) con "Deshacer" en lugar de un diálogo de confirmación. */
+    fun deleteWithUndo(pages: List<Page>) {
+        val ids = pages.map { it.id }.filter { it !in pendingDeletes }.distinct()
+        if (ids.isEmpty()) return
+        pendingDeletes.addAll(ids)
+        order.removeAll { it.id in ids }
         scope.launch {
             var undone = false
             try {
                 snackbar.currentSnackbarData?.dismiss()
-                val r = snackbar.showSnackbar("Página eliminada", actionLabel = "Deshacer", duration = SnackbarDuration.Short)
+                val msg = if (ids.size == 1) "Página eliminada" else "${ids.size} páginas eliminadas"
+                val r = snackbar.showSnackbar(msg, actionLabel = "Deshacer", duration = SnackbarDuration.Short)
                 undone = r == SnackbarResult.ActionPerformed
             } finally {
                 if (undone) {
-                    pendingDeletes.remove(page.id)
+                    pendingDeletes.removeAll(ids)
                 } else {
                     // Fuera del ciclo de vida de la pantalla: el borrado se completa aunque se salga.
                     reviewAppScope.launch {
-                        try {
-                            repo.deletePage(docId, page.id)
-                        } catch (c: CancellationException) {
-                            throw c
-                        } catch (_: Throwable) {
-                            Toast.makeText(context.applicationContext, "No se pudo eliminar la página", Toast.LENGTH_SHORT).show()
-                        } finally {
-                            pendingDeletes.remove(page.id)
+                        var failed = 0
+                        for (id in ids) {
+                            try {
+                                repo.deletePage(docId, id)
+                            } catch (c: CancellationException) {
+                                throw c
+                            } catch (_: Throwable) {
+                                failed++
+                            } finally {
+                                pendingDeletes.remove(id)
+                            }
+                        }
+                        if (failed > 0) {
+                            val m = if (failed == 1) "No se pudo eliminar la página" else "No se pudieron eliminar $failed páginas"
+                            Toast.makeText(context.applicationContext, m, Toast.LENGTH_SHORT).show()
                         }
                     }
                 }
             }
         }
     }
+
+    fun deleteWithUndo(page: Page) = deleteWithUndo(listOf(page))
 
     val processor = remember { CaptureProcessor(container) }
     val gallery = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(50)) { uris ->
@@ -353,10 +372,10 @@ fun ReviewScreen(
             .onFailure { toast("No hay una galería disponible") }
     }
 
-    /** Aplica un filtro (y opcionalmente la limpieza de rayas) a todas las páginas, con progreso. */
-    fun applyToAll(filter: FilterType, removeLines: Boolean?) {
+    /** Aplica un filtro (y opcionalmente la limpieza de rayas) a [targets] (todas por defecto), con progreso. */
+    fun applyToAll(filter: FilterType, removeLines: Boolean?, targets: List<Page> = order.toList()) {
         if (bulkJob != null) return
-        val pages = order.toList()
+        val pages = targets
         if (pages.isEmpty()) return
         bulkJob = scope.launch {
             bulkProgress = 0f
@@ -405,18 +424,26 @@ fun ReviewScreen(
         }
     }
 
-    /** Página visible (la primera de la rejilla) para abrir el OCR o el editor desde la barra inferior. */
-    fun visiblePage(): Page? {
-        val key = gridState.layoutInfo.visibleItemsInfo.firstOrNull { it.key is String && it.key != HEADER_KEY && it.key != FOOTER_KEY }?.key
-        return order.firstOrNull { it.id == key } ?: order.firstOrNull()
+    fun selectedPages(): List<Page> = PageSelection.inOrder(order, selectedIds)
+
+    fun exitSelection() {
+        selectionMode = false
+        selectedIds = emptyList()
     }
 
+    /** Páginas a las que se aplica la hoja de filtro: en modo selección solo las marcadas; null = todas. */
+    var filterTargets by remember { mutableStateOf<List<String>?>(null) }
+
+    BackHandler(enabled = selectionMode && !importing) { exitSelection() }
     BackHandler(enabled = importing) { importJob?.cancel() }
 
     val d = doc
 
     val docMenuGroups = listOf(
-        listOf(MoreMenuItem("Renombrar", AppIcons.Rename, enabled = d != null) { renaming = true }),
+        listOf(
+            MoreMenuItem("Renombrar", AppIcons.Rename, enabled = d != null) { renaming = true },
+            MoreMenuItem("Seleccionar páginas", AppIcons.Select, enabled = order.isNotEmpty()) { selectionMode = true },
+        ),
         listOf(
             MoreMenuItem("Filtro para todas las páginas", AppIcons.Wand, enabled = order.isNotEmpty()) { showApplyAll = true },
             MoreMenuItem("Unir con otro documento…", AppIcons.Duplicate, enabled = d != null) { showMerge = true },
@@ -436,7 +463,16 @@ fun ReviewScreen(
             detectDragGesturesAfterLongPress(
                 onDragStart = { pos ->
                     reorder.pointer = pos
-                    if (reorder.start(pos)) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    if (reorder.start(pos)) {
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        // Pulsación larga fuera del modo selección: entra en él con esa página marcada. Si además se
+                        // arrastra, la página se mueve (reordenar sigue funcionando igual que antes).
+                        val key = reorder.draggingKey
+                        if (!selectionMode && key != null) {
+                            selectionMode = true
+                            selectedIds = listOf(key)
+                        }
+                    }
                 },
                 onDrag = { change, amount ->
                     if (reorder.draggingKey != null) {
@@ -464,7 +500,21 @@ fun ReviewScreen(
         pageThumbnail = { page, number, modifier -> PageThumbnail(container, docId, page, number, modifier) },
         // Tocar una hoja abre el visor con la imagen YA PROCESADA (la misma que se exporta), al instante y sin
         // reprocesar; desde allí "Editar" lleva al editor.
-        onPageClick = { index -> viewerIndex = index },
+        onPageClick = { index ->
+            if (selectionMode) order.getOrNull(index)?.let { selectedIds = PageSelection.toggle(selectedIds, it.id) }
+            else viewerIndex = index
+        },
+        selectionMode = selectionMode,
+        selectedIds = selectedIds.toSet(),
+        onCancelSelection = { exitSelection() },
+        onToggleSelectAll = { selectedIds = PageSelection.toggleAll(selectedIds, order.map { it.id }) },
+        onDeleteSelected = {
+            val pages = selectedPages()
+            if (pages.isNotEmpty()) {
+                deleteWithUndo(pages)
+                exitSelection()
+            }
+        },
         pageMenuGroups = { page, number ->
             pageMenuGroups(
                 number = number,
@@ -481,10 +531,24 @@ fun ReviewScreen(
         },
         onAddCamera = { d?.let { onAddPages(it.mode) } },
         onAddGallery = { openGallery() },
-        // Abre el OCR en la página visible (allí se puede reconocer todo el documento).
-        onText = { visiblePage()?.let { onOcr(it.id) } ?: toast("No hay páginas") },
-        onFilter = { if (order.isEmpty()) toast("No hay páginas") else showApplyAll = true },
-        onExport = onExport,
+        onFilter = {
+            when {
+                order.isEmpty() -> toast("No hay páginas")
+                selectionMode && selectedIds.isEmpty() -> toast("Selecciona alguna página")
+                else -> {
+                    filterTargets = if (selectionMode) selectedPages().map { it.id } else null
+                    showApplyAll = true
+                }
+            }
+        },
+        onExport = {
+            if (selectionMode) {
+                val ids = selectedPages().map { it.id }
+                if (ids.isEmpty()) toast("Selecciona alguna página") else onExport(ids.takeIf { it.size < order.size })
+            } else {
+                onExport(null)
+            }
+        },
         snackbar = snackbar,
     ) {
         viewerIndex?.let { start ->
@@ -495,6 +559,7 @@ fun ReviewScreen(
                 startIndex = start,
                 onDismiss = { viewerIndex = null },
                 onEdit = { p -> viewerIndex = null; reopenViewerPageId = p.id; onEditPage(p.id) },
+                onText = { p -> viewerIndex = null; reopenViewerPageId = p.id; onOcr(p.id) },
             )
         }
         // Vuelta del editor: se reabre el visor en la página editada (ya con su procesado nuevo). Solo en la composición
@@ -535,10 +600,12 @@ fun ReviewScreen(
     }
 
     if (showApplyAll) {
+        val targets = filterTargets?.let { ids -> PageSelection.inOrder(order, ids) }
         ApplyAllSheet(
-            initial = order.firstOrNull()?.edits?.filter?.uiFilter ?: FilterType.DEFAULT,
+            initial = (targets ?: order).firstOrNull()?.edits?.filter?.uiFilter ?: FilterType.DEFAULT,
+            count = targets?.size,
             onDismiss = { showApplyAll = false },
-            onApply = { f, lines -> showApplyAll = false; applyToAll(f, lines) },
+            onApply = { f, lines -> showApplyAll = false; applyToAll(f, lines, targets ?: order.toList()) },
         )
     }
 
@@ -589,7 +656,7 @@ internal fun pageMenuGroups(
     listOf(
         MoreMenuItem("Ver a pantalla completa", AppIcons.Resolution, onClick = onView),
         MoreMenuItem("Editar y mejorar", AppIcons.Wand, onClick = onEdit),
-        MoreMenuItem("Reconocer texto (OCR)", AppIcons.Text, onClick = onOcr),
+        MoreMenuItem("Texto reconocido", AppIcons.Text, onClick = onOcr),
     ),
     buildList {
         if (total > 1 && number > 1) {
@@ -604,10 +671,15 @@ internal fun pageMenuGroups(
     listOf(MoreMenuItem("Eliminar página", AppIcons.Trash, destructive = true, onClick = onDelete)),
 )
 
+/** Guarda la selección de páginas (ids) en el estado guardable. */
+internal val StringListSaver: Saver<List<String>, ArrayList<String>> = Saver(save = { ArrayList(it) }, restore = { it.toList() })
+
 /**
  * Pantalla Documento SIN estado (maqueta Revision.dc.html): "‹ Documentos" + •••, título grande de 30 sp con
- * subtítulo, cuadrícula de páginas (mantener pulsado y arrastrar = reordenar; ••• por página) y barra flotante
- * Añadir · Texto · Filtro + Exportar. [overlays] = visor, capas de progreso…
+ * subtítulo, cuadrícula de páginas (••• por página) y barra flotante Añadir · Filtro + Exportar.
+ * Mantener pulsada una página entra en el MODO SELECCIÓN ([selectionMode], estilo Fotos de iOS): círculos de check,
+ * cabecera "Seleccionar todo · N seleccionadas · Cancelar" y barra Filtro · Eliminar + Exportar (N); mantener pulsada
+ * y arrastrar = reordenar (en ambos modos). [overlays] = visor, capas de progreso…
  */
 @Composable
 internal fun ReviewContent(
@@ -627,10 +699,14 @@ internal fun ReviewContent(
     pageMenuGroups: (page: Page, number: Int) -> List<List<MoreMenuItem>>,
     onAddCamera: () -> Unit,
     onAddGallery: () -> Unit,
-    onText: () -> Unit,
     onFilter: () -> Unit,
     onExport: () -> Unit,
     snackbar: SnackbarHostState,
+    selectionMode: Boolean = false,
+    selectedIds: Set<String> = emptySet(),
+    onCancelSelection: () -> Unit = {},
+    onToggleSelectAll: () -> Unit = {},
+    onDeleteSelected: () -> Unit = {},
     overlays: @Composable BoxScope.() -> Unit = {},
 ) {
     val ui = MaterialTheme.ui
@@ -638,8 +714,19 @@ internal fun ReviewContent(
     var addMenu by remember { mutableStateOf(false) }
     val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
 
+    val selectedCount = pages.count { it.id in selectedIds }
+    val allSelected = pages.isNotEmpty() && selectedCount == pages.size
     val header: @Composable (Dp) -> Unit = { pad ->
-        LargeTitleHeader(
+        if (selectionMode) {
+            SelectionHeader(
+                title = title ?: "",
+                count = selectedCount,
+                allSelected = allSelected,
+                onToggleAll = onToggleSelectAll,
+                onCancel = onCancelSelection,
+                horizontalPadding = pad,
+            )
+        } else LargeTitleHeader(
             title = title ?: "Cargando…",
             backLabel = "Documentos",
             onBack = onBack,
@@ -693,14 +780,17 @@ internal fun ReviewContent(
                     Column(Modifier.padding(bottom = 2.dp)) {
                         // La rejilla ya tiene el margen de 20 dp.
                         header(0.dp)
-                        if (pages.size > 1) {
-                            Text(
-                                "Mantén pulsada una página y arrástrala para reordenar",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = ui.tertiaryLabel,
-                                modifier = Modifier.padding(top = 10.dp),
-                            )
-                        }
+                        Text(
+                            when {
+                                selectionMode && pages.size > 1 -> "Toca para marcar · mantén pulsada y arrastra para reordenar"
+                                selectionMode -> "Toca para marcar o desmarcar"
+                                pages.size > 1 -> "Mantén pulsada una página para seleccionar · arrástrala para reordenar"
+                                else -> "Mantén pulsada la página para seleccionarla"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = ui.tertiaryLabel,
+                            modifier = Modifier.padding(top = 10.dp),
+                        )
                     }
                 }
                 itemsIndexed(pages, key = { _, p -> p.id }, contentType = { _, _ -> "page" }) { index, page ->
@@ -723,6 +813,8 @@ internal fun ReviewContent(
                         page = page,
                         number = index + 1,
                         dragging = dragging,
+                        selectionMode = selectionMode,
+                        selected = page.id in selectedIds,
                         modifier = itemModifier,
                         thumbnail = { m -> pageThumbnail(page, index + 1, m) },
                         onClick = { onPageClick(index) },
@@ -736,7 +828,21 @@ internal fun ReviewContent(
         }
 
         // ------------------------------------------------ barra flotante inferior
-        if (!loading) {
+        if (!loading && selectionMode) {
+            FloatingBar(Modifier.align(Alignment.BottomCenter), fillWidth = true) {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    FloatingBarItem(AppIcons.Wand, "Filtro", onFilter, enabled = selectedCount > 0)
+                    FloatingBarItem(AppIcons.Trash, "Eliminar", onDeleteSelected, enabled = selectedCount > 0)
+                }
+                PrimaryCapsuleButton(
+                    if (selectedCount > 0) "Exportar ($selectedCount)" else "Exportar",
+                    onClick = onExport,
+                    icon = AppIcons.Share,
+                    enabled = selectedCount > 0,
+                    height = 48.dp,
+                )
+            }
+        } else if (!loading) {
             FloatingBar(Modifier.align(Alignment.BottomCenter), fillWidth = true) {
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     Box {
@@ -752,7 +858,6 @@ internal fun ReviewContent(
                             ),
                         )
                     }
-                    FloatingBarItem(AppIcons.Text, "Texto", onText)
                     FloatingBarItem(AppIcons.Wand, "Filtro", onFilter)
                 }
                 PrimaryCapsuleButton("Exportar", onClick = onExport, icon = AppIcons.Share, enabled = pages.isNotEmpty(), height = 48.dp)
@@ -782,12 +887,92 @@ internal fun IosSnackbar(data: SnackbarData) {
     )
 }
 
-/** Celda de página: hoja blanca (radio 10, sombra suave) con ••• y marca de texto; debajo, número y filtro. */
+/**
+ * Cabecera del modo selección: "Seleccionar todo/Ninguna" · "N seleccionadas" · "Cancelar" y, debajo, el título del
+ * documento (mismo tamaño que fuera del modo selección para que la rejilla no salte).
+ */
+@Composable
+internal fun SelectionHeader(
+    title: String,
+    count: Int,
+    allSelected: Boolean,
+    onToggleAll: () -> Unit,
+    onCancel: () -> Unit,
+    horizontalPadding: Dp,
+) {
+    val ui = MaterialTheme.ui
+    Column(Modifier.fillMaxWidth()) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(min = 44.dp)
+                .padding(start = (horizontalPadding - 10.dp).coerceAtLeast(0.dp), end = (horizontalPadding - 10.dp).coerceAtLeast(0.dp), top = 4.dp),
+        ) {
+            HeaderTextButton(
+                if (allSelected) "Ninguna" else "Seleccionar todo",
+                onToggleAll,
+                Modifier.align(Alignment.CenterStart),
+            )
+            Text(
+                PageSelection.title(count),
+                style = MaterialTheme.typography.titleMedium,
+                color = ui.label,
+                maxLines = 1,
+                modifier = Modifier.align(Alignment.Center),
+            )
+            HeaderTextButton("Cancelar", onCancel, Modifier.align(Alignment.CenterEnd), bold = true)
+        }
+        Text(
+            title,
+            style = MaterialTheme.typography.headlineLarge,
+            color = ui.label,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(start = horizontalPadding, end = horizontalPadding, top = 4.dp),
+        )
+    }
+}
+
+@Composable
+private fun HeaderTextButton(label: String, onClick: () -> Unit, modifier: Modifier, bold: Boolean = false) {
+    Text(
+        label,
+        style = MaterialTheme.typography.bodyLarge,
+        fontWeight = if (bold) FontWeight.SemiBold else FontWeight.Normal,
+        color = MaterialTheme.ui.accent,
+        maxLines = 1,
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+    )
+}
+
+/** Círculo de check del modo selección (estilo Fotos de iOS). */
+@Composable
+private fun SelectionCheck(selected: Boolean, modifier: Modifier = Modifier) {
+    val ui = MaterialTheme.ui
+    Box(
+        modifier
+            .size(26.dp)
+            .shadow(if (selected) 2.dp else 0.dp, CircleShape)
+            .clip(CircleShape)
+            .background(if (selected) ui.accent else Color.Black.copy(alpha = 0.22f))
+            .border(1.5.dp, Color.White, CircleShape),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (selected) Icon(AppIcons.Check, null, tint = Color.White, modifier = Modifier.size(15.dp))
+    }
+}
+
+/** Celda de página: hoja blanca (radio 10, sombra suave) con ••• (o check en modo selección); debajo, número y filtro. */
 @Composable
 private fun PageCell(
     page: Page,
     number: Int,
     dragging: Boolean,
+    selectionMode: Boolean,
+    selected: Boolean,
     modifier: Modifier,
     thumbnail: @Composable (Modifier) -> Unit,
     onClick: () -> Unit,
@@ -806,26 +991,23 @@ private fun PageCell(
                 .shadow(if (dragging) 18.dp else if (perf.lowEnd) 0.dp else 3.dp, shape, ambientColor = Color.Black.copy(alpha = 0.25f), spotColor = Color.Black.copy(alpha = 0.25f))
                 .clip(shape)
                 .background(if (ui.isDark) Color(0xFF2C2C2E) else Color.White)
-                .then(if (dragging) Modifier.border(2.dp, ui.accent, shape) else Modifier)
-                .clickable(onClickLabel = "Ver página $number", onClick = onClick),
+                .then(if (dragging || (selectionMode && selected)) Modifier.border(if (dragging) 2.dp else 3.dp, ui.accent, shape) else Modifier)
+                .then(
+                    if (selectionMode) {
+                        Modifier
+                            .semantics { this.selected = selected }
+                            .clickable(onClickLabel = if (selected) "Desmarcar página $number" else "Marcar página $number", onClick = onClick)
+                    } else {
+                        Modifier.clickable(onClickLabel = "Ver página $number", onClick = onClick)
+                    },
+                ),
         ) {
             thumbnail(Modifier.fillMaxSize())
-            if (page.ocrFile != null || page.ocrText != null) {
-                Row(
-                    Modifier
-                        .align(Alignment.BottomStart)
-                        .padding(6.dp)
-                        .clip(PillShape)
-                        .background(Color.Black.copy(alpha = 0.55f))
-                        .padding(horizontal = 7.dp, vertical = 3.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(AppIcons.Text, null, tint = Color.White, modifier = Modifier.size(11.dp))
-                    Spacer(Modifier.width(3.dp))
-                    Text("Texto", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.labelSmall)
-                }
-            }
-            Box(Modifier.align(Alignment.TopEnd)) {
+            if (selectionMode) {
+                // Velo suave sobre las marcadas (como Fotos) y círculo de check arriba a la derecha.
+                if (selected) Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = if (ui.isDark) 0.08f else 0.18f)))
+                SelectionCheck(selected, Modifier.align(Alignment.TopEnd).padding(8.dp))
+            } else Box(Modifier.align(Alignment.TopEnd)) {
                 // Área táctil de 44 dp con el círculo visual de 28 dp dentro.
                 Box(
                     Modifier
@@ -899,12 +1081,12 @@ private fun PageThumbnail(container: AppContainer, docId: String, page: Page, nu
 
 /** Hoja "Filtro para todas las páginas". [onApply] recibe el filtro y si quitar rayas (null = no tocar). */
 @Composable
-private fun ApplyAllSheet(initial: FilterType, onDismiss: () -> Unit, onApply: (FilterType, Boolean?) -> Unit) {
+private fun ApplyAllSheet(initial: FilterType, count: Int? = null, onDismiss: () -> Unit, onApply: (FilterType, Boolean?) -> Unit) {
     var selected by remember { mutableStateOf(initial) }
     var lines by remember { mutableStateOf(false) }
     IosSheet(onDismissRequest = onDismiss) { dismiss ->
         SheetHeader(
-            title = "Filtro para todas",
+            title = if (count == null) "Filtro para todas" else "Filtro para ${pagesLabel(count)}",
             onCancel = dismiss,
             onDone = { onApply(selected, if (lines) true else null) },
             doneLabel = "Aplicar",
@@ -916,7 +1098,7 @@ private fun ApplyAllSheet(initial: FilterType, onDismiss: () -> Unit, onApply: (
                 .padding(top = 16.dp, bottom = 28.dp),
             verticalArrangement = GroupArrangement,
         ) {
-            InsetGroup(separatorInset = SeparatorInsetPlain, footer = "Se aplica a todas las páginas del documento.") {
+            InsetGroup(separatorInset = SeparatorInsetPlain, footer = if (count == null) "Se aplica a todas las páginas del documento." else if (count == 1) "Se aplica a la página seleccionada." else "Se aplica a las $count páginas seleccionadas.") {
                 for (f in FilterType.visible) {
                     item { CheckRow(title = f.label, subtitle = f.description, selected = f == selected, onClick = { selected = f }) }
                 }
