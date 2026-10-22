@@ -8,7 +8,7 @@ object Routes {
     const val CAMERA = "camera?docId={docId}&mode={mode}"
     const val REVIEW = "review/{docId}"
     const val EDITOR = "editor/{docId}/{pageId}"
-    const val EXPORT = "export/{docId}"
+    const val EXPORT = "export/{docId}?pages={pages}"
     const val OCR = "ocr/{docId}/{pageId}"
     const val COMPRESS = "compress"
     const val SETTINGS = "settings"
@@ -20,6 +20,12 @@ object Routes {
         "camera?docId=${docId ?: ""}&mode=${mode.name}"
     fun review(docId: String) = "review/$docId"
     fun editor(docId: String, pageId: String) = "editor/$docId/$pageId"
-    fun export(docId: String) = "export/$docId"
+    /**
+     * [pageIds] = solo esas páginas (modo selección del Documento); null = todas. El valor se codifica otra vez
+     * porque Navigation decodifica los argumentos una vez antes de entregarlos.
+     */
+    fun export(docId: String, pageIds: Collection<String>? = null) =
+        com.scannerpromax.export.ExportSelection.encode(pageIds)
+            ?.let { "export/$docId?pages=" + java.net.URLEncoder.encode(it, "UTF-8") } ?: "export/$docId"
     fun ocr(docId: String, pageId: String) = "ocr/$docId/$pageId"
 }

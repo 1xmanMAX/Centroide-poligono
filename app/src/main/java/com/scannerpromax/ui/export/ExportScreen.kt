@@ -133,6 +133,7 @@ import com.scannerpromax.ui.components.SeparatorInsetPlain
 import com.scannerpromax.ui.components.SheetHeader
 import com.scannerpromax.ui.components.ToggleRow
 import com.scannerpromax.ui.components.pagesLabel
+import com.scannerpromax.export.ExportSelection
 import com.scannerpromax.ui.theme.GroupShape
 import com.scannerpromax.ui.theme.SheetShape
 import com.scannerpromax.ui.theme.ui
@@ -181,10 +182,15 @@ fun ExportScreen(
     container: AppContainer,
     docId: String,
     onBack: () -> Unit,
+    /** Solo estas páginas (modo selección del Documento), en el orden del documento; null = todas. */
+    pageIds: List<String>? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val doc by remember(docId) { container.documents.observe(docId) }.collectAsState(initial = null)
+    val fullDoc by remember(docId) { container.documents.observe(docId) }.collectAsState(initial = null)
+    // Todo lo de esta pantalla (PDF, imágenes, texto, Word, estimaciones) trabaja con el subconjunto elegido.
+    val doc = remember(fullDoc, pageIds) { fullDoc?.let { ExportSelection.apply(it, pageIds) } }
+    val totalPages = fullDoc?.pages?.size ?: 0
 
     var kind by rememberSaveable { mutableStateOf(ExportKind.PDF) }
     var pageSize by rememberSaveable { mutableStateOf(PageSize.AUTO) }
@@ -249,7 +255,7 @@ fun ExportScreen(
             onBack()
         }
         // Páginas cuyo texto aún hay que reconocer (se hace solo al exportar). Disco en IO, fuera del hilo principal.
-        if (doc != null) missingOcr = container.documents.pagesMissingOcr(docId)
+        if (doc != null) missingOcr = container.documents.pagesMissingOcr(docId, doc.pages.map { it.id })
         doc?.let { dd ->
             aiPages = withContext(Dispatchers.IO) {
                 dd.pages.count { p -> container.documents.processedFileIfReady(docId, p)?.let { DocLayoutFiles.exists(it) } == true }
@@ -332,7 +338,7 @@ fun ExportScreen(
     fun execute(action: ExportAction) {
         val d = doc ?: return
         if (d.pages.isEmpty()) {
-            toast("El documento no tiene páginas")
+            toast(if (pageIds != null) "Las páginas seleccionadas ya no existen" else "El documento no tiene páginas")
             return
         }
         if (kind == ExportKind.PDF && usePassword && password.length < 4) {
@@ -481,6 +487,7 @@ fun ExportScreen(
     ExportSheetContent(
         title = d?.title,
         pages = d?.pages.orEmpty(),
+        totalPages = if (pageIds != null) totalPages else null,
         kind = kind,
         onKind = { kind = it },
         textMode = textMode,
@@ -580,6 +587,8 @@ private enum class ExportSheetPicker { TEXT_MODE, PLACEMENT, QUALITY, PAGE_SIZE,
 internal fun ExportSheetContent(
     title: String?,
     pages: List<Page>,
+    /** Con selección de páginas: total del documento ("3 de 10 páginas"); null = se exportan todas. */
+    totalPages: Int? = null,
     kind: ExportKind,
     onKind: (ExportKind) -> Unit,
     textMode: PdfTextMode,
@@ -671,7 +680,11 @@ internal fun ExportSheetContent(
                     }
                     Column(Modifier.weight(1f).padding(start = 4.dp)) {
                         Text(title ?: "Cargando…", style = MaterialTheme.typography.titleSmall, color = ui.label, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                        Text(pagesLabel(pages.size), style = MaterialTheme.typography.bodySmall, color = ui.secondaryLabel)
+                        Text(
+                            if (totalPages != null) ExportSelection.label(pages.size, totalPages) else pagesLabel(pages.size),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (totalPages != null && pages.size != totalPages) ui.accent else ui.secondaryLabel,
+                        )
                     }
                 }
 
