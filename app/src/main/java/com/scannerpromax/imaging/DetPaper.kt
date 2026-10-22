@@ -45,6 +45,8 @@ internal object DetPaper {
         val paperChroma: Double, val paperL: Double,
         /** Casco convexo de la hoja (para la hipótesis inicial). */
         val hull: Array<Point>,
+        /** Dirección de los renglones módulo 90° (grados en [-45, 45)) o null si no está clara. */
+        val axis: Double?,
     ) {
         // Sumas por filas (prefijos) del peso de ajuste y de la tinta
         internal val wPref = Array(h) { FloatArray(w + 1) }
@@ -79,6 +81,10 @@ internal object DetPaper {
     /** Hoja mínima (fracción del encuadre) y tinta mínima (fracción de píxeles) para fiarse de la máscara. */
     private const val MIN_SHEET_AREA = 0.12
     private const val MIN_INK_FRAC = 0.002
+    /** Renglones: pico mínimo de la proyección sobre la mediana, tolerancia de los lados (grados) y penalización por grado. */
+    private const val AXIS_PEAK = 1.3
+    private const val AXIS_TOL = 5.0
+    private const val AXIS_PEN = 0.01
 
     /** Máscara de la hoja; null si la escena no parece una hoja clara con texto. [rgb] RGB 8UC3 a ~500 px. */
     fun analyze(rgb: Mat): Model? = MatBag().use { bag ->
@@ -157,7 +163,37 @@ internal object DetPaper {
         val sink = ByteArray(n)
         for (i in 0 until n) if (inkB[i].toInt() != 0 && eb[i].toInt() != 0) { sink[i] = 1; inkCount++ }
         if (filledCount < MIN_SHEET_AREA * n || inkCount < MIN_INK_FRAC * n || hull.size < 3) return@use null
-        Model(w, h, filledB, compB, sink, filledCount, compCount, inkCount, pc, pl, hull)
+        Model(w, h, filledB, compB, sink, filledCount, compCount, inkCount, pc, pl, hull, textAxis(sink, w, h))
+    }
+
+    /**
+     * Dirección de los renglones (módulo 90°) por proyección de la tinta: el ángulo cuyo perfil perpendicular concentra
+     * más la tinta (suma de cuadrados), con refinado a 0,5°. Null si no destaca sobre la mediana ([AXIS_PEAK]).
+     */
+    internal fun textAxis(ink: ByteArray, w: Int, h: Int): Double? {
+        var cnt = 0; for (v in ink) if (v.toInt() != 0) cnt++
+        if (cnt < 200) return null
+        val stride = max(1, cnt / 20000)
+        val xs = IntArray(cnt / stride + 1); val ys = IntArray(cnt / stride + 1); var m = 0; var seen = 0
+        for (i in ink.indices) if (ink[i].toInt() != 0) { if (seen++ % stride == 0 && m < xs.size) { xs[m] = i % w; ys[m] = i / w; m++ } }
+        val hist = IntArray(2 * (w + h) + 4)
+        fun energy(deg: Double): Double {
+            val t = Math.toRadians(deg); val ct = kotlin.math.cos(t); val st = kotlin.math.sin(t)
+            java.util.Arrays.fill(hist, 0)
+            val off = w + h + 1.0
+            for (k in 0 until m) hist[(ys[k] * ct - xs[k] * st + off).toInt().coerceIn(0, hist.size - 1)]++
+            var s = 0.0; for (v in hist) s += v.toDouble() * v
+            return s
+        }
+        val e = DoubleArray(180) { energy(it.toDouble()) }
+        var bi = 0; for (i in e.indices) if (e[i] > e[bi]) bi = i
+        val med = e.sortedArray()[90]
+        if (med <= 0 || e[bi] < AXIS_PEAK * med) return null
+        var best = bi.toDouble(); var be = e[bi]
+        var d = bi - 1.0
+        while (d <= bi + 1.0) { val v = energy(d); if (v > be) { be = v; best = d }; d += 0.25 }
+        var a = best % 90.0; if (a >= 45) a -= 90.0; if (a < -45) a += 90.0
+        return a
     }
 
     private fun pctOf(hist: IntArray, total: Int, p: Double): Int {
@@ -196,7 +232,25 @@ internal object DetPaper {
     private fun score(m: Model, q: FloatArray): Double {
         var s = 0.0; var inkIn = 0
         rows(m, q) { y, a, b -> s += m.wPref[y][b + 1] - m.wPref[y][a]; inkIn += m.iPref[y][b + 1] - m.iPref[y][a] }
-        return s - K_INK * (m.inkCount - inkIn)
+        return s - K_INK * (m.inkCount - inkIn) - axisPenalty(m, q)
+    }
+
+    /**
+     * Lados que se apartan de la dirección de los renglones (o su perpendicular) más de [AXIS_TOL]: una perspectiva real
+     * inclina poco los lados respecto del texto; seguir en diagonal el borde de un teclado o de una sombra deformaría la
+     * página al rectificarla. Penalización en "píxeles" proporcional a la hoja.
+     */
+    private fun axisPenalty(m: Model, q: FloatArray): Double {
+        val ax = m.axis ?: return 0.0
+        var pen = 0.0
+        for (i in 0 until 4) {
+            val dx = (q[((i + 1) % 4) * 2] - q[i * 2]).toDouble(); val dy = (q[((i + 1) % 4) * 2 + 1] - q[i * 2 + 1]).toDouble()
+            var d = (Math.toDegrees(kotlin.math.atan2(dy, dx)) - ax) % 90.0
+            if (d < 0) d += 90.0
+            val dev = min(d, 90.0 - d)
+            if (dev > AXIS_TOL) pen += (dev - AXIS_TOL) * AXIS_PEN * m.filledCount
+        }
+        return pen
     }
 
     fun fit(m: Model, q: FloatArray): Fit {

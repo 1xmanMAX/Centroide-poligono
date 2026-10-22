@@ -230,7 +230,7 @@ class DocumentDetector(private val tier: DeviceTier) {
         val m = runCatching { DetPaper.analyze(rgbSmall) }.getOrNull() ?: return e
         val p = runCatching { DetPaper.quad(m) }.getOrNull() ?: return e
         val fp = DetPaper.fit(m, p)
-        debugLog?.invoke("paper: P ink=%.3f bg=%.3f cov=%.3f area=%.2f cos=%.2f".format(java.util.Locale.ROOT, fp.inkIn, fp.bgIn, fp.cov, fp.area, DetPaper.maxCos(p)))
+        debugLog?.invoke("paper: P ink=%.3f bg=%.3f cov=%.3f area=%.2f cos=%.2f eje=${m.axis}".format(java.util.Locale.ROOT, fp.inkIn, fp.bgIn, fp.cov, fp.area, DetPaper.maxCos(p)))
         if (fp.inkIn < PAPER_P_INK || fp.bgIn > PAPER_P_BG || fp.cov < PAPER_P_COV || fp.area < 0.1 || DetPaper.maxCos(p) > 0.5) return e
         val replace = if (e == null || e.conf < PAPER_USE_CONF) true else {
             val fe = DetPaper.fit(m, e.pts)

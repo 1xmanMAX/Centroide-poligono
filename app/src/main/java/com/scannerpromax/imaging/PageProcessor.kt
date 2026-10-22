@@ -86,6 +86,51 @@ class PageProcessor(val tier: DeviceTier) {
     }
 
     // =====================================================================================
+    // Orientación automática (al crear la página)
+    // =====================================================================================
+
+    /**
+     * Modelo de orientación opcional (PP-LCNet doc_ori de la descarga "Maquetación de páginas"): recibe la página
+     * rectificada y devuelve las 4 probabilidades de que TENGA un giro horario de 0/90/180/270, o null. Sin modelo, la
+     * orientación sólo usa la dirección de los renglones ([TextOrientation]).
+     */
+    @Volatile var orientationModel: ((Bitmap) -> FloatArray?)? = null
+
+    /** Lado largo de la página rectificada para la orientación (el análisis trabaja a ~1400 px). */
+    private val ORIENT_SIDE = 1600
+
+    /**
+     * Giro HORARIO (0/90/180/270) que endereza la página de [original] recortada por [quad] (coordenadas de [original];
+     * null = imagen completa). 0 si no es muy fiable ([TextOrientation.decide]). No toca las cachés del procesador.
+     */
+    fun autoOrientation(original: Bitmap, quad: Quad?): Int {
+        val rgba = Cv.toRgba(original)
+        try { return autoOrientationMat(rgba, quad) } finally { rgba.release() }
+    }
+
+    /** [autoOrientation] sobre un Mat RGBA o RGB (no se libera). */
+    fun autoOrientationMat(src: Mat, quad: Quad?): Int = runCatching {
+        val w = src.cols(); val h = src.rows()
+        val q = quad?.takeIf { !PerspectiveCorrector.isFullFrame(it, w, h) }
+        val page = if (q != null) PerspectiveCorrector.warpMat(src, q, 0, ORIENT_SIDE) else Mat().also { Cv.downscale(src, it, ORIENT_SIDE) }
+        try {
+            val gray = Cv.gray(page)
+            try {
+                val r = TextOrientation.estimate(gray)
+                // El modelo sólo se consulta cuando puede cambiar la decisión: renglones verticales o propuesta de 180°
+                val model = orientationModel
+                val probs = if (model != null && (r.vertical == true || r.rotation == 180)) {
+                    runCatching {
+                        val bmp = Cv.toBitmap(page)
+                        try { model(bmp) } finally { bmp.recycle() }
+                    }.getOrNull()
+                } else null
+                TextOrientation.decide(r, probs)
+            } finally { gray.release() }
+        } finally { page.release() }
+    }.getOrDefault(0)
+
+    // =====================================================================================
     // Geometría
     // =====================================================================================
 
