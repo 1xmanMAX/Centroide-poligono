@@ -782,10 +782,10 @@ internal fun ReviewContent(
                         header(0.dp)
                         Text(
                             when {
-                                selectionMode && pages.size > 1 -> "Toca para marcar · mantén pulsada y arrastra para reordenar"
+                                selectionMode && pages.size > 1 -> "Toca para marcar · mantén y arrastra para reordenar"
                                 selectionMode -> "Toca para marcar o desmarcar"
-                                pages.size > 1 -> "Mantén pulsada una página para seleccionar · arrástrala para reordenar"
-                                else -> "Mantén pulsada la página para seleccionarla"
+                                pages.size > 1 -> "Mantén pulsada para seleccionar o reordenar"
+                                else -> "Mantén pulsada para seleccionar"
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = ui.tertiaryLabel,
@@ -888,7 +888,7 @@ internal fun IosSnackbar(data: SnackbarData) {
 }
 
 /**
- * Cabecera del modo selección: "Seleccionar todo/Ninguna" · "N seleccionadas" · "Cancelar" y, debajo, el título del
+ * Cabecera del modo selección: "Seleccionar todo/Ninguna" · "Cancelar" y, debajo, el título y "N seleccionadas" (en vez del
  * documento (mismo tamaño que fuera del modo selección para que la rejilla no salte).
  */
 @Composable
@@ -902,25 +902,16 @@ internal fun SelectionHeader(
 ) {
     val ui = MaterialTheme.ui
     Column(Modifier.fillMaxWidth()) {
-        Box(
+        Row(
             Modifier
                 .fillMaxWidth()
                 .heightIn(min = 44.dp)
                 .padding(start = (horizontalPadding - 10.dp).coerceAtLeast(0.dp), end = (horizontalPadding - 10.dp).coerceAtLeast(0.dp), top = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            HeaderTextButton(
-                if (allSelected) "Ninguna" else "Seleccionar todo",
-                onToggleAll,
-                Modifier.align(Alignment.CenterStart),
-            )
-            Text(
-                PageSelection.title(count),
-                style = MaterialTheme.typography.titleMedium,
-                color = ui.label,
-                maxLines = 1,
-                modifier = Modifier.align(Alignment.Center),
-            )
-            HeaderTextButton("Cancelar", onCancel, Modifier.align(Alignment.CenterEnd), bold = true)
+            HeaderTextButton(if (allSelected) "Ninguna" else "Seleccionar todo", onToggleAll, Modifier)
+            Spacer(Modifier.weight(1f))
+            HeaderTextButton("Cancelar", onCancel, Modifier, bold = true)
         }
         Text(
             title,
@@ -930,6 +921,15 @@ internal fun SelectionHeader(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(start = horizontalPadding, end = horizontalPadding, top = 4.dp),
         )
+        // "N seleccionadas" en el lugar del subtítulo (en la fila de arriba no cabe sin recortarse).
+        Text(
+            PageSelection.title(count),
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = if (count > 0) ui.accent else ui.secondaryLabel,
+            maxLines = 1,
+            modifier = Modifier.padding(start = horizontalPadding, end = horizontalPadding, top = 4.dp),
+        )
     }
 }
 
@@ -937,7 +937,8 @@ internal fun SelectionHeader(
 private fun HeaderTextButton(label: String, onClick: () -> Unit, modifier: Modifier, bold: Boolean = false) {
     Text(
         label,
-        style = MaterialTheme.typography.bodyLarge,
+        style = MaterialTheme.typography.bodyMedium,
+        fontSize = 16.sp,
         fontWeight = if (bold) FontWeight.SemiBold else FontWeight.Normal,
         color = MaterialTheme.ui.accent,
         maxLines = 1,

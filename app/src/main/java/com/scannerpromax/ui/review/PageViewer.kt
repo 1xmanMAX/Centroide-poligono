@@ -337,51 +337,14 @@ internal fun PageViewerDialog(
                 }
             }
 
-            // Barra superior minimalista sobre un degradado: Cerrar · "Página X de N" · Reconstruido/Escaneo · Editar.
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.6f), Color.Transparent)))
-                    .statusBarsPadding()
-                    .padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 18.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                IconCircleButton(
-                    AppIcons.Close, "Cerrar", onDismiss,
-                    size = 36.dp, iconSize = 16.dp, containerColor = Color.White.copy(alpha = 0.16f), contentColor = Color.White, elevation = 0.dp,
-                )
-                Text(
-                    "Página ${index + 1} de ${pages.size}",
-                    color = Color.White.copy(alpha = 0.85f),
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    style = MaterialTheme.typography.titleSmall,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.weight(1f),
-                )
-                if (hasLayout) {
-                    ViewerTextButton(if (showRebuilt) "Ver escaneo" else "Ver reconstruido") { showRebuilt = !showRebuilt }
-                    Spacer(Modifier.width(6.dp))
-                }
-                // Pantalla de Texto reconocido (editar/corregir, Leer con IA, .txt, PDF+texto, todo el documento).
-                IconCircleButton(
-                    AppIcons.Text, "Texto reconocido", { onText(page) },
-                    size = 36.dp, iconSize = 17.dp, containerColor = Color.White.copy(alpha = 0.16f), contentColor = Color.White, elevation = 0.dp,
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    "Editar",
-                    color = Color.White,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    style = MaterialTheme.typography.titleSmall,
-                    modifier = Modifier
-                        .clip(PillShape)
-                        .background(MaterialTheme.ui.accent)
-                        .clickable(role = Role.Button) { onEdit(page) }
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                )
-            }
+            ViewerTopBar(
+                title = "Página ${index + 1} de ${pages.size}",
+                rebuiltLabel = if (hasLayout) (if (showRebuilt) "Ver escaneo" else "Ver reconstruido") else null,
+                onToggleRebuilt = { showRebuilt = !showRebuilt },
+                onClose = onDismiss,
+                onText = { onText(page) },
+                onEdit = { onEdit(page) },
+            )
             val hintText = when {
                 showRebuilt || live.range != null -> null
                 live.status == LiveTextStatus.LOADING -> "Reconociendo texto…"
@@ -399,29 +362,95 @@ internal fun PageViewerDialog(
                 )
             }
             if (pages.size > 1) {
-                Row(
-                    Modifier
-                        .align(Alignment.BottomCenter)
-                        .navigationBarsPadding()
-                        .padding(bottom = 18.dp)
-                        .clip(PillShape)
-                        .background(Color(0xE61C1C1E))
-                        .padding(4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    NavButton(AppIcons.Back, "Página anterior", index > 0) { index-- }
-                    Text(
-                        "${index + 1} / ${pages.size}",
-                        color = Color.White,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        style = MaterialTheme.typography.labelMedium,
-                        modifier = Modifier.padding(horizontal = 10.dp),
-                    )
-                    NavButton(AppIcons.Chevron, "Página siguiente", index < pages.size - 1) { index++ }
-                }
+                ViewerPager(
+                    index = index,
+                    total = pages.size,
+                    onPrev = { index-- },
+                    onNext = { index++ },
+                    modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 18.dp),
+                )
             }
         }
+    }
+}
+
+/** Barra superior del visor sobre un degradado: Cerrar · "Página X de N" · Reconstruido/Escaneo · Texto · Editar. */
+@Composable
+internal fun ViewerTopBar(
+    title: String,
+    rebuiltLabel: String?,
+    onToggleRebuilt: () -> Unit,
+    onClose: () -> Unit,
+    onText: () -> Unit,
+    onEdit: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier
+            .fillMaxWidth()
+            .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.6f), Color.Transparent)))
+            .statusBarsPadding()
+            .padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 18.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconCircleButton(
+            AppIcons.Close, "Cerrar", onClose,
+            size = 36.dp, iconSize = 16.dp, containerColor = Color.White.copy(alpha = 0.16f), contentColor = Color.White, elevation = 0.dp,
+        )
+        Text(
+            title,
+            color = Color.White.copy(alpha = 0.85f),
+            fontSize = 15.sp,
+            fontWeight = FontWeight.SemiBold,
+            style = MaterialTheme.typography.titleSmall,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.weight(1f),
+        )
+        if (rebuiltLabel != null) {
+            ViewerTextButton(rebuiltLabel, onToggleRebuilt)
+            Spacer(Modifier.width(6.dp))
+        }
+        // Pantalla de Texto reconocido (editar/corregir, Leer con IA, .txt, PDF+texto, todo el documento).
+        IconCircleButton(
+            AppIcons.Text, "Texto reconocido", onText,
+            size = 36.dp, iconSize = 17.dp, containerColor = Color.White.copy(alpha = 0.16f), contentColor = Color.White, elevation = 0.dp,
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            "Editar",
+            color = Color.White,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.SemiBold,
+            style = MaterialTheme.typography.titleSmall,
+            modifier = Modifier
+                .clip(PillShape)
+                .background(MaterialTheme.ui.accent)
+                .clickable(role = Role.Button, onClick = onEdit)
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+        )
+    }
+}
+
+/** Paginador inferior del visor: ‹ "2 / 10" ›. */
+@Composable
+internal fun ViewerPager(index: Int, total: Int, onPrev: () -> Unit, onNext: () -> Unit, modifier: Modifier = Modifier) {
+    Row(
+        modifier
+            .clip(PillShape)
+            .background(Color(0xE61C1C1E))
+            .padding(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        NavButton(AppIcons.Back, "Página anterior", index > 0, onPrev)
+        Text(
+            "${index + 1} / $total",
+            color = Color.White,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.padding(horizontal = 10.dp),
+        )
+        NavButton(AppIcons.Chevron, "Página siguiente", index < total - 1, onNext)
     }
 }
 

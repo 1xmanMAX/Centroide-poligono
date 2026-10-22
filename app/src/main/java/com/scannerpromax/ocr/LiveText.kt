@@ -90,13 +90,20 @@ object LiveText {
         return best.takeIf { it >= 0 }
     }
 
-    /** Palabra más cercana al punto (para arrastrar un tirador); null si no hay palabras. */
+    /**
+     * Palabra más cercana al punto (para arrastrar un tirador); null si no hay palabras. La distancia vertical pesa
+     * [VERTICAL_WEIGHT] veces más: pasado el final de una línea se elige su última palabra, no una de la línea de
+     * arriba que quede más cerca en diagonal (como al seleccionar texto en iOS).
+     */
     fun nearest(words: List<Word>, x: Float, y: Float): Int? {
         if (words.isEmpty()) return null
         var best = 0
         var bestD = Float.MAX_VALUE
         for (i in words.indices) {
-            val d = distance(words[i].box, x, y)
+            val b = words[i].box
+            val dx = max(0f, max(b.left - x, x - b.right))
+            val dy = max(0f, max(b.top - y, y - b.bottom))
+            val d = dy * VERTICAL_WEIGHT + dx
             if (d < bestD) {
                 best = i
                 bestD = d
@@ -124,6 +131,8 @@ object LiveText {
         Handle.START -> if (target <= range.end) Range(target, range.end) to Handle.START else Range(range.end, target) to Handle.END
         Handle.END -> if (target >= range.start) Range(range.start, target) to Handle.END else Range(target, range.start) to Handle.START
     }
+
+    private const val VERTICAL_WEIGHT = 4f
 
     fun selectAll(words: List<Word>): Range? = if (words.isEmpty()) null else Range(0, words.size - 1)
 

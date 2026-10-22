@@ -20,8 +20,12 @@ object Routes {
         "camera?docId=${docId ?: ""}&mode=${mode.name}"
     fun review(docId: String) = "review/$docId"
     fun editor(docId: String, pageId: String) = "editor/$docId/$pageId"
-    /** [pageIds] = solo esas páginas (modo selección del Documento); null = todas. */
+    /**
+     * [pageIds] = solo esas páginas (modo selección del Documento); null = todas. El valor se codifica otra vez
+     * porque Navigation decodifica los argumentos una vez antes de entregarlos.
+     */
     fun export(docId: String, pageIds: Collection<String>? = null) =
-        com.scannerpromax.export.ExportSelection.encode(pageIds)?.let { "export/$docId?pages=$it" } ?: "export/$docId"
+        com.scannerpromax.export.ExportSelection.encode(pageIds)
+            ?.let { "export/$docId?pages=" + java.net.URLEncoder.encode(it, "UTF-8") } ?: "export/$docId"
     fun ocr(docId: String, pageId: String) = "ocr/$docId/$pageId"
 }
