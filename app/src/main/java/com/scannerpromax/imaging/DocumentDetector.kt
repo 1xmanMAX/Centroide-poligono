@@ -237,8 +237,12 @@ class DocumentDetector(private val tier: DeviceTier) {
             debugLog?.invoke("paper: E ink=%.3f bg=%.3f cov=%.3f paperIn=%.3f conf=%.2f dIn=%.4f dOut=%.4f".format(java.util.Locale.ROOT, fe.inkIn, fe.bgIn, fe.cov, fe.paperIn, e.conf, fe.densIn, fe.densOut))
             // (recuadro interior o recorte: sólo si los lados de [e] NO separan materiales distintos, es decir, van por
             // dentro del mismo papel; una tarjeta o un tique sobre una mesa clara sí separan y se quedan como están)
+            // (si la "hoja" ocupa todo el encuadre, el papel no se distingue del fondo; y un [e] muy seguro sólo se cambia
+            // si es claramente un recuadro interior: en ambos casos se exige que deje fuera la mayor parte del texto)
+            val strict = fp.area >= PAPER_P_FULL || e.conf >= PAPER_E_SURE
             (fe.bgIn > PAPER_E_BG && fe.bgIn < PAPER_E_BG_MAX && fe.inkIn >= PAPER_E_BG_INK) ||
-                (((fe.inkIn < PAPER_E_INNER_INK && fe.paperIn >= PAPER_E_INNER_PAPER) || (fe.cov < PAPER_E_COV && fe.inkIn < PAPER_E_COV_INK)) &&
+                ((if (strict) fe.inkIn < PAPER_E_STRICT_INK && fe.paperIn >= PAPER_E_INNER_PAPER
+                else (fe.inkIn < PAPER_E_INNER_INK && fe.paperIn >= PAPER_E_INNER_PAPER) || (fe.cov < PAPER_E_COV && fe.inkIn < PAPER_E_COV_INK)) &&
                     fe.densOut >= PAPER_E_OUT_DENS && fe.densOut >= PAPER_E_OUT_REL * fe.densIn && !separatesMaterials(e.pts, b))
         }
         if (!replace) return e
@@ -1787,6 +1791,12 @@ class DocumentDetector(private val tier: DeviceTier) {
         private const val PAPER_E_INNER_PAPER = 0.75
         private const val PAPER_E_COV = 0.92
         private const val PAPER_E_COV_INK = 0.99
+        /** Hoja de área >= esto: ocupa el encuadre (papel no separado del fondo). */
+        private const val PAPER_P_FULL = 0.99
+        /** Confianza de bordes a partir de la cual sólo se sustituye un recuadro claramente interior. */
+        private const val PAPER_E_SURE = 0.9
+        /** Fracción de tinta dentro de [e] por debajo de la cual es claramente un recuadro interior. */
+        private const val PAPER_E_STRICT_INK = 0.5
 
         /** Anidamiento: calidad de borde por debajo de la cual se busca un candidato interior mejor, y la mínima de éste. */
         private const val NEST_WEAK = 0.35
