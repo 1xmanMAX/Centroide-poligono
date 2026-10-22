@@ -230,8 +230,8 @@ class DocumentDetector(private val tier: DeviceTier) {
         val m = runCatching { DetPaper.analyze(rgbSmall) }.getOrNull() ?: return e
         val p = runCatching { DetPaper.quad(m) }.getOrNull() ?: return e
         val fp = DetPaper.fit(m, p)
-        debugLog?.invoke("paper: P ink=%.3f bg=%.3f cov=%.3f area=%.2f cos=%.2f eje=${m.axis}".format(java.util.Locale.ROOT, fp.inkIn, fp.bgIn, fp.cov, fp.area, DetPaper.maxCos(p)))
-        if (fp.inkIn < PAPER_P_INK || fp.bgIn > PAPER_P_BG || fp.cov < PAPER_P_COV || fp.area < 0.1 || DetPaper.maxCos(p) > 0.5) return e
+        debugLog?.invoke("paper: P ink=%.3f bg=%.3f cov=%.3f area=%.2f cos=%.2f dIn=%.4f eje=${m.axis}".format(java.util.Locale.ROOT, fp.inkIn, fp.bgIn, fp.cov, fp.area, DetPaper.maxCos(p), fp.densIn))
+        if (fp.inkIn < PAPER_P_INK || fp.bgIn > PAPER_P_BG || fp.cov < PAPER_P_COV || fp.area < 0.1 || fp.densIn < PAPER_P_DENS || DetPaper.maxCos(p) > 0.5) return e
         val replace = if (e == null || e.conf < PAPER_USE_CONF) true else {
             val fe = DetPaper.fit(m, e.pts)
             debugLog?.invoke("paper: E ink=%.3f bg=%.3f cov=%.3f paperIn=%.3f conf=%.2f dIn=%.4f dOut=%.4f".format(java.util.Locale.ROOT, fe.inkIn, fe.bgIn, fe.cov, fe.paperIn, e.conf, fe.densIn, fe.densOut))
@@ -1778,6 +1778,8 @@ class DocumentDetector(private val tier: DeviceTier) {
         private const val PAPER_P_INK = 0.96
         private const val PAPER_P_BG = 0.05
         private const val PAPER_P_COV = 0.95
+        /** Densidad mínima de tinta en la hoja: una superficie lisa casi sin trazos (pista, pared) no es una página. */
+        private const val PAPER_P_DENS = 0.03
         /** Confianza de la app: por debajo, el candidato por bordes no se usaría (imagen completa). */
         private const val PAPER_USE_CONF = 0.35
         /** Candidato por bordes deficiente: fondo ajeno dentro, recuadro interior (tinta fuera + mismo papel) o recorte. */
