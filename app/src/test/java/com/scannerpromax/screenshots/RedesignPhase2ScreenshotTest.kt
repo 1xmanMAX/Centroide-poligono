@@ -282,7 +282,7 @@ class RedesignPhase2ScreenshotTest {
             pageThumbnail = { p, n, m -> FakePage(n * 3, m.padding(horizontal = 12.dp, vertical = 14.dp), dark = MaterialTheme.ui.isDark) },
             onPageClick = {},
             pageMenuGroups = { _, n -> pageMenuGroups(n, reviewPages.size, {}, {}, {}, {}, {}, {}, {}, {}) },
-            onAddCamera = {}, onAddGallery = {}, onText = {}, onFilter = {}, onExport = {},
+            onAddCamera = {}, onAddGallery = {}, onFilter = {}, onExport = {},
             snackbar = remember { SnackbarHostState() },
         )
     }

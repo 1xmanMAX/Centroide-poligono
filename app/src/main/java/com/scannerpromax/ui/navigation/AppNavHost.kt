@@ -244,7 +244,7 @@ fun AppNavHost(
                     onBack = { entry.ifActive(nav) { nav.backTo(Routes.HOME) } },
                     onEditPage = { pageId -> entry.ifActive(nav) { nav.navigate(Routes.editor(docId, pageId)) } },
                     onAddPages = { mode -> entry.ifActive(nav) { nav.navigate(Routes.camera(mode, docId)) } },
-                    onExport = { entry.ifActive(nav) { nav.navigate(Routes.export(docId)) } },
+                    onExport = { ids -> entry.ifActive(nav) { nav.navigate(Routes.export(docId, ids)) } },
                     onOcr = { pageId -> entry.ifActive(nav) { nav.navigate(Routes.ocr(docId, pageId)) } },
                 )
             }
@@ -266,11 +266,15 @@ fun AppNavHost(
 
             composable(
                 Routes.EXPORT,
-                arguments = listOf(navArgument("docId") { type = NavType.StringType }),
+                arguments = listOf(
+                    navArgument("docId") { type = NavType.StringType },
+                    navArgument("pages") { type = NavType.StringType; nullable = true; defaultValue = null },
+                ),
             ) { entry ->
                 ExportScreen(
                     container = container,
                     docId = entry.arguments?.getString("docId").orEmpty(),
+                    pageIds = com.scannerpromax.export.ExportSelection.decode(entry.arguments?.getString("pages")),
                     onBack = { entry.ifActive(nav) { nav.popBackStack() } },
                 )
             }

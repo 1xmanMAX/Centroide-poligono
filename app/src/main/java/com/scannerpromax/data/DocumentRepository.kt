@@ -1344,7 +1344,7 @@ class DocumentRepository(
     }
 
     /** Páginas sin OCR guardado (para estimar el trabajo antes de exportar). */
-    suspend fun pagesMissingOcr(docId: String): Int = get(docId)?.pages?.count { p ->
+    suspend fun pagesMissingOcr(docId: String, pageIds: List<String>? = null): Int = get(docId)?.pages?.filter { pageIds == null || it.id in pageIds }?.count { p ->
         val name = p.ocrFile
         name == null || !withContext(Dispatchers.IO) { File(docDir(docId), name).exists() }
     } ?: 0

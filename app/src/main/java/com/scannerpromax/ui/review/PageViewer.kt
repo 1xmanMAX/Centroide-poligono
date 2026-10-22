@@ -19,6 +19,14 @@ import android.graphics.Rect
 import android.os.Build
 import android.util.Log
 import androidx.activity.compose.BackHandler
+import android.content.Intent
+import android.widget.Toast
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.AnnotatedString
+import com.scannerpromax.ocr.LiveTextMapping
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -149,10 +157,10 @@ internal class ZoomState(val maxScale: Float = 5f) {
     }
 }
 
-/** Gestos de zoom: pellizco (hasta [ZoomState.maxScale]), arrastre y doble toque. */
-internal fun Modifier.zoomGestures(state: ZoomState): Modifier = this
+/** Gestos de zoom: pellizco (hasta [ZoomState.maxScale]), arrastre y doble toque. [onTap] = toque simple (opcional). */
+internal fun Modifier.zoomGestures(state: ZoomState, onTap: ((Offset) -> Unit)? = null): Modifier = this
     .onSizeChanged { state.viewport = it; state.clamp() }
-    .pointerInput(state) { detectTapGestures(onDoubleTap = { state.toggle(it) }) }
+    .pointerInput(state, onTap != null) { detectTapGestures(onDoubleTap = { state.toggle(it) }, onTap = onTap) }
     .pointerInput(state) {
         detectTransformGestures { centroid, pan, zoom, _ -> state.transform(centroid, pan, zoom) }
     }
@@ -162,6 +170,10 @@ internal fun Modifier.zoomGestures(state: ZoomState): Modifier = this
  * La imagen base se decodifica a la resolución de la pantalla (inSampleSize, sin cargar los 12-20 MP); al ampliar
  * más allá de esa resolución se decodifica SOLO la zona visible a resolución completa con [BitmapRegionDecoder]
  * (memoria acotada a ~2 pantallas), así el texto pequeño se ve nítido a cualquier zoom.
+ *
+ * "Texto en vivo": mantener pulsado sobre el texto selecciona la palabra (con dos tiradores y el menú Copiar ·
+ * Seleccionar todo · Compartir). Las cajas son las del OCR guardado de la página; si aún no tiene, se reconoce al
+ * abrirla ("Reconociendo texto…"). [onText] abre la pantalla de Texto reconocido (editar, IA, .txt, PDF+texto).
  */
 @Composable
 internal fun PageViewerDialog(
@@ -171,6 +183,7 @@ internal fun PageViewerDialog(
     startIndex: Int,
     onDismiss: () -> Unit,
     onEdit: (Page) -> Unit,
+    onText: (Page) -> Unit = {},
 ) {
     var index by remember { mutableIntStateOf(startIndex.coerceIn(0, max(0, pages.size - 1))) }
     val page = pages.getOrNull(index)
@@ -204,6 +217,57 @@ internal fun PageViewerDialog(
                 }
             }
             val f = file
+
+            // ---- Texto en vivo: OCR guardado de la página (o reconocerla ahora si aún no lo tiene).
+            val context = LocalContext.current
+            val clipboard = LocalClipboardManager.current
+            val live = remember(page.id, f?.path) { LiveTextState() }
+            LaunchedEffect(live, page.ocrFile) {
+                if (f == null) return@LaunchedEffect
+                val saved = repo.loadOcr(docId, page.id)
+                if (saved != null) {
+                    if (live.result != saved) live.load(saved)
+                    return@LaunchedEffect
+                }
+                live.status = LiveTextStatus.LOADING
+                val r = try {
+                    repo.ensureOcr(docId, page.id)
+                } catch (c: kotlinx.coroutines.CancellationException) {
+                    throw c
+                } catch (t: Throwable) {
+                    null
+                }
+                if (r != null) live.load(r) else live.status = LiveTextStatus.FAILED
+            }
+            BackHandler(enabled = live.range != null) { live.range = null }
+            // Pista "Mantén pulsado el texto…" unos segundos la primera vez que hay texto en esta apertura del visor.
+            var hintShown by remember { mutableStateOf(false) }
+            var showHint by remember { mutableStateOf(false) }
+            LaunchedEffect(live.status) {
+                if (live.status == LiveTextStatus.READY && !hintShown) {
+                    hintShown = true
+                    showHint = true
+                    delay(3500)
+                    showHint = false
+                }
+            }
+            fun copy(text: String) {
+                if (text.isBlank()) return
+                clipboard.setText(AnnotatedString(text))
+                // Android 13+ ya muestra su propia confirmación al copiar.
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) Toast.makeText(context, "Texto copiado", Toast.LENGTH_SHORT).show()
+                live.range = null
+            }
+            fun share(text: String) {
+                if (text.isBlank()) return
+                val intent = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, text)
+                }
+                runCatching { context.startActivity(Intent.createChooser(intent, "Compartir texto")) }
+                live.range = null
+            }
+
             // "Ver reconstruido": la página que daría el PDF reconstruido (DocLayout de la IA) para compararla con el
             // escaneo. Solo si la página está reconocida con IA.
             val appContext = LocalContext.current.applicationContext
@@ -254,72 +318,139 @@ internal fun PageViewerDialog(
                 }
             } else {
                 // key: al cambiar el archivo (página editada) se rehace el estado de zoom y la decodificación.
-                androidx.compose.runtime.key(f.path) { ZoomableFileImage(f, Modifier.fillMaxSize()) }
+                androidx.compose.runtime.key(f.path) {
+                    ZoomableFileImage(
+                        f,
+                        Modifier.fillMaxSize(),
+                        live = live,
+                        onCopy = ::copy,
+                        onShare = ::share,
+                        onLongPressWithoutText = {
+                            val msg = when (live.status) {
+                                LiveTextStatus.LOADING, LiveTextStatus.IDLE -> "Reconociendo texto…"
+                                LiveTextStatus.NONE -> "No se encontró texto en esta página"
+                                else -> "No se pudo reconocer el texto"
+                            }
+                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                        },
+                    )
+                }
             }
 
-            // Barra superior minimalista sobre un degradado: Cerrar · "Página X de N" · Reconstruido/Escaneo · Editar.
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.6f), Color.Transparent)))
-                    .statusBarsPadding()
-                    .padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 18.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                IconCircleButton(
-                    AppIcons.Close, "Cerrar", onDismiss,
-                    size = 36.dp, iconSize = 16.dp, containerColor = Color.White.copy(alpha = 0.16f), contentColor = Color.White, elevation = 0.dp,
-                )
-                Text(
-                    "Página ${index + 1} de ${pages.size}",
-                    color = Color.White.copy(alpha = 0.85f),
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    style = MaterialTheme.typography.titleSmall,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.weight(1f),
-                )
-                if (hasLayout) {
-                    ViewerTextButton(if (showRebuilt) "Ver escaneo" else "Ver reconstruido") { showRebuilt = !showRebuilt }
-                    Spacer(Modifier.width(6.dp))
-                }
-                Text(
-                    "Editar",
-                    color = Color.White,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    style = MaterialTheme.typography.titleSmall,
+            ViewerTopBar(
+                title = "Página ${index + 1} de ${pages.size}",
+                rebuiltLabel = if (hasLayout) (if (showRebuilt) "Ver escaneo" else "Ver reconstruido") else null,
+                onToggleRebuilt = { showRebuilt = !showRebuilt },
+                onClose = onDismiss,
+                onText = { onText(page) },
+                onEdit = { onEdit(page) },
+            )
+            val hintText = when {
+                showRebuilt || live.range != null -> null
+                live.status == LiveTextStatus.LOADING -> "Reconociendo texto…"
+                showHint -> "Mantén pulsado el texto para seleccionarlo"
+                else -> null
+            }
+            if (hintText != null) {
+                LiveTextHint(
+                    hintText,
+                    loading = live.status == LiveTextStatus.LOADING,
                     modifier = Modifier
-                        .clip(PillShape)
-                        .background(MaterialTheme.ui.accent)
-                        .clickable(role = Role.Button) { onEdit(page) }
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                        .align(Alignment.BottomCenter)
+                        .navigationBarsPadding()
+                        .padding(bottom = if (pages.size > 1) 78.dp else 22.dp),
                 )
             }
             if (pages.size > 1) {
-                Row(
-                    Modifier
-                        .align(Alignment.BottomCenter)
-                        .navigationBarsPadding()
-                        .padding(bottom = 18.dp)
-                        .clip(PillShape)
-                        .background(Color(0xE61C1C1E))
-                        .padding(4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    NavButton(AppIcons.Back, "Página anterior", index > 0) { index-- }
-                    Text(
-                        "${index + 1} / ${pages.size}",
-                        color = Color.White,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        style = MaterialTheme.typography.labelMedium,
-                        modifier = Modifier.padding(horizontal = 10.dp),
-                    )
-                    NavButton(AppIcons.Chevron, "Página siguiente", index < pages.size - 1) { index++ }
-                }
+                ViewerPager(
+                    index = index,
+                    total = pages.size,
+                    onPrev = { index-- },
+                    onNext = { index++ },
+                    modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 18.dp),
+                )
             }
         }
+    }
+}
+
+/** Barra superior del visor sobre un degradado: Cerrar · "Página X de N" · Reconstruido/Escaneo · Texto · Editar. */
+@Composable
+internal fun ViewerTopBar(
+    title: String,
+    rebuiltLabel: String?,
+    onToggleRebuilt: () -> Unit,
+    onClose: () -> Unit,
+    onText: () -> Unit,
+    onEdit: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier
+            .fillMaxWidth()
+            .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.6f), Color.Transparent)))
+            .statusBarsPadding()
+            .padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 18.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconCircleButton(
+            AppIcons.Close, "Cerrar", onClose,
+            size = 36.dp, iconSize = 16.dp, containerColor = Color.White.copy(alpha = 0.16f), contentColor = Color.White, elevation = 0.dp,
+        )
+        Text(
+            title,
+            color = Color.White.copy(alpha = 0.85f),
+            fontSize = 15.sp,
+            fontWeight = FontWeight.SemiBold,
+            style = MaterialTheme.typography.titleSmall,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.weight(1f),
+        )
+        if (rebuiltLabel != null) {
+            ViewerTextButton(rebuiltLabel, onToggleRebuilt)
+            Spacer(Modifier.width(6.dp))
+        }
+        // Pantalla de Texto reconocido (editar/corregir, Leer con IA, .txt, PDF+texto, todo el documento).
+        IconCircleButton(
+            AppIcons.Text, "Texto reconocido", onText,
+            size = 36.dp, iconSize = 17.dp, containerColor = Color.White.copy(alpha = 0.16f), contentColor = Color.White, elevation = 0.dp,
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            "Editar",
+            color = Color.White,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.SemiBold,
+            style = MaterialTheme.typography.titleSmall,
+            modifier = Modifier
+                .clip(PillShape)
+                .background(MaterialTheme.ui.accent)
+                .clickable(role = Role.Button, onClick = onEdit)
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+        )
+    }
+}
+
+/** Paginador inferior del visor: ‹ "2 / 10" ›. */
+@Composable
+internal fun ViewerPager(index: Int, total: Int, onPrev: () -> Unit, onNext: () -> Unit, modifier: Modifier = Modifier) {
+    Row(
+        modifier
+            .clip(PillShape)
+            .background(Color(0xE61C1C1E))
+            .padding(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        NavButton(AppIcons.Back, "Página anterior", index > 0, onPrev)
+        Text(
+            "${index + 1} / $total",
+            color = Color.White,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.padding(horizontal = 10.dp),
+        )
+        NavButton(AppIcons.Chevron, "Página siguiente", index < total - 1, onNext)
     }
 }
 
@@ -363,7 +494,14 @@ private class Detail(val image: ImageBitmap, val rect: Rect)
  * algún archivo la tuviera se muestra con [BitmapIO] (EXIF aplicado) y sin decodificación por regiones.
  */
 @Composable
-internal fun ZoomableFileImage(file: File, modifier: Modifier = Modifier) {
+internal fun ZoomableFileImage(
+    file: File,
+    modifier: Modifier = Modifier,
+    live: LiveTextState? = null,
+    onCopy: (String) -> Unit = {},
+    onShare: (String) -> Unit = {},
+    onLongPressWithoutText: () -> Unit = {},
+) {
     val zoom = remember(file) { ZoomState(maxScale = 5f) }
     BoxWithConstraints(modifier.clip(RoundedCornerShape(0.dp))) {
         val density = LocalDensity.current
@@ -432,7 +570,30 @@ internal fun ZoomableFileImage(file: File, modifier: Modifier = Modifier) {
             }
         }
 
-        Canvas(Modifier.fillMaxSize().zoomGestures(zoom)) {
+        // Texto en vivo: coordenadas OCR <-> vista con el zoom/desplazamiento ACTUAL (se leen al usarlas).
+        val geometry = rememberUpdatedState(Triple(vw, vh, b))
+        val mapping: () -> LiveTextMapping? = remember(zoom, live) {
+            {
+                val r = live?.result
+                val (w, h, bb) = geometry.value
+                if (r == null || r.imageWidth <= 0 || r.imageHeight <= 0) null
+                else LiveTextMapping(
+                    w.toFloat(), h.toFloat(), bb.fullW.toFloat(), bb.fullH.toFloat(),
+                    r.imageWidth.toFloat(), r.imageHeight.toFloat(), zoom.scale, zoom.offset.x, zoom.offset.y,
+                )
+            }
+        }
+        val haptics = LocalHapticFeedback.current
+        val gestures = if (live == null) Modifier.zoomGestures(zoom) else Modifier
+            .zoomGestures(zoom, onTap = { live.range = null })
+            .liveTextGestures(
+                live,
+                mapping,
+                onLongPressWithoutText = onLongPressWithoutText,
+                onSelected = { haptics.performHapticFeedback(HapticFeedbackType.LongPress) },
+            )
+
+        Canvas(Modifier.fillMaxSize().then(gestures)) {
             val ds = fit * zoom.scale
             val w = b.fullW * ds; val h = b.fullH * ds
             val left = size.width / 2f + zoom.offset.x - w / 2f
@@ -459,6 +620,7 @@ internal fun ZoomableFileImage(file: File, modifier: Modifier = Modifier) {
                 )
             }
         }
+        if (live != null) LiveTextLayer(live, mapping, onCopy, onShare)
     }
 }
 
