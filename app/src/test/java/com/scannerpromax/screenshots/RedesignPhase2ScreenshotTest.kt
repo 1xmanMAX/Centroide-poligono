@@ -87,9 +87,7 @@ import com.scannerpromax.ui.editor.TextAction
 import com.scannerpromax.ui.editor.ToolTab
 import com.scannerpromax.ui.export.ExportKind
 import com.scannerpromax.ui.export.ExportSheetContent
-import com.scannerpromax.ui.ocr.OcrContent
 import com.scannerpromax.ui.review.ReviewContent
-import com.scannerpromax.ui.review.pageMenuGroups
 import com.scannerpromax.ui.review.reviewSubtitle
 import com.scannerpromax.ui.settings.AiModelsContent
 import com.scannerpromax.ui.settings.CloudAiContent
@@ -141,7 +139,6 @@ class RedesignPhase2ScreenshotTest {
 
     @Test fun documento_oscuro() = shot("f2_documento_oscuro", dark = true) { Review() }
 
-    @Test fun documento_menu_claro() = shot("f2_documento_menu_pagina_claro", dark = false) { ReviewWithMenu() }
 
     // ------------------------------------------------------------------------------------- Editor
 
@@ -157,12 +154,6 @@ class RedesignPhase2ScreenshotTest {
 
     @Test fun exportar_imagenes_resultado_claro() =
         shot("f2_exportar_imagenes_resultado_claro", dark = false, statusColor = Color(0xFF1C1C1E)) { Export(ExportKind.IMAGES, saved = true) }
-
-    // ------------------------------------------------------------------------------------- OCR
-
-    @Test fun ocr_claro() = shot("f2_ocr_claro", dark = false) { Ocr() }
-
-    @Test fun ocr_oscuro() = shot("f2_ocr_oscuro", dark = true) { Ocr() }
 
     // ------------------------------------------------------------------------------------- Comprimir
 
@@ -281,23 +272,9 @@ class RedesignPhase2ScreenshotTest {
             onBack = {},
             pageThumbnail = { p, n, m -> FakePage(n * 3, m.padding(horizontal = 12.dp, vertical = 14.dp), dark = MaterialTheme.ui.isDark) },
             onPageClick = {},
-            pageMenuGroups = { _, n -> pageMenuGroups(n, reviewPages.size, {}, {}, {}, {}, {}, {}, {}, {}) },
             onAddCamera = {}, onAddGallery = {}, onFilter = {}, onExport = {},
             snackbar = remember { SnackbarHostState() },
         )
-    }
-
-    @Composable
-    private fun ReviewWithMenu() {
-        Box(Modifier.fillMaxSize()) {
-            Review()
-            MenuScrim(visible = true)
-            MoreMenuPanel(
-                pageMenuGroups(2, reviewPages.size, {}, {}, {}, {}, {}, {}, {}, {}),
-                {},
-                Modifier.align(Alignment.TopEnd).padding(top = 250.dp, end = 20.dp),
-            )
-        }
     }
 
     @Composable
@@ -381,40 +358,6 @@ class RedesignPhase2ScreenshotTest {
             busy = false,
             onCancel = {}, onSave = {}, onShare = {},
             thumbnail = { _, i, m -> FakePage(i + 2, m.padding(horizontal = 6.dp, vertical = 8.dp), dark = MaterialTheme.ui.isDark) },
-        )
-    }
-
-    @Composable
-    private fun Ocr() {
-        OcrContent(
-            docTitle = "Contrato de alquiler",
-            wholeDoc = false,
-            pageCount = 4,
-            currentPageIndex = 1,
-            onSelectAll = {}, onSelectPage = {},
-            imageContent = {
-                Box(Modifier.padding(vertical = 10.dp).size(width = 210.dp, height = 290.dp).background(Color.White)) {
-                    FakePage(4, Modifier.fillMaxSize().padding(16.dp), dark = false, ink = true)
-                }
-            },
-            aiRow = null,
-            selection = null,
-            onCopyWord = {}, onCopyLine = {}, onCloseSelection = {},
-            docProgress = null, status = "", onCancelDoc = {},
-            textLabel = "Texto completo",
-            counts = "86 palabras · 512 caracteres",
-            text = "CONTRATO DE ARRENDAMIENTO DE VIVIENDA\n\nEn Lima, a 21 de octubre de 2026, reunidos de una parte D. Juan Pérez, " +
-                "con DNI 12345678, en calidad de arrendador, y de otra parte Dña. María López, con DNI 87654321, en calidad de " +
-                "arrendataria, acuerdan celebrar el presente contrato de arrendamiento con las siguientes cláusulas:\n\n" +
-                "PRIMERA.- Objeto. El arrendador cede en arrendamiento la vivienda situada en Av. Arequipa 1234.",
-            onTextChange = {},
-            placeholder = "",
-            supporting = "Puedes corregir el texto: se usará en el PDF buscable y en las exportaciones",
-            docPages = emptyList(),
-            menuGroups = emptyList(),
-            onBack = {},
-            hasText = true, onCopy = {}, onShare = {},
-            showSave = true, saveEnabled = false, onSave = {},
         )
     }
 

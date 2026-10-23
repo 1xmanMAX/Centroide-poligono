@@ -60,7 +60,7 @@ import com.scannerpromax.ui.review.LiveTextState
 import com.scannerpromax.ui.review.ReviewContent
 import com.scannerpromax.ui.review.ViewerPager
 import com.scannerpromax.ui.review.ViewerTopBar
-import com.scannerpromax.ui.review.pageMenuGroups
+import com.scannerpromax.ui.review.ViewerHintAbovePager
 import com.scannerpromax.ui.review.reviewSubtitle
 import com.scannerpromax.ui.theme.EscanerTheme
 import com.scannerpromax.ui.theme.LocalPerf
@@ -88,17 +88,24 @@ class RedesignPhase3ScreenshotTest {
 
     private val outDir: File = File(System.getProperty("screenshots.out") ?: "build/screenshots").apply { mkdirs() }
 
-    @Test fun documento_claro() = shot("f3_documento_claro", dark = false) { Review(selection = false) }
+    // f4_: Documento sin ••• por página ni "Texto reconocido", barra repartida, visor con un único paginador.
+    @Test fun documento_claro() = shot("f4_documento_claro", dark = false) { Review(selection = false) }
 
-    @Test fun seleccion_claro() = shot("f3_documento_seleccion_claro", dark = false) { Review(selection = true) }
+    @Test fun documento_oscuro() = shot("f4_documento_oscuro", dark = true) { Review(selection = false) }
 
-    @Test fun seleccion_oscuro() = shot("f3_documento_seleccion_oscuro", dark = true) { Review(selection = true) }
+    @Test fun documento_leyendo_ia() = shot("f4_documento_leyendo_ia_claro", dark = false) { Review(selection = false, ai = true) }
 
-    @Test fun visor_texto() = shot("f3_visor_texto_seleccionado", dark = true, statusColor = Color.Black) { Viewer(zoom = 1f) }
+    @Test fun seleccion_claro() = shot("f4_documento_seleccion_claro", dark = false) { Review(selection = true) }
 
-    @Test fun visor_texto_zoom() = shot("f3_visor_texto_zoom", dark = true, statusColor = Color.Black) { Viewer(zoom = 2.2f) }
+    @Test fun seleccion_oscuro() = shot("f4_documento_seleccion_oscuro", dark = true) { Review(selection = true) }
 
-    @Test fun visor_reconociendo() = shot("f3_visor_reconociendo", dark = true, statusColor = Color.Black) { Viewer(zoom = 1f, recognizing = true) }
+    @Test fun visor_texto() = shot("f4_visor_texto_seleccionado", dark = true, statusColor = Color.Black) { Viewer(zoom = 1f) }
+
+    @Test fun visor_texto_zoom() = shot("f4_visor_texto_zoom", dark = true, statusColor = Color.Black) { Viewer(zoom = 2.2f) }
+
+    @Test fun visor_reconociendo() = shot("f4_visor_reconociendo", dark = true, statusColor = Color.Black) { Viewer(zoom = 1f, recognizing = true) }
+
+    @Test fun visor_reconstruido_pista() = shot("f4_visor_pista_reconstruido", dark = true, statusColor = Color.Black) { Viewer(zoom = 1f, hint = true, rebuilt = true) }
 
     @Test fun exportar_subconjunto() = shot("f3_exportar_3_de_10", dark = false, statusColor = Color(0xFF1C1C1E)) { Export() }
 
@@ -113,7 +120,7 @@ class RedesignPhase3ScreenshotTest {
     }
 
     @Composable
-    private fun Review(selection: Boolean) {
+    private fun Review(selection: Boolean, ai: Boolean = false) {
         ReviewContent(
             title = "Examen parcial 2025-20",
             subtitle = reviewSubtitle(reviewPages, ScanMode.DOCUMENT),
@@ -128,11 +135,12 @@ class RedesignPhase3ScreenshotTest {
             onBack = {},
             pageThumbnail = { _, n, m -> FakePage(n * 3, m.padding(horizontal = 12.dp, vertical = 14.dp), dark = MaterialTheme.ui.isDark) },
             onPageClick = {},
-            pageMenuGroups = { _, n -> pageMenuGroups(n, reviewPages.size, {}, {}, {}, {}, {}, {}, {}, {}) },
             onAddCamera = {}, onAddGallery = {}, onFilter = {}, onExport = {},
             snackbar = remember { SnackbarHostState() },
             selectionMode = selection,
             selectedIds = if (selection) setOf("p0", "p1", "p3") else emptySet(),
+            selectionMenuGroups = listOf(listOf(MoreMenuItem("Volver a leer con IA (3)", AppIcons.Sparkles) {})),
+            aiStatus = if (ai) "Leyendo con IA… 40 % · 6 páginas pendientes" else null,
         )
     }
 
@@ -210,13 +218,13 @@ class RedesignPhase3ScreenshotTest {
     }
 
     @Composable
-    private fun Viewer(zoom: Float, recognizing: Boolean = false) {
+    private fun Viewer(zoom: Float, recognizing: Boolean = false, hint: Boolean = false, rebuilt: Boolean = false) {
         val scan = remember { fakeScan() }
         val (bmp, ocr) = scan
         val live = remember {
             LiveTextState().apply {
                 load(ocr)
-                if (!recognizing) {
+                if (!recognizing && !hint) {
                     // "D. Juan Pérez, con DNI 12345678," (palabras 6..12 en orden de lectura del bloque 2).
                     val ws = words
                     val a = ws.indexOfFirst { it.text == "Juan" }
@@ -249,9 +257,13 @@ class RedesignPhase3ScreenshotTest {
                     )
                 }
             }
-            ViewerTopBar("Página 2 de 10", rebuiltLabel = null, onToggleRebuilt = {}, onClose = {}, onText = {}, onEdit = {})
-            if (recognizing) {
-                LiveTextHint("Reconociendo texto…", loading = true, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 78.dp))
+            ViewerTopBar(rebuiltLabel = if (rebuilt) "Reconstruido" else null, onToggleRebuilt = {}, onClose = {}, onEdit = {})
+            if (recognizing || hint) {
+                LiveTextHint(
+                    if (recognizing) "Reconociendo texto…" else "Mantén pulsado el texto para seleccionarlo",
+                    loading = recognizing,
+                    Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = ViewerHintAbovePager),
+                )
             }
             ViewerPager(1, 10, {}, {}, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 18.dp))
         }

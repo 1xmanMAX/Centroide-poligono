@@ -328,13 +328,13 @@ internal fun LiveTextHint(text: String, loading: Boolean, modifier: Modifier = M
         modifier
             .clip(PillShape)
             .background(Color(0xE61C1C1E))
-            .padding(horizontal = 12.dp, vertical = 7.dp),
+            .padding(horizontal = 11.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (loading) {
             CircularProgressIndicator(Modifier.size(12.dp), color = Color.White, strokeWidth = 1.5.dp)
             Spacer(Modifier.width(8.dp))
         }
-        Text(text, color = Color.White, fontSize = 13.sp, style = MaterialTheme.typography.bodySmall, maxLines = 1)
+        Text(text, color = Color.White.copy(alpha = 0.92f), fontSize = 12.sp, style = MaterialTheme.typography.bodySmall, maxLines = 1)
     }
 }

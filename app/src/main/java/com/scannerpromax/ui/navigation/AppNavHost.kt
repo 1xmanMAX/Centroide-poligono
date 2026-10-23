@@ -43,7 +43,6 @@ import com.scannerpromax.ui.components.ProgressHud
 import com.scannerpromax.ui.editor.EditorScreen
 import com.scannerpromax.ui.export.ExportScreen
 import com.scannerpromax.ui.home.HomeScreen
-import com.scannerpromax.ui.ocr.OcrScreen
 import com.scannerpromax.ui.review.ReviewScreen
 import com.scannerpromax.ui.settings.AiModelsScreen
 import com.scannerpromax.ui.settings.CloudAiScreen
@@ -245,7 +244,6 @@ fun AppNavHost(
                     onEditPage = { pageId -> entry.ifActive(nav) { nav.navigate(Routes.editor(docId, pageId)) } },
                     onAddPages = { mode -> entry.ifActive(nav) { nav.navigate(Routes.camera(mode, docId)) } },
                     onExport = { ids -> entry.ifActive(nav) { nav.navigate(Routes.export(docId, ids)) } },
-                    onOcr = { pageId -> entry.ifActive(nav) { nav.navigate(Routes.ocr(docId, pageId)) } },
                 )
             }
 
@@ -275,21 +273,6 @@ fun AppNavHost(
                     container = container,
                     docId = entry.arguments?.getString("docId").orEmpty(),
                     pageIds = com.scannerpromax.export.ExportSelection.decode(entry.arguments?.getString("pages")),
-                    onBack = { entry.ifActive(nav) { nav.popBackStack() } },
-                )
-            }
-
-            composable(
-                Routes.OCR,
-                arguments = listOf(
-                    navArgument("docId") { type = NavType.StringType },
-                    navArgument("pageId") { type = NavType.StringType },
-                ),
-            ) { entry ->
-                OcrScreen(
-                    container = container,
-                    docId = entry.arguments?.getString("docId").orEmpty(),
-                    pageId = entry.arguments?.getString("pageId").orEmpty(),
                     onBack = { entry.ifActive(nav) { nav.popBackStack() } },
                 )
             }

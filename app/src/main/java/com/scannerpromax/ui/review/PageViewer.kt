@@ -173,7 +173,9 @@ internal fun Modifier.zoomGestures(state: ZoomState, onTap: ((Offset) -> Unit)? 
  *
  * "Texto en vivo": mantener pulsado sobre el texto selecciona la palabra (con dos tiradores y el menú Copiar ·
  * Seleccionar todo · Compartir). Las cajas son las del OCR guardado de la página; si aún no tiene, se reconoce al
- * abrirla ("Reconociendo texto…"). [onText] abre la pantalla de Texto reconocido (editar, IA, .txt, PDF+texto).
+ * abrirla ("Reconociendo texto…").
+ *
+ * Cromo estilo Fotos de iOS: arriba ✕ · (Reconstruido) · Editar; abajo un único paginador "‹ 2 / 10 ›".
  */
 @Composable
 internal fun PageViewerDialog(
@@ -183,7 +185,6 @@ internal fun PageViewerDialog(
     startIndex: Int,
     onDismiss: () -> Unit,
     onEdit: (Page) -> Unit,
-    onText: (Page) -> Unit = {},
 ) {
     var index by remember { mutableIntStateOf(startIndex.coerceIn(0, max(0, pages.size - 1))) }
     val page = pages.getOrNull(index)
@@ -338,11 +339,9 @@ internal fun PageViewerDialog(
             }
 
             ViewerTopBar(
-                title = "Página ${index + 1} de ${pages.size}",
-                rebuiltLabel = if (hasLayout) (if (showRebuilt) "Ver escaneo" else "Ver reconstruido") else null,
+                rebuiltLabel = if (hasLayout) (if (showRebuilt) "Escaneo" else "Reconstruido") else null,
                 onToggleRebuilt = { showRebuilt = !showRebuilt },
                 onClose = onDismiss,
-                onText = { onText(page) },
                 onEdit = { onEdit(page) },
             )
             val hintText = when {
@@ -358,7 +357,7 @@ internal fun PageViewerDialog(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .navigationBarsPadding()
-                        .padding(bottom = if (pages.size > 1) 78.dp else 22.dp),
+                        .padding(bottom = if (pages.size > 1) ViewerHintAbovePager else 22.dp),
                 )
             }
             if (pages.size > 1) {
@@ -374,14 +373,19 @@ internal fun PageViewerDialog(
     }
 }
 
-/** Barra superior del visor sobre un degradado: Cerrar · "Página X de N" · Reconstruido/Escaneo · Texto · Editar. */
+/** Distancia desde abajo de la pista del visor cuando hay paginador (18 dp + 52 dp del paginador + 14 dp de aire). */
+internal val ViewerHintAbovePager = 84.dp
+
+/**
+ * Barra superior del visor sobre un degradado (estilo Fotos de iOS): ✕ a la izquierda y, a la derecha,
+ * "Reconstruido"/"Escaneo" (solo si la página tiene maquetación de la IA) y "Editar". El número de página va solo
+ * abajo, en el paginador.
+ */
 @Composable
 internal fun ViewerTopBar(
-    title: String,
     rebuiltLabel: String?,
     onToggleRebuilt: () -> Unit,
     onClose: () -> Unit,
-    onText: () -> Unit,
     onEdit: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -397,25 +401,11 @@ internal fun ViewerTopBar(
             AppIcons.Close, "Cerrar", onClose,
             size = 36.dp, iconSize = 16.dp, containerColor = Color.White.copy(alpha = 0.16f), contentColor = Color.White, elevation = 0.dp,
         )
-        Text(
-            title,
-            color = Color.White.copy(alpha = 0.85f),
-            fontSize = 15.sp,
-            fontWeight = FontWeight.SemiBold,
-            style = MaterialTheme.typography.titleSmall,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.weight(1f),
-        )
+        Spacer(Modifier.weight(1f))
         if (rebuiltLabel != null) {
             ViewerTextButton(rebuiltLabel, onToggleRebuilt)
-            Spacer(Modifier.width(6.dp))
+            Spacer(Modifier.width(8.dp))
         }
-        // Pantalla de Texto reconocido (editar/corregir, Leer con IA, .txt, PDF+texto, todo el documento).
-        IconCircleButton(
-            AppIcons.Text, "Texto reconocido", onText,
-            size = 36.dp, iconSize = 17.dp, containerColor = Color.White.copy(alpha = 0.16f), contentColor = Color.White, elevation = 0.dp,
-        )
-        Spacer(Modifier.width(8.dp))
         Text(
             "Editar",
             color = Color.White,

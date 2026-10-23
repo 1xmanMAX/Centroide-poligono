@@ -141,6 +141,7 @@ import com.scannerpromax.ui.components.ToggleRow
 import com.scannerpromax.ui.theme.PillShape
 import com.scannerpromax.ui.theme.ui
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.navigationBars
@@ -167,6 +168,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.scannerpromax.data.VersionedFile
+import com.scannerpromax.ai.AiRecognitionQueue
+import com.scannerpromax.ai.RecognitionEngine
 
 /** Ámbito de proceso para borrados diferidos (Deshacer): el borrado se completa aunque se salga de la pantalla. */
 private val reviewAppScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -181,7 +184,6 @@ fun ReviewScreen(
     onAddPages: (ScanMode) -> Unit,
     /** [pageIds] = solo esas páginas (modo selección), en el orden del documento; null = todas. */
     onExport: (pageIds: List<String>?) -> Unit,
-    onOcr: (pageId: String) -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -295,14 +297,6 @@ fun ReviewScreen(
         }
     }
 
-    fun move(page: Page, delta: Int) {
-        val i = order.indexOfFirst { it.id == page.id }
-        val j = (i + delta).coerceIn(0, order.size - 1)
-        if (i < 0 || i == j) return
-        order.add(j, order.removeAt(i))
-        commitOrder(order.map { it.id })
-    }
-
     /** Borrado optimista (una o varias páginas) con "Deshacer" en lugar de un diálogo de confirmación. */
     fun deleteWithUndo(pages: List<Page>) {
         val ids = pages.map { it.id }.filter { it !in pendingDeletes }.distinct()
@@ -343,8 +337,6 @@ fun ReviewScreen(
             }
         }
     }
-
-    fun deleteWithUndo(page: Page) = deleteWithUndo(listOf(page))
 
     val processor = remember { CaptureProcessor(container) }
     val gallery = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(50)) { uris ->
@@ -434,6 +426,34 @@ fun ReviewScreen(
     /** Páginas a las que se aplica la hoja de filtro: en modo selección solo las marcadas; null = todas. */
     var filterTargets by remember { mutableStateOf<List<String>?>(null) }
 
+    // ---- Lectura con IA (antes en "Texto reconocido"): se encola en segundo plano (con notificación cancelable) para
+    // todas las páginas o las seleccionadas; el progreso se ve bajo la cabecera con "Cancelar".
+    val aiStatusMap by container.aiQueue.status.collectAsState()
+    val aiDocStatuses = aiStatusMap.filterKeys { it.startsWith("$docId/") }
+    val engine by remember { container.settings.settings }.collectAsState(initial = null)
+    val aiEngineOn = engine?.recognitionEngine?.let { it != RecognitionEngine.BASIC } == true
+
+    fun readWithAi(targets: List<Page>) {
+        if (targets.isEmpty()) return
+        scope.launch {
+            repo.flushPendingWrites()
+            var queued = 0
+            for (p in targets) {
+                val err = container.aiQueue.reread(docId, p.id)
+                if (err != null) {
+                    toast(err)
+                    break
+                }
+                queued++
+            }
+            if (queued > 0) toast(if (queued == 1) "La página se leerá con IA en segundo plano" else "$queued páginas se leerán con IA en segundo plano")
+        }
+    }
+
+    fun cancelAi() {
+        aiDocStatuses.keys.forEach { container.aiQueue.cancel(docId, it.substringAfter('/')) }
+    }
+
     BackHandler(enabled = selectionMode && !importing) { exitSelection() }
     BackHandler(enabled = importing) { importJob?.cancel() }
 
@@ -448,7 +468,23 @@ fun ReviewScreen(
             MoreMenuItem("Filtro para todas las páginas", AppIcons.Wand, enabled = order.isNotEmpty()) { showApplyAll = true },
             MoreMenuItem("Unir con otro documento…", AppIcons.Duplicate, enabled = d != null) { showMerge = true },
         ),
-    )
+    ) + if (aiEngineOn || aiDocStatuses.isNotEmpty()) listOf(
+        listOf(
+            MoreMenuItem("Volver a leer con IA", AppIcons.Sparkles, enabled = order.isNotEmpty() && aiDocStatuses.isEmpty()) {
+                readWithAi(order.toList())
+            },
+        ),
+    ) else emptyList()
+    // ••• del modo selección: solo lo que no está ya en la barra inferior (leer con IA las páginas marcadas).
+    val selectionMenuGroups = if (aiEngineOn || aiDocStatuses.isNotEmpty()) listOf(
+        listOf(
+            MoreMenuItem(
+                if (selectedIds.size > 1) "Volver a leer con IA (${selectedIds.size})" else "Volver a leer con IA",
+                AppIcons.Sparkles,
+                enabled = selectedIds.isNotEmpty() && aiDocStatuses.isEmpty(),
+            ) { readWithAi(selectedPages()); exitSelection() },
+        ),
+    ) else emptyList()
 
     ReviewContent(
         title = d?.title,
@@ -496,6 +532,9 @@ fun ReviewScreen(
             )
         },
         docMenuGroups = docMenuGroups,
+        selectionMenuGroups = selectionMenuGroups,
+        aiStatus = aiProgressLabel(aiDocStatuses.values),
+        onCancelAi = { cancelAi() },
         onBack = onBack,
         pageThumbnail = { page, number, modifier -> PageThumbnail(container, docId, page, number, modifier) },
         // Tocar una hoja abre el visor con la imagen YA PROCESADA (la misma que se exporta), al instante y sin
@@ -514,20 +553,6 @@ fun ReviewScreen(
                 deleteWithUndo(pages)
                 exitSelection()
             }
-        },
-        pageMenuGroups = { page, number ->
-            pageMenuGroups(
-                number = number,
-                total = order.size,
-                onView = { viewerIndex = number - 1 },
-                onEdit = { onEditPage(page.id) },
-                onOcr = { onOcr(page.id) },
-                onMoveLeft = { move(page, -1) },
-                onMoveRight = { move(page, +1) },
-                onMoveFirst = { move(page, -order.size) },
-                onMoveLast = { move(page, order.size) },
-                onDelete = { deleteWithUndo(page) },
-            )
         },
         onAddCamera = { d?.let { onAddPages(it.mode) } },
         onAddGallery = { openGallery() },
@@ -559,7 +584,6 @@ fun ReviewScreen(
                 startIndex = start,
                 onDismiss = { viewerIndex = null },
                 onEdit = { p -> viewerIndex = null; reopenViewerPageId = p.id; onEditPage(p.id) },
-                onText = { p -> viewerIndex = null; reopenViewerPageId = p.id; onOcr(p.id) },
             )
         }
         // Vuelta del editor: se reabre el visor en la página editada (ya con su procesado nuevo). Solo en la composición
@@ -629,57 +653,36 @@ fun ReviewScreen(
     }
 }
 
-/** "4 páginas · Documento · Texto reconocido" (texto reconocido solo si todas las páginas lo tienen). */
-internal fun reviewSubtitle(pages: List<Page>, mode: ScanMode): String {
-    val withText = pages.count { it.ocrFile != null || it.ocrText != null }
-    val text = when {
-        pages.isEmpty() || withText == 0 -> null
-        withText == pages.size -> "Texto reconocido"
-        else -> "Texto en $withText de ${pages.size}"
-    }
-    return listOfNotNull(pagesLabel(pages.size), mode.label, text).joinToString(" · ")
-}
+/** "4 páginas · Documento" (el texto se reconoce solo y se selecciona en el visor: no se anuncia). */
+internal fun reviewSubtitle(pages: List<Page>, mode: ScanMode): String =
+    listOf(pagesLabel(pages.size), mode.label).joinToString(" · ")
 
-/** Opciones del menú ••• de cada página (ver, editar, OCR, mover y eliminar). */
-internal fun pageMenuGroups(
-    number: Int,
-    total: Int,
-    onView: () -> Unit,
-    onEdit: () -> Unit,
-    onOcr: () -> Unit,
-    onMoveLeft: () -> Unit,
-    onMoveRight: () -> Unit,
-    onMoveFirst: () -> Unit,
-    onMoveLast: () -> Unit,
-    onDelete: () -> Unit,
-): List<List<MoreMenuItem>> = listOf(
-    listOf(
-        MoreMenuItem("Ver a pantalla completa", AppIcons.Resolution, onClick = onView),
-        MoreMenuItem("Editar y mejorar", AppIcons.Wand, onClick = onEdit),
-        MoreMenuItem("Texto reconocido", AppIcons.Text, onClick = onOcr),
-    ),
-    buildList {
-        if (total > 1 && number > 1) {
-            add(MoreMenuItem("Mover antes", AppIcons.Back, onClick = onMoveLeft))
-            add(MoreMenuItem("Mover al principio", AppIcons.Back, onClick = onMoveFirst))
-        }
-        if (total > 1 && number < total) {
-            add(MoreMenuItem("Mover después", AppIcons.Chevron, onClick = onMoveRight))
-            add(MoreMenuItem("Mover al final", AppIcons.Chevron, onClick = onMoveLast))
-        }
-    },
-    listOf(MoreMenuItem("Eliminar página", AppIcons.Trash, destructive = true, onClick = onDelete)),
-)
+/**
+ * Progreso de la lectura con IA de las páginas del documento ([statuses] = estados de la cola de ESTE documento):
+ * "Leyendo con IA… 40 % · 3 páginas pendientes", "Esperando conexión…", "2 páginas en cola…"; null = nada en cola.
+ */
+internal fun aiProgressLabel(statuses: Collection<AiRecognitionQueue.PageStatus>): String? {
+    if (statuses.isEmpty()) return null
+    val n = statuses.size
+    val running = statuses.filterIsInstance<AiRecognitionQueue.PageStatus.Running>().firstOrNull()
+    return when {
+        running != null -> "Leyendo con IA… ${running.percent} %" + if (n > 1) " · $n páginas pendientes" else ""
+        statuses.all { it == AiRecognitionQueue.PageStatus.WaitingNetwork } -> "Esperando conexión para leer con IA"
+        n == 1 -> "1 página en cola para leer con IA"
+        else -> "$n páginas en cola para leer con IA"
+    }
+}
 
 /** Guarda la selección de páginas (ids) en el estado guardable. */
 internal val StringListSaver: Saver<List<String>, ArrayList<String>> = Saver(save = { ArrayList(it) }, restore = { it.toList() })
 
 /**
  * Pantalla Documento SIN estado (maqueta Revision.dc.html): "‹ Documentos" + •••, título grande de 30 sp con
- * subtítulo, cuadrícula de páginas (••• por página) y barra flotante Añadir · Filtro + Exportar.
+ * subtítulo, cuadrícula de páginas (solo el número debajo; tocar = visor) y barra flotante Añadir · Filtro + Exportar.
  * Mantener pulsada una página entra en el MODO SELECCIÓN ([selectionMode], estilo Fotos de iOS): círculos de check,
- * cabecera "Seleccionar todo · N seleccionadas · Cancelar" y barra Filtro · Eliminar + Exportar (N); mantener pulsada
- * y arrastrar = reordenar (en ambos modos). [overlays] = visor, capas de progreso…
+ * cabecera "Seleccionar todo · ••• · Cancelar" + "N seleccionadas" y barra Filtro · Eliminar + Exportar (N); mantener
+ * pulsada y arrastrar = reordenar (en ambos modos). [aiStatus] = progreso de la lectura con IA (con [onCancelAi]).
+ * [overlays] = visor, capas de progreso…
  */
 @Composable
 internal fun ReviewContent(
@@ -696,7 +699,6 @@ internal fun ReviewContent(
     onBack: () -> Unit,
     pageThumbnail: @Composable (page: Page, number: Int, modifier: Modifier) -> Unit,
     onPageClick: (index: Int) -> Unit,
-    pageMenuGroups: (page: Page, number: Int) -> List<List<MoreMenuItem>>,
     onAddCamera: () -> Unit,
     onAddGallery: () -> Unit,
     onFilter: () -> Unit,
@@ -707,6 +709,10 @@ internal fun ReviewContent(
     onCancelSelection: () -> Unit = {},
     onToggleSelectAll: () -> Unit = {},
     onDeleteSelected: () -> Unit = {},
+    /** ••• de la cabecera del modo selección (vacío = sin botón). */
+    selectionMenuGroups: List<List<MoreMenuItem>> = emptyList(),
+    aiStatus: String? = null,
+    onCancelAi: () -> Unit = {},
     overlays: @Composable BoxScope.() -> Unit = {},
 ) {
     val ui = MaterialTheme.ui
@@ -725,6 +731,7 @@ internal fun ReviewContent(
                 onToggleAll = onToggleSelectAll,
                 onCancel = onCancelSelection,
                 horizontalPadding = pad,
+                menuGroups = selectionMenuGroups,
             )
         } else LargeTitleHeader(
             title = title ?: "Cargando…",
@@ -791,6 +798,7 @@ internal fun ReviewContent(
                             color = ui.tertiaryLabel,
                             modifier = Modifier.padding(top = 10.dp),
                         )
+                        if (aiStatus != null) AiStatusRow(aiStatus, onCancelAi, Modifier.padding(top = 12.dp))
                     }
                 }
                 itemsIndexed(pages, key = { _, p -> p.id }, contentType = { _, _ -> "page" }) { index, page ->
@@ -818,7 +826,6 @@ internal fun ReviewContent(
                         modifier = itemModifier,
                         thumbnail = { m -> pageThumbnail(page, index + 1, m) },
                         onClick = { onPageClick(index) },
-                        menuGroups = { pageMenuGroups(page, index + 1) },
                     )
                 }
                 item(key = FOOTER_KEY, span = { GridItemSpan(maxLineSpan) }) {
@@ -828,9 +835,11 @@ internal fun ReviewContent(
         }
 
         // ------------------------------------------------ barra flotante inferior
+        // Cápsula de ancho completo: los botones de icono se reparten por igual en la zona izquierda y Exportar va a la
+        // derecha (mismo criterio en el modo selección).
         if (!loading && selectionMode) {
             FloatingBar(Modifier.align(Alignment.BottomCenter), fillWidth = true) {
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                BarItemsZone {
                     FloatingBarItem(AppIcons.Wand, "Filtro", onFilter, enabled = selectedCount > 0)
                     FloatingBarItem(AppIcons.Trash, "Eliminar", onDeleteSelected, enabled = selectedCount > 0)
                 }
@@ -844,7 +853,7 @@ internal fun ReviewContent(
             }
         } else if (!loading) {
             FloatingBar(Modifier.align(Alignment.BottomCenter), fillWidth = true) {
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                BarItemsZone {
                     Box {
                         FloatingBarItem(AppIcons.Plus, "Añadir", { addMenu = true })
                         MoreMenu(
@@ -870,6 +879,43 @@ internal fun ReviewContent(
         ) { data -> IosSnackbar(data) }
 
         overlays()
+    }
+}
+
+/** Zona izquierda de la barra flotante del Documento: ocupa el espacio libre y reparte sus botones por igual. */
+@Composable
+private fun RowScope.BarItemsZone(content: @Composable RowScope.() -> Unit) {
+    Row(
+        Modifier.weight(1f).padding(end = 10.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.CenterVertically,
+        content = content,
+    )
+}
+
+/** Fila de progreso de la lectura con IA bajo la cabecera: "Leyendo con IA… 40 %" · Cancelar. */
+@Composable
+private fun AiStatusRow(text: String, onCancel: () -> Unit, modifier: Modifier = Modifier) {
+    val ui = MaterialTheme.ui
+    Row(
+        modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(ui.card)
+            .padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        CircularProgressIndicator(Modifier.size(14.dp), color = ui.accent, strokeWidth = 2.dp)
+        Spacer(Modifier.width(10.dp))
+        Text(
+            text,
+            style = MaterialTheme.typography.bodySmall,
+            color = ui.label,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        HeaderTextButton("Cancelar", onCancel, Modifier)
     }
 }
 
@@ -899,8 +945,10 @@ internal fun SelectionHeader(
     onToggleAll: () -> Unit,
     onCancel: () -> Unit,
     horizontalPadding: Dp,
+    menuGroups: List<List<MoreMenuItem>> = emptyList(),
 ) {
     val ui = MaterialTheme.ui
+    var menu by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth()) {
         Row(
             Modifier
@@ -911,6 +959,13 @@ internal fun SelectionHeader(
         ) {
             HeaderTextButton(if (allSelected) "Ninguna" else "Seleccionar todo", onToggleAll, Modifier)
             Spacer(Modifier.weight(1f))
+            if (menuGroups.isNotEmpty()) {
+                Box {
+                    IconCircleButton(AppIcons.More, "Más opciones de las páginas seleccionadas", { menu = true }, size = 32.dp, iconSize = 16.dp)
+                    MoreMenu(expanded = menu, onDismissRequest = { menu = false }, groups = menuGroups, width = 280.dp)
+                }
+                Spacer(Modifier.width(4.dp))
+            }
             HeaderTextButton("Cancelar", onCancel, Modifier, bold = true)
         }
         Text(
@@ -966,7 +1021,7 @@ private fun SelectionCheck(selected: Boolean, modifier: Modifier = Modifier) {
     }
 }
 
-/** Celda de página: hoja blanca (radio 10, sombra suave) con ••• (o check en modo selección); debajo, número y filtro. */
+/** Celda de página: hoja blanca (radio 10, sombra suave), check en modo selección y, debajo, el número de página. */
 @Composable
 private fun PageCell(
     page: Page,
@@ -977,11 +1032,9 @@ private fun PageCell(
     modifier: Modifier,
     thumbnail: @Composable (Modifier) -> Unit,
     onClick: () -> Unit,
-    menuGroups: () -> List<List<MoreMenuItem>>,
 ) {
     val ui = MaterialTheme.ui
     val perf = LocalPerf.current
-    var menu by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(10.dp)
     Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
@@ -1008,35 +1061,10 @@ private fun PageCell(
                 // Velo suave sobre las marcadas (como Fotos) y círculo de check arriba a la derecha.
                 if (selected) Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = if (ui.isDark) 0.08f else 0.18f)))
                 SelectionCheck(selected, Modifier.align(Alignment.TopEnd).padding(8.dp))
-            } else Box(Modifier.align(Alignment.TopEnd)) {
-                // Área táctil de 44 dp con el círculo visual de 28 dp dentro.
-                Box(
-                    Modifier
-                        .size(44.dp)
-                        .clip(CircleShape)
-                        .clickable(role = Role.Button, onClickLabel = "Opciones de la página $number") { menu = true }
-                        .semantics { contentDescription = "Opciones de la página $number" },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Box(
-                        Modifier.size(28.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.42f)),
-                        contentAlignment = Alignment.Center,
-                    ) { Icon(AppIcons.More, null, tint = Color.White, modifier = Modifier.size(16.dp)) }
-                }
-                MoreMenu(expanded = menu, onDismissRequest = { menu = false }, groups = if (menu) menuGroups() else emptyList())
             }
         }
         Spacer(Modifier.height(8.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("$number", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold, color = ui.secondaryLabel)
-            Text(
-                " · ${page.edits.filter.uiFilter.label}",
-                style = MaterialTheme.typography.bodySmall,
-                color = ui.tertiaryLabel,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
+        Text("$number", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold, color = ui.secondaryLabel)
     }
 }
 

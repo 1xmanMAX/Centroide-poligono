@@ -9,7 +9,6 @@ object Routes {
     const val REVIEW = "review/{docId}"
     const val EDITOR = "editor/{docId}/{pageId}"
     const val EXPORT = "export/{docId}?pages={pages}"
-    const val OCR = "ocr/{docId}/{pageId}"
     const val COMPRESS = "compress"
     const val SETTINGS = "settings"
     const val AI_MODELS = "settings/ai-models"
@@ -27,5 +26,4 @@ object Routes {
     fun export(docId: String, pageIds: Collection<String>? = null) =
         com.scannerpromax.export.ExportSelection.encode(pageIds)
             ?.let { "export/$docId?pages=" + java.net.URLEncoder.encode(it, "UTF-8") } ?: "export/$docId"
-    fun ocr(docId: String, pageId: String) = "ocr/$docId/$pageId"
 }
