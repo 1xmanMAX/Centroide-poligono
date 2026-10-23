@@ -91,6 +91,11 @@
                 <action android:name="com.scannerpromax.action.SCAN" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
+            <!-- Editar un escaneo ya entregado (EXTRA_DOCUMENT_ID que devolvió SCAN): ver ScanContract. -->
+            <intent-filter>
+                <action android:name="com.scannerpromax.action.EDIT" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
         </activity>
 
         <provider

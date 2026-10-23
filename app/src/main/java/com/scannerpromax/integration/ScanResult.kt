@@ -29,6 +29,13 @@ data class DeliveryPlan(
 
 object DeliveryPlanner {
     /**
+     * ¿Se conserva el escaneo en la biblioteca tras entregarlo? SCAN y EDIT siempre (su id viaja en
+     * [ScanContract.EXTRA_DOCUMENT_ID] para poder editarlo después con EDIT); sin nadie esperando el resultado
+     * ([hasCaller] = false), también; si no, según el ajuste "Guardar una copia en Documentos" ([saveCopySetting]).
+     */
+    fun keepInLibrary(request: ScanRequest, saveCopySetting: Boolean, hasCaller: Boolean): Boolean =
+        request.source == RequestSource.SCAN || request.source == RequestSource.EDIT || saveCopySetting || !hasCaller
+    /**
      * [pageCount] = páginas del escaneo (>= 1). Las imágenes sin varios archivos solo pueden llevar una página: se
      * entrega [singleImagePage] (por defecto la primera; la revisión deja elegir otra).
      */
@@ -68,6 +75,8 @@ object ScanResultIntent {
         text: String? = null,
         thumbnail: Bitmap? = null,
         label: String = "Escaneo",
+        /** Id del documento guardado en la biblioteca (EXTRA_DOCUMENT_ID); null si no se conserva. */
+        documentId: String? = null,
     ): Intent {
         if (plan.writeToOutput) {
             // Contrato estándar: el archivo ya está en EXTRA_OUTPUT; el Intent no lleva datos.
@@ -92,7 +101,14 @@ object ScanResultIntent {
             putExtra(ScanContract.EXTRA_PAGE_COUNT, pageCount)
             putExtra(ScanContract.EXTRA_FILE_COUNT, uris.size)
             if (plan.includeText && text != null) putExtra(Intent.EXTRA_TEXT, text)
+            if (documentId != null) putExtra(ScanContract.EXTRA_DOCUMENT_ID, documentId)
         }
+    }
+
+    /** RESULT_CANCELED con el motivo ([ScanContract.EXTRA_ERROR]) y, si se conoce, el id pedido. */
+    fun error(code: String, documentId: String? = null): Intent = Intent().apply {
+        putExtra(ScanContract.EXTRA_ERROR, code)
+        if (documentId != null) putExtra(ScanContract.EXTRA_DOCUMENT_ID, documentId)
     }
 
     /** Escala [w]x[h] para que el lado largo no pase de [max] (nunca amplía). */

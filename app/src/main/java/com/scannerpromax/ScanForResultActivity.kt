@@ -26,6 +26,8 @@ import com.scannerpromax.integration.AttachExporter
 import com.scannerpromax.integration.DeliveryPlanner
 import com.scannerpromax.integration.IntentFactsReader
 import com.scannerpromax.integration.ParseResult
+import com.scannerpromax.integration.RequestSource
+import com.scannerpromax.integration.ScanContract
 import com.scannerpromax.integration.ScanRequest
 import com.scannerpromax.integration.ScanRequestParser
 import com.scannerpromax.integration.ScanResultIntent
@@ -44,7 +46,9 @@ import kotlinx.coroutines.withContext
 
 /**
  * Escáner "para otra app" (integración avanzada): la abren IMAGE_CAPTURE ("Cámara"), GET_CONTENT ("Adjuntar") y la
- * acción propia [com.scannerpromax.integration.ScanContract.ACTION_SCAN]. Por defecto es directa: cámara del escáner →
+ * acción propia [com.scannerpromax.integration.ScanContract.ACTION_SCAN]. También [ScanContract.ACTION_EDIT]: abre un
+ * documento ya guardado (el id que devolvió SCAN) en su pantalla de páginas y "Guardar en <app>" lo devuelve con el
+ * mismo formato de resultado. Por defecto es directa: cámara del escáner →
  * "Adjuntar (N)" → genera el archivo, lo devuelve con setResult y se cierra, volviendo sola a la otra app. Con el extra
  * REVIEW (SCAN) o el ajuste "Revisar antes de adjuntar" (GET_CONTENT / IMAGE_CAPTURE) pasa antes por una revisión.
  *
@@ -85,7 +89,15 @@ class ScanForResultActivity : ComponentActivity() {
             val parsed by produceState<ParseResult?>(initialValue = null, ready) {
                 if (!ready) return@produceState
                 val s = runCatching { container.settings.settings.first() }.getOrDefault(initial)
-                value = ScanRequestParser.parse(facts, s.attachAnyFormat, packageName, reviewSetting = s.attachReview)
+                val r = ScanRequestParser.parse(facts, s.attachAnyFormat, packageName, reviewSetting = s.attachReview)
+                // EDIT: el documento tiene que seguir en la biblioteca.
+                val editId = (r as? ParseResult.Ok)?.request?.takeIf { it.source == RequestSource.EDIT }?.documentId
+                value = if (editId != null && runCatching { container.documents.get(editId) }.getOrNull() == null) {
+                    ParseResult.Rejected(
+                        ScanContract.ERROR_DOCUMENT_NOT_FOUND,
+                        "Este escaneo ya no está en Escáner Pro Max (se borró o se reinstaló la app). Escanéalo de nuevo.",
+                    )
+                } else r
             }
             CompositionLocalProvider(LocalPerf provides perf) {
                 EscanerTheme(darkTheme = settings.darkTheme, dynamicColor = settings.dynamicColor) {
@@ -97,11 +109,18 @@ class ScanForResultActivity : ComponentActivity() {
                             callerName = callerName ?: p.request.callerLabel,
                             canReturnResult = canReturnResult,
                             callbacks = AttachCallbacks(
-                                onCancel = { docId -> cancel(docId) },
+                                // EDIT: el documento es de la biblioteca; cancelar nunca lo borra.
+                                onCancel = { docId -> cancel(docId.takeIf { p.request.source != RequestSource.EDIT }) },
                                 onAttach = { docId, single, progress -> attach(p.request, docId, single, progress) },
+                                onAttachPages = { docId, pageIds, progress -> attach(p.request, docId, 0, progress, pageIds) },
                             ),
                         )
                         is ParseResult.Rejected -> LaunchedEffect(p) {
+                            setResult(
+                                Activity.RESULT_CANCELED,
+                                ScanResultIntent.error(p.reason, (facts.extras[ScanContract.EXTRA_DOCUMENT_ID] as? CharSequence)?.toString()
+                                    ?.let { ScanRequestParser.sanitizeDocumentId(it) }),
+                            )
                             Toast.makeText(this@ScanForResultActivity, p.message, Toast.LENGTH_LONG).show()
                             finish()
                         }
@@ -120,13 +139,28 @@ class ScanForResultActivity : ComponentActivity() {
         if (docId != null) deleteLater(docId)
     }
 
-    private suspend fun attach(request: ScanRequest, docId: String, singleImagePage: Int, progress: (Float, String) -> Unit) {
+    /**
+     * Genera y entrega. [pageIds] = páginas (en orden) a entregar en lugar de las del documento (EDIT: las visibles).
+     * El documento se conserva en la biblioteca (y su id viaja en EXTRA_DOCUMENT_ID para poder editarlo luego) si el
+     * ajuste "Guardar una copia" está activo, si nadie espera el resultado, y SIEMPRE con SCAN/EDIT: la app que llama
+     * puede pedir editarlo después. El usuario no ve nada distinto.
+     */
+    private suspend fun attach(
+        request: ScanRequest,
+        docId: String,
+        singleImagePage: Int,
+        progress: (Float, String) -> Unit,
+        pageIds: List<String>? = null,
+    ) {
         val app = application as ScannerApp
         val container = app.container
         val settings = runCatching { container.settings.settings.first() }.getOrDefault(AppSettings())
         val doc = container.documents.get(docId) ?: throw IllegalStateException("El escaneo ya no existe")
-        val plan = DeliveryPlanner.plan(request, doc.pages.size, singleImagePage)
-        val out = AttachExporter(applicationContext, container).deliver(request, plan, docId, settings, progress)
+        val pageCount = pageIds?.count { id -> doc.pages.any { it.id == id } } ?: doc.pages.size
+        if (pageCount == 0) throw IllegalStateException("No hay páginas")
+        val plan = DeliveryPlanner.plan(request, pageCount, singleImagePage)
+        val out = AttachExporter(applicationContext, container).deliver(request, plan, docId, settings, progress, pageIds)
+        val keep = DeliveryPlanner.keepInLibrary(request, settings.attachSaveCopy, callingActivity != null)
         val result = ScanResultIntent.build(
             plan = plan,
             uris = out.uris,
@@ -134,14 +168,16 @@ class ScanForResultActivity : ComponentActivity() {
             text = out.text,
             thumbnail = out.thumbnail,
             label = request.title ?: doc.title,
+            documentId = docId.takeIf { keep },
         )
-        // Sin nadie esperando el resultado (lanzada con startActivity), el escaneo se guarda siempre.
-        val keep = settings.attachSaveCopy || callingActivity == null
         delivered = true
         setResult(Activity.RESULT_OK, result)
         finish()
         if (!keep) {
             deleteLater(docId)
+        } else if (request.source == RequestSource.EDIT) {
+            // El documento ya era de la biblioteca: ni se renombra ni se anuncia.
+            if (callingActivity == null) Toast.makeText(applicationContext, "Cambios guardados", Toast.LENGTH_SHORT).show()
         } else {
             request.title?.let { t ->
                 CoroutineScope(SupervisorJob() + Dispatchers.IO).launch { runCatching { container.documents.rename(docId, t) } }

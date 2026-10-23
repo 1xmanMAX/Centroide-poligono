@@ -72,10 +72,16 @@ class AttachExporter(private val context: Context, private val container: AppCon
         docId: String,
         settings: AppSettings,
         progress: (Float, String) -> Unit,
+        /**
+         * Páginas (ids, en orden) sobre las que se indexa [DeliveryPlan.pages]; null = las del documento. La edición
+         * (EDIT) pasa las visibles en pantalla, así no viajan las que están pendientes de borrar ("Deshacer").
+         */
+        pageIds: List<String>? = null,
     ): Delivered {
         val repo = container.documents
         val doc = repo.get(docId) ?: throw IOException("El escaneo ya no existe")
-        val pages = plan.pages.mapNotNull { doc.pages.getOrNull(it) }
+        val source = pageIds?.mapNotNull { id -> doc.pages.firstOrNull { it.id == id } } ?: doc.pages
+        val pages = plan.pages.mapNotNull { source.getOrNull(it) }
         if (pages.isEmpty()) throw IOException("No hay páginas")
         withContext(Dispatchers.IO) { AttachFiles.cleanup(context.cacheDir) }
 

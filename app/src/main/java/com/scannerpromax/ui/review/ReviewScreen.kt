@@ -184,6 +184,12 @@ fun ReviewScreen(
     onAddPages: (ScanMode) -> Unit,
     /** [pageIds] = solo esas páginas (modo selección), en el orden del documento; null = todas. */
     onExport: (pageIds: List<String>?) -> Unit,
+    /**
+     * Abierta por otra app para editar un escaneo suyo (acción EDIT): cambia "‹ Documentos" y "Exportar" por los
+     * textos de [ReviewCallerMode], y el botón principal entrega SIEMPRE todas las páginas visibles en su orden
+     * ([onExport] recibe la lista, sin las borradas pendientes de "Deshacer"). null = pantalla Documento normal.
+     */
+    callerMode: ReviewCallerMode? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -567,7 +573,10 @@ fun ReviewScreen(
             }
         },
         onExport = {
-            if (selectionMode) {
+            if (callerMode != null) {
+                if (selectionMode) exitSelection()
+                if (order.isEmpty()) toast("No hay páginas") else onExport(order.map { it.id })
+            } else if (selectionMode) {
                 val ids = selectedPages().map { it.id }
                 if (ids.isEmpty()) toast("Selecciona alguna página") else onExport(ids.takeIf { it.size < order.size })
             } else {
@@ -575,6 +584,8 @@ fun ReviewScreen(
             }
         },
         snackbar = snackbar,
+        backLabel = callerMode?.backLabel ?: "Documentos",
+        primaryLabel = callerMode?.primaryLabel,
     ) {
         viewerIndex?.let { start ->
             PageViewerDialog(
@@ -653,6 +664,9 @@ fun ReviewScreen(
     }
 }
 
+/** Pantalla Documento abierta por otra app (acción EDIT): textos de la cabecera y del botón principal. */
+data class ReviewCallerMode(val backLabel: String, val primaryLabel: String)
+
 /** "4 páginas · Documento" (el texto se reconoce solo y se selecciona en el visor: no se anuncia). */
 internal fun reviewSubtitle(pages: List<Page>, mode: ScanMode): String =
     listOf(pagesLabel(pages.size), mode.label).joinToString(" · ")
@@ -713,6 +727,10 @@ internal fun ReviewContent(
     selectionMenuGroups: List<List<MoreMenuItem>> = emptyList(),
     aiStatus: String? = null,
     onCancelAi: () -> Unit = {},
+    /** Texto del "‹" de la cabecera. */
+    backLabel: String = "Documentos",
+    /** Texto del botón principal en lugar de "Exportar" (edición para otra app); con él siempre está activo. */
+    primaryLabel: String? = null,
     overlays: @Composable BoxScope.() -> Unit = {},
 ) {
     val ui = MaterialTheme.ui
@@ -735,7 +753,7 @@ internal fun ReviewContent(
             )
         } else LargeTitleHeader(
             title = title ?: "Cargando…",
-            backLabel = "Documentos",
+            backLabel = backLabel,
             onBack = onBack,
             subtitle = subtitle,
             titleStyle = MaterialTheme.typography.headlineLarge,
@@ -844,10 +862,10 @@ internal fun ReviewContent(
                     FloatingBarItem(AppIcons.Trash, "Eliminar", onDeleteSelected, enabled = selectedCount > 0)
                 }
                 PrimaryCapsuleButton(
-                    if (selectedCount > 0) "Exportar ($selectedCount)" else "Exportar",
+                    primaryLabel ?: if (selectedCount > 0) "Exportar ($selectedCount)" else "Exportar",
                     onClick = onExport,
                     icon = AppIcons.Share,
-                    enabled = selectedCount > 0,
+                    enabled = if (primaryLabel != null) pages.isNotEmpty() else selectedCount > 0,
                     height = 48.dp,
                 )
             }
@@ -869,7 +887,7 @@ internal fun ReviewContent(
                     }
                     FloatingBarItem(AppIcons.Wand, "Filtro", onFilter)
                 }
-                PrimaryCapsuleButton("Exportar", onClick = onExport, icon = AppIcons.Share, enabled = pages.isNotEmpty(), height = 48.dp)
+                PrimaryCapsuleButton(primaryLabel ?: "Exportar", onClick = onExport, icon = AppIcons.Share, enabled = pages.isNotEmpty(), height = 48.dp)
             }
         }
 

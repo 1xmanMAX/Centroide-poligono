@@ -20,7 +20,7 @@ enum class AnyFormatDefault(val label: String) {
 }
 
 /** Por dónde llegó la petición. */
-enum class RequestSource { IMAGE_CAPTURE, GET_CONTENT, SCAN }
+enum class RequestSource { IMAGE_CAPTURE, GET_CONTENT, SCAN, EDIT }
 
 /**
  * Petición de escaneo para otra app, ya validada.
@@ -32,6 +32,7 @@ enum class RequestSource { IMAGE_CAPTURE, GET_CONTENT, SCAN }
  *  - [review]: pasar por la pantalla de revisión antes de entregar. false = modo directo (al terminar en la cámara se
  *    genera y entrega el archivo sin más pasos).
  *  - [callerLabel]: nombre de la app que llama (extra CALLER_LABEL); solo se usa si no se obtiene del sistema.
+ *  - [documentId]: EDIT = documento de la biblioteca a editar (ya validado como id seguro; puede no existir).
  */
 data class ScanRequest(
     val source: RequestSource,
@@ -46,6 +47,7 @@ data class ScanRequest(
     val wantsThumbnail: Boolean = false,
     val review: Boolean = false,
     val callerLabel: String? = null,
+    val documentId: String? = null,
 )
 
 /** Hechos del Intent recibido, ya extraídos a tipos simples (así el análisis es JVM puro y testeable). */
@@ -92,7 +94,8 @@ object ScanRequestParser {
             ACTION_IMAGE_CAPTURE -> parseImageCapture(facts, ownPackage)
             ACTION_GET_CONTENT -> parseGetContent(facts, anyDefault)
             ScanContract.ACTION_SCAN -> return parseScan(facts)
-            else -> return ParseResult.Rejected("unsupported_action", "Petición no compatible")
+            ScanContract.ACTION_EDIT -> return parseEdit(facts)
+            else -> return ParseResult.Rejected(ScanContract.ERROR_UNSUPPORTED, "Petición no compatible")
         }
         if (result !is ParseResult.Ok) return result
         return ParseResult.Ok(
@@ -213,6 +216,35 @@ object ScanRequestParser {
             ),
         )
     }
+
+    // ------------------------------------------------------------------------------------------- EDIT
+
+    /**
+     * EDIT: mismo formato de resultado que SCAN (FORMAT, MULTI_PAGE, FILTER, OCR, TITLE, CALLER_LABEL), sin revisión ni
+     * cámara inicial: se abre el documento [ScanContract.EXTRA_DOCUMENT_ID]. MULTI_PAGE solo decide si las imágenes van
+     * una por página; las páginas del documento se conservan todas. El filtro pedido NO se aplica (pisaría los retoques
+     * que el usuario ya hizo).
+     */
+    private fun parseEdit(facts: IntentFacts): ParseResult {
+        val id = sanitizeDocumentId(string(facts.extras[ScanContract.EXTRA_DOCUMENT_ID]))
+            ?: return ParseResult.Rejected(ScanContract.ERROR_INVALID_DOCUMENT_ID, "No se indicó qué documento editar")
+        val scan = (parseScan(facts) as ParseResult.Ok).request
+        return ParseResult.Ok(
+            scan.copy(
+                source = RequestSource.EDIT,
+                filter = null,
+                review = true,
+                documentId = id,
+            ),
+        )
+    }
+
+    /**
+     * Id de documento seguro (se usa como nombre de carpeta): letras, dígitos, "_" y "-", máx.
+     * [ScanContract.MAX_DOCUMENT_ID]. Cualquier otra cosa (rutas, "..", vacío) → null.
+     */
+    fun sanitizeDocumentId(s: String?): String? =
+        s?.trim()?.takeIf { it.length in 1..ScanContract.MAX_DOCUMENT_ID && it.matches(Regex("[A-Za-z0-9_-]+")) }
 
     fun parseMode(s: String?): ScanMode = when (s?.trim()?.lowercase()) {
         "book", "libro" -> ScanMode.BOOK

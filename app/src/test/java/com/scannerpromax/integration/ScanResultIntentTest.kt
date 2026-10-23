@@ -196,6 +196,54 @@ class ScanResultIntentTest {
         }
     }
 
+    @Test fun documentId_inResultWhenKept() {
+        val plan = DeliveryPlanner.plan(req(IntentFacts(ScanContract.ACTION_SCAN)), 2)
+        val i = ScanResultIntent.build(plan, listOf(uri("Escaneo.pdf")), pageCount = 2, documentId = "0123456789abcdef")
+        assertEquals("0123456789abcdef", i.getStringExtra(ScanContract.EXTRA_DOCUMENT_ID))
+        val none = ScanResultIntent.build(plan, listOf(uri("Escaneo.pdf")), pageCount = 2)
+        assertFalse(none.hasExtra(ScanContract.EXTRA_DOCUMENT_ID))
+    }
+
+    @Test fun edit_resultHasSameShapeAsScan() {
+        val editReq = req(IntentFacts(ScanContract.ACTION_EDIT, extras = mapOf(ScanContract.EXTRA_DOCUMENT_ID to "abc123")))
+        val plan = DeliveryPlanner.plan(editReq, 3)
+        val i = ScanResultIntent.build(plan, listOf(uri("Escaneo.pdf")), pageCount = 3, documentId = editReq.documentId)
+        assertEquals(uri("Escaneo.pdf"), i.data)
+        assertEquals("application/pdf", i.type)
+        assertTrue(i.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION != 0)
+        assertEquals(1, i.clipData!!.itemCount)
+        @Suppress("DEPRECATION")
+        assertEquals(listOf(uri("Escaneo.pdf")), i.getParcelableArrayListExtra<Uri>(ScanContract.EXTRA_URIS))
+        assertEquals("application/pdf", i.getStringExtra(ScanContract.EXTRA_MIME_TYPE))
+        assertEquals(3, i.getIntExtra(ScanContract.EXTRA_PAGE_COUNT, -1))
+        assertEquals("abc123", i.getStringExtra(ScanContract.EXTRA_DOCUMENT_ID))
+    }
+
+    @Test fun errorIntent() {
+        val e = ScanResultIntent.error(ScanContract.ERROR_DOCUMENT_NOT_FOUND, "abc")
+        assertEquals("document_not_found", e.getStringExtra(ScanContract.EXTRA_ERROR))
+        assertEquals("abc", e.getStringExtra(ScanContract.EXTRA_DOCUMENT_ID))
+        assertFalse(ScanResultIntent.error("x").hasExtra(ScanContract.EXTRA_DOCUMENT_ID))
+    }
+
+    @Test fun reader_editDocumentId_fullKeyAndAlias() {
+        val full = IntentFactsReader.read(Intent(ScanContract.ACTION_EDIT).putExtra(ScanContract.EXTRA_DOCUMENT_ID, "abc"))
+        assertEquals("abc", (ScanRequestParser.parse(full, AnyFormatDefault.PDF, pkg) as ParseResult.Ok).request.documentId)
+        val alias = IntentFactsReader.read(Intent(ScanContract.ACTION_EDIT).putExtra("documentId", "def"))
+        assertEquals("def", (ScanRequestParser.parse(alias, AnyFormatDefault.PDF, pkg) as ParseResult.Ok).request.documentId)
+        val missing = IntentFactsReader.read(Intent(ScanContract.ACTION_EDIT))
+        assertEquals(
+            ScanContract.ERROR_INVALID_DOCUMENT_ID,
+            (ScanRequestParser.parse(missing, AnyFormatDefault.PDF, pkg) as ParseResult.Rejected).reason,
+        )
+    }
+
+    @Test fun editLabels() {
+        assertEquals("Guardar en PixPin", com.scannerpromax.ui.attach.editSaveLabel("PixPin", true))
+        assertEquals("Guardar y volver", com.scannerpromax.ui.attach.editSaveLabel(null, true))
+        assertEquals("Listo", com.scannerpromax.ui.attach.editSaveLabel("PixPin", false))
+    }
+
     @Test fun sdkSanity() {
         assertEquals(34, Build.VERSION.SDK_INT)
     }

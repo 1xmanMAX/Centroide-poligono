@@ -344,8 +344,9 @@ internal fun SettingsContent(
                     }
                 }
                 InsetGroup(
-                    footer = "El escaneo queda también en Documentos, aunque se haya enviado a otra app. Calidad y tamaño de " +
-                        "página: los de Exportación.",
+                    footer = "El escaneo queda también en Documentos, aunque se haya enviado a otra app. Las apps que usan " +
+                        "la acción del escáner (p. ej. PixPin) lo guardan siempre, para poder pulsar «Editar» más tarde. " +
+                        "Calidad y tamaño de página: los de Exportación.",
                 ) {
                     item {
                         ToggleRow(

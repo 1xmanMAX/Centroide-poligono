@@ -42,6 +42,7 @@ desactivado por defecto).
 | `MediaStore.ACTION_IMAGE_CAPTURE` con `EXTRA_OUTPUT` (`content://`) | JPEG escrito en ese Uri (resultado sin datos) |
 | `MediaStore.ACTION_IMAGE_CAPTURE` sin `EXTRA_OUTPUT` | miniatura `Bitmap` en el extra `"data"` |
 | `com.scannerpromax.action.SCAN` | ver contrato abajo |
+| `com.scannerpromax.action.EDIT` | reabre un escaneo ya entregado (ver abajo) |
 
 Calidad y tamaño de página: los de Ajustes → Exportación. Los archivos se guardan en la caché propia
 (`cache/attach/`, se borran a las 24 h) y se exponen con `FileProvider` + `FLAG_GRANT_READ_URI_PERMISSION`.
@@ -67,7 +68,10 @@ captura se entrega directamente (en modo `id`, tras el reverso u «Omitir»).
 
 Resultado (`RESULT_OK`): `data` = Uri `content://` del primer archivo, `clipData` = todos, `type` = MIME, y los extras
 `com.scannerpromax.extra.URIS` (`ArrayList<Uri>`), `…MIME_TYPE`, `…PAGE_COUNT` (Int), `…FILE_COUNT` (Int),
-`…RESULT_FORMAT` (`pdf`/`jpg`/`png`) y, con `ocr`, `Intent.EXTRA_TEXT`. Cancelar → `RESULT_CANCELED`.
+`…RESULT_FORMAT` (`pdf`/`jpg`/`png`), `com.scannerpromax.extra.DOCUMENT_ID` (String: id estable del documento en la
+biblioteca del escáner, para editarlo después con `EDIT`) y, con `ocr`, `Intent.EXTRA_TEXT`. Cancelar →
+`RESULT_CANCELED`. Con `SCAN` el escaneo se guarda siempre en Documentos (aunque el ajuste «Guardar también una copia»
+esté apagado) para que `DOCUMENT_ID` sirva; con `GET_CONTENT` solo viaja si el ajuste lo guarda.
 El permiso de lectura es temporal: copia el archivo a tu almacenamiento si lo necesitas más tarde.
 
 ```kotlin
@@ -95,8 +99,34 @@ fun escanearFactura() {
 En Android 11+ declara en tu manifiesto la visibilidad del escáner si quieres comprobar antes si está instalado:
 `<queries><intent><action android:name="com.scannerpromax.action.SCAN" /></intent></queries>`.
 
+### Acción `com.scannerpromax.action.EDIT` (editar un escaneo ya adjuntado)
+Petición: `Intent("com.scannerpromax.action.EDIT")` con `com.scannerpromax.extra.DOCUMENT_ID` (alias `documentId`,
+obligatorio: el que devolvió `SCAN`) y, opcionalmente, los mismos extras de formato que `SCAN` (`FORMAT`, `MULTI_PAGE`,
+`OCR`, `TITLE`, `CALLER_LABEL`; `FILTER` se ignora para no pisar los retoques). Lánzala con
+`startActivityForResult`/`StartActivityForResult()`.
+
+Se abre ESE documento directamente en su pantalla de páginas (la misma de la app): tocar una página → visor → Editar
+(recortar, girar, filtro, borrar manchas), mantener y arrastrar para reordenar, seleccionar y quitar páginas, «Añadir»
+con la cámara o la galería y «Filtro» para todas. Arriba «‹ Cancelar»; abajo **«Guardar en <app>»**.
+
+- Guardar → `RESULT_OK` con el **mismo formato de resultado que `SCAN`** (`data`, `clipData` con
+  `FLAG_GRANT_READ_URI_PERMISSION`, `URIS`, `MIME_TYPE`, `PAGE_COUNT`, `FILE_COUNT`, `RESULT_FORMAT` y el mismo
+  `DOCUMENT_ID`). Sustituye tu copia del archivo por la nueva.
+- Cancelar/Atrás → `RESULT_CANCELED` (si hubo cambios se pregunta antes; quedan guardados en el escáner).
+- Id inexistente (documento borrado, app reinstalada) o inválido → `RESULT_CANCELED` con
+  `com.scannerpromax.extra.ERROR` = `document_not_found` / `invalid_document_id` y un aviso al usuario. Ofrece escanear
+  de nuevo con `SCAN`.
+
+```kotlin
+val edit = Intent("com.scannerpromax.action.EDIT")
+    .putExtra("com.scannerpromax.extra.DOCUMENT_ID", idGuardado)
+    .putExtra("com.scannerpromax.extra.FORMAT", "pdf")
+    .putExtra("com.scannerpromax.extra.CALLER_LABEL", "Mi app")
+editar.launch(edit) // en el callback: RESULT_OK → reemplazar el archivo; ERROR=document_not_found → avisar
+```
+
 Desde adb: `adb shell am start -a com.scannerpromax.action.SCAN --es mode book --es format jpeg` (con revisión:
-`--ez review true`).
+`--ez review true`). Editar: `adb shell am start -a com.scannerpromax.action.EDIT --es documentId <id>`.
 
 ## Compilar
 Requisitos: JDK 17+, Android SDK 35.

@@ -60,6 +60,7 @@ import com.scannerpromax.domain.ScanMode
 import com.scannerpromax.integration.DeliveryPlan
 import com.scannerpromax.integration.DeliveryPlanner
 import com.scannerpromax.integration.OutputFormat
+import com.scannerpromax.integration.RequestSource
 import com.scannerpromax.integration.ScanRequest
 import com.scannerpromax.ui.camera.CameraScreen
 import com.scannerpromax.ui.components.AppIcons
@@ -71,6 +72,8 @@ import com.scannerpromax.ui.components.PrimaryCapsuleButton
 import com.scannerpromax.ui.components.ProgressHud
 import com.scannerpromax.ui.editor.EditorScreen
 import com.scannerpromax.ui.review.PageThumbnail
+import com.scannerpromax.ui.review.ReviewCallerMode
+import com.scannerpromax.ui.review.ReviewScreen
 import com.scannerpromax.ui.review.SelectionCheck
 import com.scannerpromax.ui.theme.LocalPerf
 import com.scannerpromax.ui.theme.ui
@@ -79,14 +82,17 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 private object AttachRoutes {
-    const val CAMERA = "attach/camera?docId={docId}"
+    const val CAMERA = "attach/camera?docId={docId}&mode={mode}"
     const val REVIEW = "attach/review/{docId}"
     const val EDITOR = "attach/editor/{docId}/{pageId}"
     const val DELIVER = "attach/deliver/{docId}"
-    fun camera(docId: String? = null) = "attach/camera?docId=${docId ?: ""}"
+    /** EDIT: pantalla de páginas del documento de la biblioteca que pidió la otra app. */
+    const val EDIT = "attach/edit/{docId}"
+    fun camera(docId: String? = null, mode: ScanMode? = null) = "attach/camera?docId=${docId ?: ""}&mode=${mode?.name ?: ""}"
     fun review(docId: String) = "attach/review/$docId"
     fun editor(docId: String, pageId: String) = "attach/editor/$docId/$pageId"
     fun deliver(docId: String) = "attach/deliver/$docId"
+    fun edit(docId: String) = "attach/edit/$docId"
 }
 
 /**
@@ -97,6 +103,8 @@ private object AttachRoutes {
 class AttachCallbacks(
     val onCancel: (docId: String?) -> Unit,
     val onAttach: suspend (docId: String, singleImagePage: Int, progress: (Float, String) -> Unit) -> Unit,
+    /** EDIT: entrega exactamente [pageIds] (las visibles, en su orden). */
+    val onAttachPages: suspend (docId: String, pageIds: List<String>, progress: (Float, String) -> Unit) -> Unit = { _, _, _ -> },
 )
 
 /**
@@ -106,6 +114,9 @@ class AttachCallbacks(
  *    quiere retocar; si la entrega falla, también se cae a la revisión (no se pierde el escaneo).
  *  - Con revisión: cámara → revisión mínima (miniaturas, editor para recortar o cambiar el filtro, añadir páginas)
  *    → "Adjuntar a <app>".
+ *  - Edición (acción EDIT, [ScanRequest.documentId]): pantalla de páginas del documento ya guardado (la misma que en la
+ *    app: recortar/filtros en el editor, reordenar arrastrando, quitar, añadir con la cámara o la galería) →
+ *    "Guardar en <app>".
  */
 @Composable
 fun AttachNavHost(
@@ -130,7 +141,7 @@ fun AttachNavHost(
     Box(Modifier.fillMaxSize().background(MaterialTheme.ui.groupedBackground)) {
         NavHost(
             navController = nav,
-            startDestination = AttachRoutes.CAMERA,
+            startDestination = if (request.source == RequestSource.EDIT && request.documentId != null) AttachRoutes.EDIT else AttachRoutes.CAMERA,
             enterTransition = { if (anim == 0) androidx.compose.animation.EnterTransition.None else fadeIn(tween(anim)) },
             exitTransition = { if (anim == 0) androidx.compose.animation.ExitTransition.None else fadeOut(tween(anim / 2)) },
             popEnterTransition = { if (anim == 0) androidx.compose.animation.EnterTransition.None else fadeIn(tween(anim)) },
@@ -138,15 +149,19 @@ fun AttachNavHost(
         ) {
             composable(
                 AttachRoutes.CAMERA,
-                arguments = listOf(navArgument("docId") { type = NavType.StringType; defaultValue = "" }),
+                arguments = listOf(
+                    navArgument("docId") { type = NavType.StringType; defaultValue = "" },
+                    navArgument("mode") { type = NavType.StringType; defaultValue = "" },
+                ),
             ) { entry ->
                 val docId = entry.arguments?.getString("docId")?.takeIf { it.isNotBlank() }
+                val pageMode = entry.arguments?.getString("mode")?.let { m -> ScanMode.entries.firstOrNull { it.name == m } }
                 // Directo solo en la primera cámara; al añadir páginas desde la revisión se vuelve a ella con "Listo".
                 val direct = !request.review && docId == null
                 CameraScreen(
                     container = container,
                     docId = docId,
-                    mode = request.mode,
+                    mode = pageMode ?: request.mode,
                     singleShot = !request.multiPage && docId == null,
                     doneLabel = if (direct) directDoneLabel(canReturnResult) else null,
                     onOpenBatch = if (direct) {
@@ -166,7 +181,7 @@ fun AttachNavHost(
                                     popUpTo(entry.destination.id) { inclusive = true }
                                     launchSingleTop = true
                                 }
-                            } else if (docId != null && nav.previousBackStackEntry?.destination?.route == AttachRoutes.REVIEW) {
+                            } else if (docId != null && nav.previousBackStackEntry?.destination?.route.let { it == AttachRoutes.REVIEW || it == AttachRoutes.EDIT }) {
                                 nav.popBackStack()
                             } else {
                                 nav.navigate(AttachRoutes.review(finishedId)) {
@@ -201,6 +216,23 @@ fun AttachNavHost(
                     onEditPage = { pageId -> entry.ifActive(nav) { nav.navigate(AttachRoutes.editor(docId, pageId)) } },
                     onAddPages = { entry.ifActive(nav) { nav.navigate(AttachRoutes.camera(docId)) } },
                     onAttach = callbacks.onAttach,
+                )
+            }
+
+            composable(
+                AttachRoutes.EDIT,
+                arguments = listOf(navArgument("docId") { type = NavType.StringType; defaultValue = request.documentId.orEmpty() }),
+            ) { entry ->
+                val docId = entry.arguments?.getString("docId").orEmpty()
+                AttachEditScreen(
+                    container = container,
+                    docId = docId,
+                    callerName = callerName,
+                    canReturnResult = canReturnResult,
+                    onCancel = { callbacks.onCancel(docId) },
+                    onEditPage = { pageId -> entry.ifActive(nav) { nav.navigate(AttachRoutes.editor(docId, pageId)) } },
+                    onAddPages = { mode -> entry.ifActive(nav) { nav.navigate(AttachRoutes.camera(docId, mode)) } },
+                    onAttachPages = callbacks.onAttachPages,
                 )
             }
 
@@ -326,6 +358,107 @@ private fun AttachDeliverScreen(
             progress = progress,
             onCancel = { cancelToReview() },
             modifier = Modifier.fillMaxSize(),
+        )
+    }
+}
+
+/** EDIT: botón principal de la pantalla de páginas. */
+internal fun editSaveLabel(callerName: String?, canReturnResult: Boolean): String = when {
+    !canReturnResult -> "Listo"
+    callerName.isNullOrBlank() -> "Guardar y volver"
+    else -> "Guardar en $callerName"
+}
+
+/**
+ * Huella de las páginas (orden + ediciones) para saber si el usuario cambió algo antes de salir sin guardar. Usa
+ * toString (estable entre procesos, a diferencia del hashCode de los enum) para poder guardarla con rememberSaveable.
+ */
+internal fun pagesFingerprint(pages: List<com.scannerpromax.domain.Page>): String =
+    pages.joinToString("|") { it.id + ":" + it.edits.toString().hashCode() }
+
+/**
+ * EDIT: la pantalla Documento de la app ([ReviewScreen] con [ReviewCallerMode]) para el documento que pidió la otra
+ * app. "Guardar en <app>" entrega las páginas visibles; "‹ Cancelar"/Atrás vuelve sin actualizar (si hubo cambios,
+ * se confirma: quedan guardados en el escáner, pero la otra app sigue con el archivo anterior).
+ */
+@Composable
+private fun AttachEditScreen(
+    container: AppContainer,
+    docId: String,
+    callerName: String?,
+    canReturnResult: Boolean,
+    onCancel: () -> Unit,
+    onEditPage: (String) -> Unit,
+    onAddPages: (ScanMode) -> Unit,
+    onAttachPages: suspend (docId: String, pageIds: List<String>, progress: (Float, String) -> Unit) -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val doc by remember(docId) { container.documents.observe(docId) }.collectAsStateWithLifecycle(initialValue = null)
+    /** Huella al abrir (sobrevive a ir al editor/cámara y a la recreación). */
+    var initialPrint by rememberSaveable { mutableStateOf<String?>(null) }
+    LaunchedEffect(doc) { if (initialPrint == null) doc?.let { initialPrint = pagesFingerprint(it.pages) } }
+    var confirmExit by remember { mutableStateOf(false) }
+    var working by remember { mutableStateOf(false) }
+    var progress by remember { mutableFloatStateOf(0f) }
+    var message by remember { mutableStateOf("") }
+    var job by remember { mutableStateOf<Job?>(null) }
+
+    fun exit() {
+        if (working) return
+        val d = doc
+        if (canReturnResult && d != null && initialPrint != null && pagesFingerprint(d.pages) != initialPrint) confirmExit = true
+        else onCancel()
+    }
+
+    fun save(pageIds: List<String>) {
+        if (working || pageIds.isEmpty()) return
+        job = scope.launch {
+            working = true
+            progress = 0f
+            message = "Preparando…"
+            try {
+                onAttachPages(docId, pageIds) { p, m -> progress = p; message = m }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                android.widget.Toast.makeText(context, "No se pudo preparar el archivo: ${t.message ?: "error"}", android.widget.Toast.LENGTH_LONG).show()
+            } finally {
+                working = false
+                job = null
+            }
+        }
+    }
+
+    BackHandler(enabled = !working) { exit() }
+    Box(Modifier.fillMaxSize()) {
+        ReviewScreen(
+            container = container,
+            docId = docId,
+            onBack = { exit() },
+            onEditPage = { if (!working) onEditPage(it) },
+            onAddPages = { mode -> if (!working) onAddPages(mode) },
+            onExport = { ids -> save(ids.orEmpty()) },
+            callerMode = ReviewCallerMode(backLabel = "Cancelar", primaryLabel = editSaveLabel(callerName, canReturnResult)),
+        )
+        ProgressHud(
+            visible = working,
+            message = message.ifEmpty { if (canReturnResult) deliveringMessage(callerName, true) else "Guardando…" },
+            progress = progress,
+            onCancel = { job?.cancel() },
+            modifier = Modifier.fillMaxSize(),
+        )
+    }
+    if (confirmExit) {
+        ConfirmDialog(
+            title = "¿Salir sin actualizar?",
+            message = "Los cambios quedan guardados en el escáner, pero ${callerName?.takeIf { it.isNotBlank() } ?: "la otra app"} " +
+                "seguirá con el archivo anterior.",
+            confirmLabel = "Salir",
+            dismissLabel = "Seguir editando",
+            destructive = true,
+            onConfirm = { confirmExit = false; onCancel() },
+            onDismiss = { confirmExit = false },
         )
     }
 }
