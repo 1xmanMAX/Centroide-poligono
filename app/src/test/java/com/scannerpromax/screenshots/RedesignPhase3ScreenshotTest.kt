@@ -140,7 +140,7 @@ class RedesignPhase3ScreenshotTest {
             selectionMode = selection,
             selectedIds = if (selection) setOf("p0", "p1", "p3") else emptySet(),
             selectionMenuGroups = listOf(listOf(MoreMenuItem("Volver a leer con IA (3)", AppIcons.Sparkles) {})),
-            aiStatus = if (ai) "Leyendo con IA… 40 % · 6 páginas pendientes" else null,
+            aiStatus = if (ai) "Leyendo con IA… 40 % · 6 en cola" else null,
         )
     }
 

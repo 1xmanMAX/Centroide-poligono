@@ -21,7 +21,7 @@ class ReviewLabelsTest {
     @Test fun progresoIaLeyendo() {
         assertEquals("Leyendo con IA… 40 %", aiProgressLabel(listOf(PageStatus.Running(0.4f, "Leyendo texto"))))
         assertEquals(
-            "Leyendo con IA… 40 % · 3 páginas pendientes",
+            "Leyendo con IA… 40 % · 3 en cola",
             aiProgressLabel(listOf(PageStatus.Queued, PageStatus.Running(0.4f, "x"), PageStatus.Queued)),
         )
     }

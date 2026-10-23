@@ -659,14 +659,14 @@ internal fun reviewSubtitle(pages: List<Page>, mode: ScanMode): String =
 
 /**
  * Progreso de la lectura con IA de las páginas del documento ([statuses] = estados de la cola de ESTE documento):
- * "Leyendo con IA… 40 % · 3 páginas pendientes", "Esperando conexión…", "2 páginas en cola…"; null = nada en cola.
+ * "Leyendo con IA… 40 % · 3 en cola", "Esperando conexión…", "2 páginas en cola…"; null = nada en cola.
  */
 internal fun aiProgressLabel(statuses: Collection<AiRecognitionQueue.PageStatus>): String? {
     if (statuses.isEmpty()) return null
     val n = statuses.size
     val running = statuses.filterIsInstance<AiRecognitionQueue.PageStatus.Running>().firstOrNull()
     return when {
-        running != null -> "Leyendo con IA… ${running.percent} %" + if (n > 1) " · $n páginas pendientes" else ""
+        running != null -> "Leyendo con IA… ${running.percent} %" + if (n > 1) " · $n en cola" else ""
         statuses.all { it == AiRecognitionQueue.PageStatus.WaitingNetwork } -> "Esperando conexión para leer con IA"
         n == 1 -> "1 página en cola para leer con IA"
         else -> "$n páginas en cola para leer con IA"
