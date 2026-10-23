@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -56,14 +55,11 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
-import com.scannerpromax.data.AppSettings
 import com.scannerpromax.di.AppContainer
-import com.scannerpromax.domain.Document
 import com.scannerpromax.domain.ScanMode
 import com.scannerpromax.integration.DeliveryPlan
 import com.scannerpromax.integration.DeliveryPlanner
 import com.scannerpromax.integration.OutputFormat
-import com.scannerpromax.integration.RequestSource
 import com.scannerpromax.integration.ScanRequest
 import com.scannerpromax.ui.camera.CameraScreen
 import com.scannerpromax.ui.components.AppIcons
@@ -80,7 +76,6 @@ import com.scannerpromax.ui.theme.LocalPerf
 import com.scannerpromax.ui.theme.ui
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 
 private object AttachRoutes {
@@ -160,7 +155,8 @@ fun AttachNavHost(
                     onBack = {
                         entry.ifActive(nav) {
                             // Añadiendo páginas: vuelve a la revisión. Primera cámara: cancelar = volver a la otra app.
-                            if (!nav.popBackStack()) callbacks.onCancel(null)
+                            // (popBackStack() sobre el destino inicial lo quitaría y dejaría la pantalla vacía.)
+                            if (nav.previousBackStackEntry != null) nav.popBackStack() else callbacks.onCancel(null)
                         }
                     },
                 )

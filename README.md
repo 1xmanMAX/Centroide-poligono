@@ -15,6 +15,70 @@ Escáner de documentos para Android con mejora de imagen avanzada, OCR sin inter
 - **Exportación**: PDF (A4/Carta/Oficio/Auto), imágenes JPG/PNG/WEBP en alta definición.
 - **Compresor de PDF** integrado (niveles o tamaño objetivo), también desde "Compartir/Abrir con".
 - **Optimizado para gama baja**: el trabajo se escala según la RAM y núcleos del dispositivo.
+- **Integración con otras apps**: aparece en «Adjuntar» y «Cámara» de otras apps; escaneas y el documento vuelve solo a la app que lo pidió (ver abajo).
+
+## Integración con otras apps
+Cualquier app puede usar el escáner sin implementar nada de escaneo: se abre la cámara del escáner, el usuario revisa
+las páginas (recortar, girar, filtro, añadir más) y pulsa **«Adjuntar a <app>»**; el archivo se devuelve con
+`setResult` y el escáner se cierra, volviendo a la otra app. Lo atiende `ScanForResultActivity` (tarea de quien llama,
+`taskAffinity=""`, fuera de Recientes; no toca la pila de la app principal).
+
+| Petición | Qué devuelve |
+|---|---|
+| `ACTION_GET_CONTENT` `application/pdf` (o `application/*`) | un PDF con todas las páginas |
+| `ACTION_GET_CONTENT` `image/*` / `image/jpeg` / `image/png` | una imagen (JPG/PNG); si hay varias páginas, el usuario elige cuál |
+| … con `EXTRA_ALLOW_MULTIPLE` y formato imagen | una imagen por página en `ClipData` |
+| `ACTION_GET_CONTENT` `*/*` (cualquier archivo) | PDF por defecto (Ajustes → Integración con otras apps: PDF o JPG) |
+| `MediaStore.ACTION_IMAGE_CAPTURE` con `EXTRA_OUTPUT` (`content://`) | JPEG escrito en ese Uri (resultado sin datos) |
+| `MediaStore.ACTION_IMAGE_CAPTURE` sin `EXTRA_OUTPUT` | miniatura `Bitmap` en el extra `"data"` |
+| `com.scannerpromax.action.SCAN` | ver contrato abajo |
+
+Calidad y tamaño de página: los de Ajustes → Exportación. Los archivos se guardan en la caché propia
+(`cache/attach/`, se borran a las 24 h) y se exponen con `FileProvider` + `FLAG_GRANT_READ_URI_PERMISSION`.
+Por defecto el escaneo queda también en Documentos (interruptor en Ajustes). Por seguridad no se acepta `EXTRA_OUTPUT`
+`file://` ni un Uri del propio proveedor de la app.
+
+### Acción propia `com.scannerpromax.action.SCAN`
+Extras opcionales (clave completa o alias corto; un valor desconocido se ignora):
+
+| Extra | Alias | Tipo | Valores | Por defecto |
+|---|---|---|---|---|
+| `com.scannerpromax.extra.MODE` | `mode` | String | `document`, `book`, `id`, `receipt`, `whiteboard`, `photo` | `document` |
+| `com.scannerpromax.extra.FORMAT` | `format` | String | `pdf`, `jpeg` (`jpg`), `png` | `pdf` |
+| `com.scannerpromax.extra.MULTI_PAGE` | `multiPage` | Boolean | varias páginas (en imagen: un archivo por página) | `true` |
+| `com.scannerpromax.extra.FILTER` | `filter` | String | `enhanced` (texto resaltado), `bw`, `original` | el de Ajustes |
+| `com.scannerpromax.extra.OCR` | `ocr` | Boolean | texto reconocido en `EXTRA_TEXT` y PDF buscable | `false` |
+| `com.scannerpromax.extra.TITLE` | `title` | String | nombre del archivo (máx. 100) | título automático |
+
+Resultado (`RESULT_OK`): `data` = Uri `content://` del primer archivo, `clipData` = todos, `type` = MIME, y los extras
+`com.scannerpromax.extra.URIS` (`ArrayList<Uri>`), `…MIME_TYPE`, `…PAGE_COUNT` (Int), `…FILE_COUNT` (Int),
+`…RESULT_FORMAT` (`pdf`/`jpg`/`png`) y, con `ocr`, `Intent.EXTRA_TEXT`. Cancelar → `RESULT_CANCELED`.
+El permiso de lectura es temporal: copia el archivo a tu almacenamiento si lo necesitas más tarde.
+
+```kotlin
+private val scan = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
+    if (res.resultCode != Activity.RESULT_OK) return@registerForActivityResult
+    val data = res.data ?: return@registerForActivityResult
+    val clip = data.clipData
+    val uris = if (clip != null) (0 until clip.itemCount).map { clip.getItemAt(it).uri } else listOfNotNull(data.data)
+    val pages = data.getIntExtra("com.scannerpromax.extra.PAGE_COUNT", uris.size)
+    val text = data.getStringExtra(Intent.EXTRA_TEXT) // solo si se pidió ocr
+    uris.forEach { uri -> contentResolver.openInputStream(uri)?.use { /* copiar o subir */ } }
+}
+
+fun escanearFactura() {
+    val intent = Intent("com.scannerpromax.action.SCAN")
+        .putExtra("com.scannerpromax.extra.MODE", "receipt")
+        .putExtra("com.scannerpromax.extra.FORMAT", "pdf")
+        .putExtra("com.scannerpromax.extra.OCR", true)
+        .putExtra("com.scannerpromax.extra.TITLE", "Factura")
+    try { scan.launch(intent) } catch (e: ActivityNotFoundException) { /* escáner no instalado */ }
+}
+```
+En Android 11+ declara en tu manifiesto la visibilidad del escáner si quieres comprobar antes si está instalado:
+`<queries><intent><action android:name="com.scannerpromax.action.SCAN" /></intent></queries>`.
+
+Desde adb: `adb shell am start -a com.scannerpromax.action.SCAN --es mode book --es format jpeg`.
 
 ## Compilar
 Requisitos: JDK 17+, Android SDK 35.
