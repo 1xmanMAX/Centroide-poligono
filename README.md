@@ -18,10 +18,20 @@ Escáner de documentos para Android con mejora de imagen avanzada, OCR sin inter
 - **Integración con otras apps**: aparece en «Adjuntar» y «Cámara» de otras apps; escaneas y el documento vuelve solo a la app que lo pidió (ver abajo).
 
 ## Integración con otras apps
-Cualquier app puede usar el escáner sin implementar nada de escaneo: se abre la cámara del escáner, el usuario revisa
-las páginas (recortar, girar, filtro, añadir más) y pulsa **«Adjuntar a <app>»**; el archivo se devuelve con
-`setResult` y el escáner se cierra, volviendo a la otra app. Lo atiende `ScanForResultActivity` (tarea de quien llama,
-`taskAffinity=""`, fuera de Recientes; no toca la pila de la app principal).
+Cualquier app puede usar el escáner sin implementar nada de escaneo, como si fuera una función suya. Lo atiende
+`ScanForResultActivity` (tarea de quien llama, `taskAffinity=""`, fuera de Recientes; no toca la pila de la app
+principal).
+
+**Modo directo (por defecto)**: se abre la cámara del escáner (captura automática, recorte y filtro como siempre,
+calidad de Ajustes) → el usuario pulsa **«Adjuntar (N)»** (o, si solo se admite una página, basta con la primera
+foto) → indicador breve «Adjuntando…» → el archivo se devuelve con `setResult` y el escáner se cierra, volviendo a la
+otra app. Sin pantalla de revisión ni de exportación. Retoques opcionales: tocar la miniatura del lote en la cámara
+abre la revisión (recortar, girar, filtro, añadir/quitar páginas, «Adjuntar a <app>»). Si la generación falla o se
+cancela el indicador, también se pasa a la revisión, sin perder las páginas.
+
+**Con revisión**: cámara → revisión → «Adjuntar a <app>». Para la acción `SCAN`, con el extra `REVIEW=true`; para
+`GET_CONTENT`/`IMAGE_CAPTURE`, con el ajuste «Revisar antes de adjuntar» (Ajustes → Integración con otras apps;
+desactivado por defecto).
 
 | Petición | Qué devuelve |
 |---|---|
@@ -49,6 +59,11 @@ Extras opcionales (clave completa o alias corto; un valor desconocido se ignora)
 | `com.scannerpromax.extra.FILTER` | `filter` | String | `enhanced` (texto resaltado), `bw`, `original` | el de Ajustes |
 | `com.scannerpromax.extra.OCR` | `ocr` | Boolean | texto reconocido en `EXTRA_TEXT` y PDF buscable | `false` |
 | `com.scannerpromax.extra.TITLE` | `title` | String | nombre del archivo (máx. 100) | título automático |
+| `com.scannerpromax.extra.REVIEW` | `review` | Boolean | `true` = pantalla de revisión antes de adjuntar | `false` (directo) |
+| `com.scannerpromax.extra.CALLER_LABEL` | `callerLabel` | String | nombre de tu app para los textos («Adjuntando a …»), si el sistema no lo da por `callingPackage` (máx. 40) | nombre del sistema |
+
+Los Boolean aceptan también texto (`"true"`/`"false"`/`"1"`/`"0"`) o números. Con `MULTI_PAGE=false` la primera
+captura se entrega directamente (en modo `id`, tras el reverso u «Omitir»).
 
 Resultado (`RESULT_OK`): `data` = Uri `content://` del primer archivo, `clipData` = todos, `type` = MIME, y los extras
 `com.scannerpromax.extra.URIS` (`ArrayList<Uri>`), `…MIME_TYPE`, `…PAGE_COUNT` (Int), `…FILE_COUNT` (Int),
@@ -72,13 +87,16 @@ fun escanearFactura() {
         .putExtra("com.scannerpromax.extra.FORMAT", "pdf")
         .putExtra("com.scannerpromax.extra.OCR", true)
         .putExtra("com.scannerpromax.extra.TITLE", "Factura")
+        .putExtra("com.scannerpromax.extra.CALLER_LABEL", "Mi app") // opcional
+        // .putExtra("com.scannerpromax.extra.REVIEW", true)        // opcional: revisar antes de adjuntar
     try { scan.launch(intent) } catch (e: ActivityNotFoundException) { /* escáner no instalado */ }
 }
 ```
 En Android 11+ declara en tu manifiesto la visibilidad del escáner si quieres comprobar antes si está instalado:
 `<queries><intent><action android:name="com.scannerpromax.action.SCAN" /></intent></queries>`.
 
-Desde adb: `adb shell am start -a com.scannerpromax.action.SCAN --es mode book --es format jpeg`.
+Desde adb: `adb shell am start -a com.scannerpromax.action.SCAN --es mode book --es format jpeg` (con revisión:
+`--ez review true`).
 
 ## Compilar
 Requisitos: JDK 17+, Android SDK 35.
