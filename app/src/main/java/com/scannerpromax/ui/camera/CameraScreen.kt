@@ -217,6 +217,11 @@ fun CameraScreen(
     mode: ScanMode,
     onFinished: (docId: String) -> Unit,
     onBack: () -> Unit,
+    /**
+     * Una sola captura (integración con otras apps que piden una imagen): tras la primera foto se termina sola y
+     * pasa a la revisión. En DNI espera al reverso (o a "Omitir").
+     */
+    singleShot: Boolean = false,
 ) {
     val context = LocalContext.current
     var granted by remember { mutableStateOf(context.hasCameraPermission()) }
@@ -255,7 +260,7 @@ fun CameraScreen(
     }
 
     if (granted) {
-        CameraContent(container, docId, mode, onFinished, onBack)
+        CameraContent(container, docId, mode, onFinished, onBack, singleShot)
     } else {
         PermissionScreen(
             permanentlyDenied = permanentlyDenied,
@@ -301,6 +306,7 @@ private fun CameraContent(
     initialMode: ScanMode,
     onFinished: (String) -> Unit,
     onBack: () -> Unit,
+    singleShot: Boolean = false,
 ) {
     val context = LocalContext.current
     val appContext = context.applicationContext
@@ -699,6 +705,11 @@ private fun CameraContent(
     }
 
     BackHandler { requestClose() }
+
+    // Una sola captura: en cuanto hay una foto (y no falta el reverso del DNI) se termina y se pasa a la revisión.
+    LaunchedEffect(singleShot, capturedThisSession, idFront) {
+        if (singleShot && capturedThisSession > 0 && idFront == null) finish()
+    }
 
     // ---------------------------------------------------------------- autocaptura
     val autoCapture by rememberUpdatedState(settings.autoCapture)

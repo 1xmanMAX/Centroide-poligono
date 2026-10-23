@@ -69,7 +69,7 @@ import kotlinx.coroutines.launch
 private enum class Picker { FILTER, PAGE_SIZE, QUALITY, PDF_TEXT }
 
 /** Subpantallas de Ajustes (navegación interna, sin rutas nuevas). */
-internal enum class SettingsPage { MAIN, EXPORT, APPEARANCE, ABOUT }
+internal enum class SettingsPage { MAIN, EXPORT, APPEARANCE, INTEGRATION, ABOUT }
 
 /** Datos del dispositivo para "Acerca de" (se calculan fuera para poder usar datos falsos en las capturas). */
 @Immutable
@@ -86,7 +86,7 @@ internal data class AboutInfo(
  *  - ESCANEO: Filtro por defecto (hoja), Captura automática, Quitar rayas sueltas, Cámara del teléfono.
  *  - INTELIGENCIA ARTIFICIAL: Reconocimiento y modelos (pantalla Modelos IA), IA en la nube.
  *  - GENERAL: Exportación (subpantalla: tamaño, calidad, texto en PDF), Apariencia (tema + color dinámico),
- *    Acerca de (versión y datos del dispositivo).
+ *    Integración con otras apps (formato si piden cualquier archivo, guardar copia), Acerca de.
  */
 @Composable
 fun SettingsScreen(
@@ -222,6 +222,15 @@ internal fun SettingsContent(
                     }
                     item {
                         NavigationRow(
+                            "Integración con otras apps",
+                            icon = AppIcons.Share,
+                            iconTint = SystemTeal,
+                            value = settings.attachAnyFormat.name.let { if (it == "PDF") "PDF" else "JPG" },
+                            onClick = { page = SettingsPage.INTEGRATION },
+                        )
+                    }
+                    item {
+                        NavigationRow(
                             "Apariencia",
                             icon = AppIcons.Moon,
                             iconTint = SystemIndigo,
@@ -301,6 +310,50 @@ internal fun SettingsContent(
                             checked = settings.dynamicColor && dynamicAvailable,
                             enabled = dynamicAvailable,
                             onCheckedChange = { v -> onUpdate { it.copy(dynamicColor = v) } },
+                        )
+                    }
+                }
+            }
+
+            SettingsPage.INTEGRATION -> SettingsPageScaffold(title = "Integración", backLabel = "Ajustes", onBack = { page = SettingsPage.MAIN }) {
+                InsetGroup(
+                    header = "Cómo se usa",
+                    separatorInset = SeparatorInsetPlain,
+                    footer = "En cualquier app con «Adjuntar», «Subir archivo» o «Cámara» (correo, chats, formularios, " +
+                        "PixPin…), elige «ESCÁNER PRO MAX» en la lista. Se abre directamente la cámara del escáner; " +
+                        "revisa las páginas y pulsa «Adjuntar a…»: el documento vuelve solo a esa app. " +
+                        "Si la app pide imágenes se envían como JPG; si pide PDF, un único PDF con todas las páginas.",
+                ) {
+                    item { InfoRow("1. En la otra app", "Adjuntar o Cámara", icon = AppIcons.Share, iconTint = SystemTeal) }
+                    item { InfoRow("2. Elige el escáner", "ESCÁNER PRO MAX", icon = AppIcons.Scan, iconTint = SystemBlue) }
+                    item { InfoRow("3. Escanea y adjunta", "Vuelve sola", icon = AppIcons.Check, iconTint = SystemGreen) }
+                }
+                InsetGroup(
+                    header = "Si la app acepta cualquier archivo",
+                    separatorInset = SeparatorInsetPlain,
+                    footer = "Cuando la app no indica el tipo (cualquier archivo), se envía en este formato.",
+                ) {
+                    com.scannerpromax.integration.AnyFormatDefault.entries.forEach { f ->
+                        item {
+                            CheckRow(
+                                title = f.label,
+                                selected = settings.attachAnyFormat == f,
+                                onClick = { onUpdate { it.copy(attachAnyFormat = f) } },
+                            )
+                        }
+                    }
+                }
+                InsetGroup(
+                    footer = "El escaneo queda también en Documentos, aunque se haya enviado a otra app. Calidad y tamaño de " +
+                        "página: los de Exportación.",
+                ) {
+                    item {
+                        ToggleRow(
+                            "Guardar también una copia en mis documentos",
+                            icon = AppIcons.Document,
+                            iconTint = SystemOrange,
+                            checked = settings.attachSaveCopy,
+                            onCheckedChange = { v -> onUpdate { it.copy(attachSaveCopy = v) } },
                         )
                     }
                 }

@@ -1006,7 +1006,7 @@ private fun HeaderTextButton(label: String, onClick: () -> Unit, modifier: Modif
 
 /** Círculo de check del modo selección (estilo Fotos de iOS). */
 @Composable
-private fun SelectionCheck(selected: Boolean, modifier: Modifier = Modifier) {
+internal fun SelectionCheck(selected: Boolean, modifier: Modifier = Modifier) {
     val ui = MaterialTheme.ui
     Box(
         modifier
@@ -1070,7 +1070,7 @@ private fun PageCell(
 
 /** Miniatura de una página (procesado actual, el mismo que el visor y la exportación). */
 @Composable
-private fun PageThumbnail(container: AppContainer, docId: String, page: Page, number: Int, modifier: Modifier) {
+internal fun PageThumbnail(container: AppContainer, docId: String, page: Page, number: Int, modifier: Modifier) {
     val repo = container.documents
     val context = LocalContext.current
     // Miniatura = reducción del procesado ACTUAL (misma imagen que el visor y la exportación). Se elige en segundo

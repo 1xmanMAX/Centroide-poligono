@@ -60,6 +60,39 @@
             </intent-filter>
         </activity>
 
+        <!-- Escáner "para otra app": Cámara (IMAGE_CAPTURE), Adjuntar (GET_CONTENT) y la acción propia SCAN.
+             Se abre en la tarea de quien lo pide (startActivityForResult) y vuelve sola al terminar; taskAffinity
+             vacía + excludeFromRecents + documentLaunchMode="never": nunca se mezcla con la pila de MainActivity. -->
+        <activity
+            android:name=".ScanForResultActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:documentLaunchMode="never"
+            android:launchMode="standard"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|fontScale"
+            android:theme="@style/Theme.EscanerProMax.Splash">
+            <intent-filter>
+                <action android:name="android.media.action.IMAGE_CAPTURE" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <!-- Adjuntar: un solo filtro cubre image/*, image/jpeg, application/pdf, application/* y "cualquier archivo"
+                 (un Intent sin OPENABLE también encaja). No se declara */* para no aparecer al pedir vídeo o audio. -->
+            <intent-filter>
+                <action android:name="android.intent.action.GET_CONTENT" />
+                <category android:name="android.intent.category.OPENABLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="application/pdf" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="com.scannerpromax.action.SCAN" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

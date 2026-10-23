@@ -96,6 +96,16 @@ class ImageExporter(private val context: Context) {
         withContext(Dispatchers.IO) {
             val dir = File(context.cacheDir, "share").apply { mkdirs() }
             dir.listFiles()?.forEach { if (System.currentTimeMillis() - it.lastModified() > 3_600_000L) it.delete() }
+            exportToDir(images, format, quality, baseName, dir)
+        }
+
+    /**
+     * Igual que [exportToCache] pero en la carpeta [dir] indicada (sin limpieza): la usa la integración con otras
+     * apps (cache/attach), cuyos archivos viven más que los de "Compartir".
+     */
+    suspend fun exportToDir(images: List<File>, format: ImageFormat, quality: ExportQuality, baseName: String, dir: File): List<File> =
+        withContext(Dispatchers.IO) {
+            dir.mkdirs()
             val base = sanitizeName(baseName).ifEmpty { "Escaneo" }
             images.mapIndexed { index, file ->
                 currentCoroutineContext().ensureActive()
