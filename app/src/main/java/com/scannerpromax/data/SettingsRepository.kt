@@ -64,6 +64,7 @@ class SettingsRepository(private val context: Context) {
             prefs[Keys.CLOUD_CONSENT_CLAUDE] = updated.cloudConsentClaude
             prefs[Keys.ATTACH_ANY_FORMAT] = updated.attachAnyFormat.name
             prefs[Keys.ATTACH_SAVE_COPY] = updated.attachSaveCopy
+            prefs[Keys.ATTACH_REVIEW] = updated.attachReview
         }
     }
 
@@ -102,6 +103,7 @@ class SettingsRepository(private val context: Context) {
             cloudConsentClaude = this[Keys.CLOUD_CONSENT_CLAUDE] ?: d.cloudConsentClaude,
             attachAnyFormat = enumOr(this[Keys.ATTACH_ANY_FORMAT], d.attachAnyFormat),
             attachSaveCopy = this[Keys.ATTACH_SAVE_COPY] ?: d.attachSaveCopy,
+            attachReview = this[Keys.ATTACH_REVIEW] ?: d.attachReview,
         )
     }
 
@@ -132,6 +134,7 @@ class SettingsRepository(private val context: Context) {
         val CLOUD_CONSENT_CLAUDE = booleanPreferencesKey("cloud_consent_claude")
         val ATTACH_ANY_FORMAT = stringPreferencesKey("attach_any_format")
         val ATTACH_SAVE_COPY = booleanPreferencesKey("attach_save_copy")
+        val ATTACH_REVIEW = booleanPreferencesKey("attach_review")
     }
 
     private companion object {
@@ -187,6 +190,11 @@ data class AppSettings(
     val attachAnyFormat: com.scannerpromax.integration.AnyFormatDefault = com.scannerpromax.integration.AnyFormatDefault.PDF,
     /** Integración con otras apps: guardar también el escaneo en la biblioteca (Documentos). */
     val attachSaveCopy: Boolean = true,
+    /**
+     * Integración con otras apps ("Adjuntar"/"Cámara" del sistema): pasar por la pantalla de revisión antes de
+     * entregar. false (por defecto) = directo: al terminar en la cámara se adjunta al instante.
+     */
+    val attachReview: Boolean = false,
 ) {
     fun cloudConsent(id: com.scannerpromax.ai.cloud.CloudProviderId): Boolean = when (id) {
         com.scannerpromax.ai.cloud.CloudProviderId.DEEPSEEK -> cloudConsentDeepSeek

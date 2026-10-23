@@ -357,6 +357,21 @@ internal fun SettingsContent(
                         )
                     }
                 }
+                InsetGroup(
+                    footer = "Desactivado: al pulsar «Adjuntar» en la cámara (o tras la foto, si la app pide una sola) el " +
+                        "archivo vuelve a la otra app al instante. Activado: antes se muestra la revisión para recortar, " +
+                        "girar o quitar páginas. Las apps que usan la acción del escáner lo eligen ellas (extra REVIEW).",
+                ) {
+                    item {
+                        ToggleRow(
+                            "Revisar antes de adjuntar",
+                            icon = AppIcons.Crop,
+                            iconTint = SystemBlue,
+                            checked = settings.attachReview,
+                            onCheckedChange = { v -> onUpdate { it.copy(attachReview = v) } },
+                        )
+                    }
+                }
             }
 
             SettingsPage.ABOUT -> SettingsPageScaffold(title = "Acerca de", backLabel = "Ajustes", onBack = { page = SettingsPage.MAIN }) {

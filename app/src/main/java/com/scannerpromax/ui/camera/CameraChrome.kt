@@ -472,21 +472,39 @@ internal fun GalleryButton(onClick: () -> Unit) {
  * [thumbnail] dibuja la última página dentro del cuadrado de 36 dp.
  */
 @Composable
-internal fun BatchButton(count: Int, processing: Boolean, onDone: () -> Unit, thumbnail: @Composable BoxScope.() -> Unit) {
+internal fun BatchButton(
+    count: Int,
+    processing: Boolean,
+    onDone: () -> Unit,
+    /** Texto del botón: "Listo" (revisar) o "Adjuntar (N)" en el modo directo para otra app. */
+    label: String = "Listo",
+    /** Si no es null, tocar la miniatura abre el lote (revisión/retoques) en vez de terminar. */
+    onThumbnail: (() -> Unit)? = null,
+    thumbnail: @Composable BoxScope.() -> Unit,
+) {
     val visible = count > 0 || processing
+    val pagesText = "$count ${if (count == 1) "página" else "páginas"}"
     AnimatedVisibility(visible = visible, enter = scaleIn() + fadeIn(), exit = scaleOut() + fadeOut()) {
         Row(
             Modifier
                 .height(48.dp)
                 .clip(PillShape)
                 .background(Glass)
-                .clickable(role = Role.Button, onClickLabel = "Terminar y revisar", onClick = onDone)
-                .semantics { contentDescription = "Terminar y revisar, $count ${if (count == 1) "página" else "páginas"}" }
+                .clickable(role = Role.Button, onClickLabel = label, onClick = onDone)
+                .semantics { contentDescription = if (label == "Listo") "Terminar y revisar, $pagesText" else "$label, $pagesText" }
                 .padding(start = 6.dp, end = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(
-                Modifier.size(36.dp).clip(RoundedCornerShape(8.dp)).background(Color(0xFFF4F1EA)),
+                Modifier
+                    .size(36.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xFFF4F1EA))
+                    .then(
+                        if (onThumbnail != null) {
+                            Modifier.clickable(role = Role.Button, onClickLabel = "Revisar y retocar páginas", onClick = onThumbnail)
+                        } else Modifier,
+                    ),
                 contentAlignment = Alignment.Center,
             ) {
                 thumbnail()
@@ -499,7 +517,7 @@ internal fun BatchButton(count: Int, processing: Boolean, onDone: () -> Unit, th
                 }
             }
             Spacer(Modifier.width(8.dp))
-            Text("Listo", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleSmall)
+            Text(label, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleSmall, maxLines = 1)
         }
     }
 }

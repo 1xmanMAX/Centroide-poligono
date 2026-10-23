@@ -153,6 +153,54 @@ class ScanRequestParserTest {
         assertFalse(r.ocr)
         assertNull(r.filter)
         assertNull(r.title)
+        // Modo directo por defecto: sin revisión.
+        assertFalse(r.review)
+        assertNull(r.callerLabel)
+    }
+
+    @Test fun scan_review_extraAndAliasTypes() {
+        assertTrue(ok(scan(ScanContract.EXTRA_REVIEW to true)).review)
+        assertTrue(ok(scan(ScanContract.EXTRA_REVIEW to "true")).review)
+        assertTrue(ok(scan(ScanContract.EXTRA_REVIEW to 1)).review)
+        assertFalse(ok(scan(ScanContract.EXTRA_REVIEW to false)).review)
+        assertFalse(ok(scan(ScanContract.EXTRA_REVIEW to "quizá")).review)
+        assertEquals(ScanContract.EXTRA_REVIEW, ScanContract.SHORT_ALIASES["review"])
+        assertEquals(ScanContract.EXTRA_CALLER_LABEL, ScanContract.SHORT_ALIASES["callerLabel"])
+    }
+
+    @Test fun scan_ignoresReviewSetting() {
+        // La acción SCAN decide con su extra; el ajuste "Revisar antes de adjuntar" no le afecta.
+        val r = ScanRequestParser.parse(scan(), AnyFormatDefault.PDF, pkg, reviewSetting = true) as ParseResult.Ok
+        assertFalse(r.request.review)
+    }
+
+    @Test fun systemActions_followReviewSetting() {
+        val gc = getContent("image/*")
+        val cap = IntentFacts(ScanRequestParser.ACTION_IMAGE_CAPTURE)
+        assertFalse(ok(gc).review)
+        assertFalse(ok(cap).review)
+        assertTrue((ScanRequestParser.parse(gc, AnyFormatDefault.PDF, pkg, reviewSetting = true) as ParseResult.Ok).request.review)
+        assertTrue((ScanRequestParser.parse(cap, AnyFormatDefault.PDF, pkg, reviewSetting = true) as ParseResult.Ok).request.review)
+    }
+
+    @Test fun callerLabel_isSanitized() {
+        assertEquals("PixPin Pro", ok(scan(ScanContract.EXTRA_CALLER_LABEL to "  PixPin\n  Pro ")).callerLabel)
+        assertNull(ok(scan(ScanContract.EXTRA_CALLER_LABEL to "   ")).callerLabel)
+        assertNull(ok(scan(ScanContract.EXTRA_CALLER_LABEL to 7)).callerLabel)
+        assertEquals(ScanContract.MAX_CALLER_LABEL, ok(scan(ScanContract.EXTRA_CALLER_LABEL to "x".repeat(200))).callerLabel?.length)
+        // También en GET_CONTENT (algunas apps lo añaden al Intent de Adjuntar).
+        val gc = getContent("image/*").copy(extras = mapOf(ScanContract.EXTRA_CALLER_LABEL to "Notas"))
+        assertEquals("Notas", ok(gc).callerLabel)
+    }
+
+    @Test fun scan_singlePageDirect() {
+        // multiPage=false + modo directo: la primera captura se entrega tal cual (una página, un archivo).
+        val r = ok(scan(ScanContract.EXTRA_MULTI_PAGE to false))
+        assertFalse(r.multiPage)
+        assertFalse(r.review)
+        val p = DeliveryPlanner.plan(r, 1)
+        assertEquals(listOf(0), p.pages)
+        assertEquals(1, p.fileCount)
     }
 
     @Test fun scan_allExtras() {

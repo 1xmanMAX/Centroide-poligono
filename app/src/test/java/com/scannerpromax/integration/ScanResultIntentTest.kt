@@ -8,6 +8,8 @@ import android.os.Build
 import android.provider.MediaStore
 import com.scannerpromax.ui.attach.attachButtonLabel
 import com.scannerpromax.ui.attach.attachSummary
+import com.scannerpromax.ui.attach.deliveringMessage
+import com.scannerpromax.ui.attach.directDoneLabel
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -130,12 +132,39 @@ class ScanResultIntentTest {
         assertTrue(r.ocr)
     }
 
+    @Test fun reader_reviewAndCallerLabel_aliases() {
+        val i = Intent(ScanContract.ACTION_SCAN).apply {
+            putExtra("review", true)
+            putExtra("callerLabel", "PixPin")
+        }
+        val r = req(IntentFactsReader.read(i))
+        assertTrue(r.review)
+        assertEquals("PixPin", r.callerLabel)
+        val full = Intent(ScanContract.ACTION_SCAN).apply {
+            putExtra(ScanContract.EXTRA_REVIEW, false)
+            putExtra("review", true) // la clave completa gana
+            putExtra(ScanContract.EXTRA_CALLER_LABEL, "Mi app")
+        }
+        val r2 = req(IntentFactsReader.read(full))
+        assertFalse(r2.review)
+        assertEquals("Mi app", r2.callerLabel)
+        // Sin extras: directo y sin nombre.
+        val r3 = req(IntentFactsReader.read(Intent(ScanContract.ACTION_SCAN)))
+        assertFalse(r3.review)
+        assertEquals(null, r3.callerLabel)
+    }
+
     // ------------------------------------------------------------------ textos y limpieza
 
     @Test fun buttonAndSummary() {
         assertEquals("Adjuntar a PixPin", attachButtonLabel("PixPin", true))
         assertEquals("Adjuntar", attachButtonLabel(null, true))
         assertEquals("Guardar en mis documentos", attachButtonLabel("PixPin", false))
+        assertEquals("Adjuntar", directDoneLabel(true))
+        assertEquals("Guardar", directDoneLabel(false))
+        assertEquals("Adjuntando a PixPin…", deliveringMessage("PixPin", true))
+        assertEquals("Adjuntando…", deliveringMessage(null, true))
+        assertEquals("Guardando…", deliveringMessage("PixPin", false))
         val pdf = DeliveryPlanner.plan(req(IntentFacts(ScanRequestParser.ACTION_GET_CONTENT, "application/pdf")), 2)
         assertEquals("PDF · 2 páginas", attachSummary(pdf, 2))
         val one = DeliveryPlanner.plan(req(IntentFacts(ScanRequestParser.ACTION_GET_CONTENT, "image/*")), 2)

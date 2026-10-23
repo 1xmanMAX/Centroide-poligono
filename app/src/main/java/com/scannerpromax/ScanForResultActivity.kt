@@ -44,8 +44,9 @@ import kotlinx.coroutines.withContext
 
 /**
  * Escáner "para otra app" (integración avanzada): la abren IMAGE_CAPTURE ("Cámara"), GET_CONTENT ("Adjuntar") y la
- * acción propia [com.scannerpromax.integration.ScanContract.ACTION_SCAN]. Cámara del escáner → revisión mínima →
- * "Adjuntar a <app>": genera el archivo, lo devuelve con setResult y se cierra, volviendo sola a la otra app.
+ * acción propia [com.scannerpromax.integration.ScanContract.ACTION_SCAN]. Por defecto es directa: cámara del escáner →
+ * "Adjuntar (N)" → genera el archivo, lo devuelve con setResult y se cierra, volviendo sola a la otra app. Con el extra
+ * REVIEW (SCAN) o el ajuste "Revisar antes de adjuntar" (GET_CONTENT / IMAGE_CAPTURE) pasa antes por una revisión.
  *
  * Vive en la tarea de la app que la llama (startActivityForResult) y tiene taskAffinity vacía: nunca se mezcla con la
  * pila de [MainActivity] ni aparece aparte en Recientes. El estado (documento en curso, pantalla) se guarda con la
@@ -84,7 +85,7 @@ class ScanForResultActivity : ComponentActivity() {
             val parsed by produceState<ParseResult?>(initialValue = null, ready) {
                 if (!ready) return@produceState
                 val s = runCatching { container.settings.settings.first() }.getOrDefault(initial)
-                value = ScanRequestParser.parse(facts, s.attachAnyFormat, packageName)
+                value = ScanRequestParser.parse(facts, s.attachAnyFormat, packageName, reviewSetting = s.attachReview)
             }
             CompositionLocalProvider(LocalPerf provides perf) {
                 EscanerTheme(darkTheme = settings.darkTheme, dynamicColor = settings.dynamicColor) {
@@ -92,7 +93,8 @@ class ScanForResultActivity : ComponentActivity() {
                         is ParseResult.Ok -> AttachNavHost(
                             container = container,
                             request = p.request,
-                            callerName = callerName,
+                            // Nombre del sistema (callingPackage/referrer) o, si no hay, el extra CALLER_LABEL.
+                            callerName = callerName ?: p.request.callerLabel,
                             canReturnResult = canReturnResult,
                             callbacks = AttachCallbacks(
                                 onCancel = { docId -> cancel(docId) },

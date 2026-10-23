@@ -82,9 +82,11 @@ private object AttachRoutes {
     const val CAMERA = "attach/camera?docId={docId}"
     const val REVIEW = "attach/review/{docId}"
     const val EDITOR = "attach/editor/{docId}/{pageId}"
+    const val DELIVER = "attach/deliver/{docId}"
     fun camera(docId: String? = null) = "attach/camera?docId=${docId ?: ""}"
     fun review(docId: String) = "attach/review/$docId"
     fun editor(docId: String, pageId: String) = "attach/editor/$docId/$pageId"
+    fun deliver(docId: String) = "attach/deliver/$docId"
 }
 
 /**
@@ -98,8 +100,12 @@ class AttachCallbacks(
 )
 
 /**
- * Flujo para otra app: cámara del escáner (modo pedido) → revisión mínima (miniaturas, editor para recortar o cambiar
- * el filtro, añadir páginas) → "Adjuntar a <app>". Pila de navegación propia (la de la app principal no se toca).
+ * Flujo para otra app. Pila de navegación propia (la de la app principal no se toca).
+ *  - Directo ([ScanRequest.review] = false, por defecto): cámara del escáner → "Adjuntar (N)" (o la primera foto si
+ *    solo se admite una) → "Adjuntando…" → resultado a la otra app. La miniatura del lote abre la revisión si se
+ *    quiere retocar; si la entrega falla, también se cae a la revisión (no se pierde el escaneo).
+ *  - Con revisión: cámara → revisión mínima (miniaturas, editor para recortar o cambiar el filtro, añadir páginas)
+ *    → "Adjuntar a <app>".
  */
 @Composable
 fun AttachNavHost(
@@ -135,14 +141,32 @@ fun AttachNavHost(
                 arguments = listOf(navArgument("docId") { type = NavType.StringType; defaultValue = "" }),
             ) { entry ->
                 val docId = entry.arguments?.getString("docId")?.takeIf { it.isNotBlank() }
+                // Directo solo en la primera cámara; al añadir páginas desde la revisión se vuelve a ella con "Listo".
+                val direct = !request.review && docId == null
                 CameraScreen(
                     container = container,
                     docId = docId,
                     mode = request.mode,
                     singleShot = !request.multiPage && docId == null,
+                    doneLabel = if (direct) directDoneLabel(canReturnResult) else null,
+                    onOpenBatch = if (direct) {
+                        { finishedId ->
+                            entry.ifActive(nav) {
+                                nav.navigate(AttachRoutes.review(finishedId)) {
+                                    popUpTo(entry.destination.id) { inclusive = true }
+                                    launchSingleTop = true
+                                }
+                            }
+                        }
+                    } else null,
                     onFinished = { finishedId ->
                         if (nav.currentBackStackEntry?.id == entry.id && entry.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
-                            if (docId != null && nav.previousBackStackEntry?.destination?.route == AttachRoutes.REVIEW) {
+                            if (direct) {
+                                nav.navigate(AttachRoutes.deliver(finishedId)) {
+                                    popUpTo(entry.destination.id) { inclusive = true }
+                                    launchSingleTop = true
+                                }
+                            } else if (docId != null && nav.previousBackStackEntry?.destination?.route == AttachRoutes.REVIEW) {
                                 nav.popBackStack()
                             } else {
                                 nav.navigate(AttachRoutes.review(finishedId)) {
@@ -181,6 +205,30 @@ fun AttachNavHost(
             }
 
             composable(
+                AttachRoutes.DELIVER,
+                arguments = listOf(navArgument("docId") { type = NavType.StringType }),
+            ) { entry ->
+                val docId = entry.arguments?.getString("docId").orEmpty()
+                AttachDeliverScreen(
+                    container = container,
+                    docId = docId,
+                    request = request,
+                    callerName = callerName,
+                    canReturnResult = canReturnResult,
+                    onAttach = callbacks.onAttach,
+                    onCancel = { callbacks.onCancel(docId) },
+                    onFallbackToReview = {
+                        entry.ifActive(nav) {
+                            nav.navigate(AttachRoutes.review(docId)) {
+                                popUpTo(entry.destination.id) { inclusive = true }
+                                launchSingleTop = true
+                            }
+                        }
+                    },
+                )
+            }
+
+            composable(
                 AttachRoutes.EDITOR,
                 arguments = listOf(
                     navArgument("docId") { type = NavType.StringType },
@@ -200,6 +248,86 @@ fun AttachNavHost(
 
 private inline fun NavBackStackEntry.ifActive(nav: NavHostController, action: () -> Unit) {
     if (nav.currentBackStackEntry?.id == id && lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) action()
+}
+
+/** Texto del botón de terminar de la cámara en el modo directo (se le añade " (N)"). */
+internal fun directDoneLabel(canReturnResult: Boolean): String = if (canReturnResult) "Adjuntar" else "Guardar"
+
+/** Mensaje del indicador mientras se genera y entrega el archivo en el modo directo. */
+internal fun deliveringMessage(callerName: String?, canReturnResult: Boolean): String = when {
+    !canReturnResult -> "Guardando…"
+    callerName.isNullOrBlank() -> "Adjuntando…"
+    else -> "Adjuntando a $callerName…"
+}
+
+/**
+ * Aplica a las páginas el filtro pedido por la otra app (extra "filter"), salvo a las de [skip] (ya aplicadas: así
+ * un cambio posterior del usuario en el editor no se pisa). Devuelve los id de página tratados.
+ */
+internal suspend fun applyRequestedFilter(container: AppContainer, docId: String, request: ScanRequest, skip: Collection<String> = emptyList()): List<String> {
+    val f = request.filter ?: return emptyList()
+    val d = container.documents.get(docId) ?: return emptyList()
+    if (d.mode == ScanMode.ID_CARD) return emptyList()
+    val done = ArrayList<String>()
+    for (p in d.pages) {
+        if (p.id in skip) continue
+        if (p.edits.filter != f) runCatching { container.documents.updateEdits(docId, p.id, p.edits.copy(filter = f)) }
+        done += p.id
+    }
+    return done
+}
+
+/**
+ * Modo directo: sin pantalla intermedia. Genera el archivo y lo entrega en cuanto se abre, con un indicador breve
+ * "Adjuntando…". Cancelar el indicador (o Atrás) o un error llevan a la revisión, sin perder las páginas.
+ */
+@Composable
+private fun AttachDeliverScreen(
+    container: AppContainer,
+    docId: String,
+    request: ScanRequest,
+    callerName: String?,
+    canReturnResult: Boolean,
+    onAttach: suspend (docId: String, singleImagePage: Int, progress: (Float, String) -> Unit) -> Unit,
+    onCancel: () -> Unit,
+    onFallbackToReview: () -> Unit,
+) {
+    val context = LocalContext.current
+    var progress by remember { mutableFloatStateOf(0f) }
+    var job by remember { mutableStateOf<Job?>(null) }
+    val scope = rememberCoroutineScope()
+    LaunchedEffect(docId) {
+        job = scope.launch {
+            try {
+                val doc = container.documents.get(docId)
+                if (doc == null || doc.pages.isEmpty()) {
+                    onCancel()
+                    return@launch
+                }
+                applyRequestedFilter(container, docId, request)
+                onAttach(docId, 0) { p, _ -> progress = p }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                android.widget.Toast.makeText(context, "No se pudo adjuntar: ${t.message ?: "error"}", android.widget.Toast.LENGTH_LONG).show()
+                onFallbackToReview()
+            }
+        }
+    }
+    fun cancelToReview() {
+        job?.cancel()
+        onFallbackToReview()
+    }
+    BackHandler { cancelToReview() }
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        ProgressHud(
+            visible = true,
+            message = deliveringMessage(callerName, canReturnResult),
+            progress = progress,
+            onCancel = { cancelToReview() },
+            modifier = Modifier.fillMaxSize(),
+        )
+    }
 }
 
 /** Texto del botón principal. */
@@ -259,14 +387,9 @@ private fun AttachReviewScreen(
     }
     // Filtro pedido por la otra app (extra "filter"): se aplica a cada página nueva una vez.
     LaunchedEffect(pages.map { it.id }) {
-        val f = request.filter ?: return@LaunchedEffect
-        val d = doc ?: return@LaunchedEffect
-        if (d.mode == ScanMode.ID_CARD) return@LaunchedEffect
-        for (p in pages) {
-            if (p.id in filtered) continue
-            if (p.edits.filter != f) runCatching { container.documents.updateEdits(docId, p.id, p.edits.copy(filter = f)) }
-            filtered = filtered + p.id
-        }
+        if (request.filter == null || doc == null) return@LaunchedEffect
+        val done = applyRequestedFilter(container, docId, request, skip = filtered)
+        if (done.isNotEmpty()) filtered = filtered + done
     }
 
     val plan = if (pages.isNotEmpty()) DeliveryPlanner.plan(request, pages.size, singlePage) else null

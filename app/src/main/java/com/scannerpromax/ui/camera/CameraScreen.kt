@@ -222,6 +222,13 @@ fun CameraScreen(
      * pasa a la revisión. En DNI espera al reverso (o a "Omitir").
      */
     singleShot: Boolean = false,
+    /** Texto del botón de terminar (por defecto "Listo"); el flujo directo para otra app usa "Adjuntar". */
+    doneLabel: String? = null,
+    /**
+     * Si no es null, tocar la miniatura del lote termina igual que "Listo" pero llama a esto (p. ej. abrir la
+     * revisión para retocar en el modo directo para otra app, donde "Adjuntar" entrega sin revisión).
+     */
+    onOpenBatch: ((docId: String) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     var granted by remember { mutableStateOf(context.hasCameraPermission()) }
@@ -260,7 +267,7 @@ fun CameraScreen(
     }
 
     if (granted) {
-        CameraContent(container, docId, mode, onFinished, onBack, singleShot)
+        CameraContent(container, docId, mode, onFinished, onBack, singleShot, doneLabel, onOpenBatch)
     } else {
         PermissionScreen(
             permanentlyDenied = permanentlyDenied,
@@ -307,6 +314,8 @@ private fun CameraContent(
     onFinished: (String) -> Unit,
     onBack: () -> Unit,
     singleShot: Boolean = false,
+    doneLabel: String? = null,
+    onOpenBatch: ((String) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val appContext = context.applicationContext
@@ -580,7 +589,7 @@ private fun CameraContent(
         mode = m
     }
 
-    fun finish() {
+    fun finish(target: (String) -> Unit = onFinished) {
         if (finishing) return
         finishing = true
         if (idFront != null) skipBack()
@@ -593,7 +602,7 @@ private fun CameraContent(
             // (antes la navegación se descartaba y la cámara quedaba abierta con el documento a medias).
             lifecycleOwner.lifecycle.withStarted {
                 finishing = false
-                if (id != null && (hasPages || !createdHere)) onFinished(id) else onBack()
+                if (id != null && (hasPages || !createdHere)) target(id) else onBack()
             }
         }
     }
@@ -923,6 +932,8 @@ private fun CameraContent(
                         count = pageCount,
                         processing = pendingJobs > 0 || idFront != null,
                         onDone = { finish() },
+                        label = doneLabel?.let { "$it ($pageCount)" } ?: "Listo",
+                        onThumbnail = onOpenBatch?.let { open -> { finish(open) } },
                     ) { LastPageThumbnail(container, doc) }
                 },
             )
@@ -941,11 +952,15 @@ private fun CameraContent(
 
     if (showDiscard) {
         IosAlert(
-            title = "¿Guardar el escaneo?",
-            message = "Tienes páginas capturadas. Puedes guardarlas en un documento o descartarlas.",
+            title = if (doneLabel != null) "¿$doneLabel el escaneo?" else "¿Guardar el escaneo?",
+            message = if (doneLabel != null) {
+                "Tienes páginas capturadas. Puedes enviarlas a la otra app o descartarlas."
+            } else {
+                "Tienes páginas capturadas. Puedes guardarlas en un documento o descartarlas."
+            },
             onDismiss = { showDiscard = false },
             actions = listOf(
-                AlertAction("Guardar", bold = true) { finish() },
+                AlertAction(doneLabel ?: "Guardar", bold = true) { finish() },
                 AlertAction("Descartar", destructive = true) { discard() },
                 AlertAction("Seguir escaneando") { },
             ),

@@ -29,6 +29,9 @@ enum class RequestSource { IMAGE_CAPTURE, GET_CONTENT, SCAN }
  *    la primera página si es una imagen).
  *  - [outputUri]: EXTRA_OUTPUT de IMAGE_CAPTURE (content:// de la otra app) donde escribir el JPEG.
  *  - [wantsThumbnail]: IMAGE_CAPTURE sin EXTRA_OUTPUT → miniatura Bitmap en el extra "data" (contrato estándar).
+ *  - [review]: pasar por la pantalla de revisión antes de entregar. false = modo directo (al terminar en la cámara se
+ *    genera y entrega el archivo sin más pasos).
+ *  - [callerLabel]: nombre de la app que llama (extra CALLER_LABEL); solo se usa si no se obtiene del sistema.
  */
 data class ScanRequest(
     val source: RequestSource,
@@ -41,6 +44,8 @@ data class ScanRequest(
     val title: String? = null,
     val outputUri: String? = null,
     val wantsThumbnail: Boolean = false,
+    val review: Boolean = false,
+    val callerLabel: String? = null,
 )
 
 /** Hechos del Intent recibido, ya extraídos a tipos simples (así el análisis es JVM puro y testeable). */
@@ -74,12 +79,28 @@ object ScanRequestParser {
     /**
      * [ownPackage]: paquete de esta app; se rechaza un EXTRA_OUTPUT que apunte a un proveedor propio (otra app podría
      * usarlo para que sobrescribiéramos nuestros propios archivos).
+     * [reviewSetting]: ajuste "Revisar antes de adjuntar" (solo IMAGE_CAPTURE / GET_CONTENT; la acción SCAN usa su
+     * extra REVIEW, por defecto false).
      */
-    fun parse(facts: IntentFacts, anyDefault: AnyFormatDefault, ownPackage: String): ParseResult = when (facts.action) {
-        ACTION_IMAGE_CAPTURE -> parseImageCapture(facts, ownPackage)
-        ACTION_GET_CONTENT -> parseGetContent(facts, anyDefault)
-        ScanContract.ACTION_SCAN -> parseScan(facts)
-        else -> ParseResult.Rejected("unsupported_action", "Petición no compatible")
+    fun parse(
+        facts: IntentFacts,
+        anyDefault: AnyFormatDefault,
+        ownPackage: String,
+        reviewSetting: Boolean = false,
+    ): ParseResult {
+        val result = when (facts.action) {
+            ACTION_IMAGE_CAPTURE -> parseImageCapture(facts, ownPackage)
+            ACTION_GET_CONTENT -> parseGetContent(facts, anyDefault)
+            ScanContract.ACTION_SCAN -> return parseScan(facts)
+            else -> return ParseResult.Rejected("unsupported_action", "Petición no compatible")
+        }
+        if (result !is ParseResult.Ok) return result
+        return ParseResult.Ok(
+            result.request.copy(
+                review = reviewSetting,
+                callerLabel = sanitizeCallerLabel(string(facts.extras[ScanContract.EXTRA_CALLER_LABEL])),
+            ),
+        )
     }
 
     // ------------------------------------------------------------------------------------ IMAGE_CAPTURE
@@ -187,6 +208,8 @@ object ScanRequestParser {
                 filter = parseFilter(string(e[ScanContract.EXTRA_FILTER])),
                 ocr = bool(e[ScanContract.EXTRA_OCR]) ?: false,
                 title = sanitizeTitle(string(e[ScanContract.EXTRA_TITLE])),
+                review = bool(e[ScanContract.EXTRA_REVIEW]) ?: false,
+                callerLabel = sanitizeCallerLabel(string(e[ScanContract.EXTRA_CALLER_LABEL])),
             ),
         )
     }
@@ -215,6 +238,15 @@ object ScanRequestParser {
             ?.trim()
             ?.trim('.')
             ?.take(ScanContract.MAX_TITLE)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+
+    /** Nombre visible de la app que llama: una línea, sin caracteres de control, máx. [ScanContract.MAX_CALLER_LABEL]. */
+    fun sanitizeCallerLabel(s: String?): String? =
+        s?.replace(Regex("\\p{Cntrl}"), " ")
+            ?.replace(Regex("\\s+"), " ")
+            ?.trim()
+            ?.take(ScanContract.MAX_CALLER_LABEL)
             ?.trim()
             ?.takeIf { it.isNotEmpty() }
 
