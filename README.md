@@ -12,6 +12,13 @@ Escáner de documentos para Android con mejora de imagen avanzada, OCR sin inter
 - **Texto en el PDF** (Ajustes → "Texto en el PDF", también en Exportar): *Solo imagen*, *Buscable* (capa invisible palabra a palabra), *Buscable + texto reconocido* (páginas legibles con el texto, tras cada página o al final) y *Solo texto*. Fuente Liberation Sans incrustada (acentos, ñ, ¿¡, €). Las correcciones hechas en la pantalla OCR se usan en el PDF, la búsqueda y las exportaciones.
 - **Exportar texto** como **.txt** (UTF-8) o **Word (.docx)**, desde Exportar o desde la pantalla OCR.
 - **Detección robusta**: segmentación por color (Cb/Cr) insensible a sombras duras y madera clara, cuadriláteros envolventes que recuperan esquinas tapadas o redondeadas, cuadernos abiertos (ambas páginas) y documentos que se salen del encuadre (el lado queda sobre el borde de la foto).
+- **Encuadre IA** (Ajustes › Escaneo, activado por defecto): la red DocAligner lcnet100 (DocsaidLab, Apache-2.0, 4,8 MB
+  en el APK, `imaging/NeuralCorners`) ARBITRA el recorte del detector clásico en la captura y en Editar › Recortar ›
+  Auto-detectar (`DocumentDetector.neuralArbitrate`: si coinciden manda el clásico; si discrepan y la red está segura,
+  la red; veto en fotos sin documento). En la vista en vivo corre cada ~300 ms (suavizado One Euro): contorno verde si red
+  y clásico coinciden, ámbar si discrepan (la autocaptura sólo dispara si coinciden o con el clásico muy seguro). Usa
+  el ONNX Runtime que llega con Indra: mientras no esté descargado, el detector funciona exactamente como antes.
+  Banco (754 fotos + 99 negativos): fallo de detección 38,3 → 16,3 %; exámenes del usuario sin cambio (IoU 0,947).
 - **Exportación**: PDF (A4/Carta/Oficio/Auto), imágenes JPG/PNG/WEBP en alta definición.
 - **Compresor de PDF** integrado (niveles o tamaño objetivo), también desde "Compartir/Abrir con".
 - **Optimizado para gama baja**: el trabajo se escala según la RAM y núcleos del dispositivo.
@@ -151,6 +158,7 @@ Desde adb: `adb shell am start -a com.scannerpromax.action.SCAN --es mode book -
 | PdfBox-Android | PDF | Apache-2.0 | En el APK |
 | SDK de Anthropic para Java / OkHttp | IA en la nube (opcional, clave del usuario) | MIT / Apache-2.0 | En el APK |
 | FSRCNN (super-resolución) | Imagen | Apache-2.0 | En el APK (`assets/models/`) |
+| DocAligner lcnet100 (DocsaidLab / Ze Yuan, github.com/DocsaidLab/DocAligner, v1.1.1) | Encuadre IA (árbitro del recorte) | Apache-2.0 (aviso en `assets/models/README-DocAligner.txt`) | En el APK (`assets/models/docaligner_lcnet100.onnx`, 4,8 MB; usa el ONNX Runtime de Indra) |
 | Inter, Liberation Sans y fuentes del PDF reconstruido | Interfaz / PDF | OFL-1.1 | En el APK |
 
 Eliminados: ML Kit Text Recognition, PaddleOCR-VL-1.5 ("Lector de documentos"), Qwen3.5-0.8B ("Asistente visual") y

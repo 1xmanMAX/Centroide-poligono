@@ -80,7 +80,7 @@ class NeuralCornersTest {
     @Test fun preprocesoIgualQueCopyMakeBorderMasResizeBilineal() {
         val w = 731; val h = 1013
         val bgr = Mat(h, w, CvType.CV_8UC3)
-        Core.randu(bgr, Scalar(0.0, 0.0, 0.0), Scalar(255.0, 255.0, 255.0))
+        Core.randu(bgr, 0.0, 255.0)
         Imgproc.GaussianBlur(bgr, bgr, Size(5.0, 5.0), 0.0)
         val pad = NeuralCorners.padFor(w, h)
         val x = NeuralCorners.preprocess(NeuralCorners.Pixels.of(bgr, bgr = true), pad)
