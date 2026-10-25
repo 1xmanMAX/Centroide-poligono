@@ -28,6 +28,7 @@ object AiRecognizer {
             blocks = o.blocks.map { b ->
                 OcrBlock(b.text, r(b.box), b.lines.map { l -> OcrLine(l.text, r(l.box), l.words.map { OcrWord(it.text, r(it.box), it.confidence) }, l.angle, l.confidence) })
             },
+            doubtful = o.doubtful.map { l -> OcrLine(l.text, r(l.box), l.words.map { OcrWord(it.text, r(it.box), it.confidence) }, l.angle, l.confidence) },
         )
     }
 }

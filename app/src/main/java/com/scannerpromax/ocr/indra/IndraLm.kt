@@ -89,6 +89,46 @@ class IndraLm private constructor(
     private class Beam(val b: Double, val nb: Double, val s: Double, val steps: List<Int>, val hk: Long)
 
     /**
+     * Sesgo por palabras en la búsqueda en haz (vocabulario del usuario y léxico): bonificación de log-probabilidad
+     * que depende solo del prefijo B(prefijo) = Σ [complete] de las palabras cerradas + [partial] de la palabra en
+     * curso, sumada a la puntuación del LM a medida que se extiende el haz. Así una palabra del vocabulario que el
+     * reconocedor ve como posible gana frente a una lectura parecida; un prefijo que no llega a completarse devuelve
+     * su bonificación al cerrar la palabra (o al final de la línea).
+     * Palabras = tramos de letras/dígitos; se pasan en minúsculas.
+     */
+    interface WordBias {
+        val active: Boolean
+        /** Bonificación de la palabra a medio escribir [w] (p. ej. prefijo de un término del vocabulario). */
+        fun partial(w: String): Double
+        /** Bonificación de la palabra ya cerrada [w] (término del vocabulario, palabra del léxico). */
+        fun complete(w: String): Double
+        /** Cota superior de lo que puede sumar un paso (poda). */
+        val maxStep: Double
+    }
+
+    private fun wordChar(vocab: IndraVocab, id: Int): String? {
+        val c = vocab.chars.getOrNull(id - 1) ?: return null
+        return if (c.length == 1 && c[0].isLetterOrDigit()) c.lowercase() else null
+    }
+
+    /** Palabra en curso al final de [prefix] (minúsculas). */
+    private fun tailWord(vocab: IndraVocab, prefix: List<Int>): String {
+        var i = prefix.size
+        while (i > 0 && wordChar(vocab, prefix[i - 1]) != null) i--
+        if (i == prefix.size) return ""
+        val sb = StringBuilder()
+        for (q in i until prefix.size) sb.append(wordChar(vocab, prefix[q]))
+        return sb.toString()
+    }
+
+    private fun biasDelta(bias: WordBias, vocab: IndraVocab, prefix: List<Int>, c: Int): Double {
+        val w = tailWord(vocab, prefix)
+        val ch = wordChar(vocab, c)
+        return if (ch != null) bias.partial(w + ch) - (if (w.isEmpty()) 0.0 else bias.partial(w))
+        else if (w.isEmpty()) 0.0 else bias.complete(w) - bias.partial(w)
+    }
+
+    /**
      * Búsqueda en haz CTC por prefijos (beam_search de lm.py). [blank]: log-prob del blank por paso [T];
      * [topv]/[topi]: las [kTop] mejores clases por paso (blank incluido) y su log-prob, fila a fila ([T * kTop]).
      * Devuelve (ids de token, paso en que se emitió cada uno).
@@ -96,14 +136,16 @@ class IndraLm private constructor(
     fun beamSearch(
         blank: FloatArray, topv: FloatArray, topi: LongArray, kTop: Int, steps: Int,
         alpha: Double, beta: Double, beam: Int = 8, blankSkip: Double = 0.999, candFloor: Double = 1e-3,
+        bias: WordBias? = null, vocab: IndraVocab? = null,
     ): Pair<IntArray, IntArray> {
+        val wb = if (bias != null && vocab != null) bias else null
         val b = bits
         val hmask = (1L shl (b * (order - 1))) - 1
         var beams = LinkedHashMap<List<Int>, Beam>()
         beams[emptyList()] = Beam(0.0, Double.NEGATIVE_INFINITY, 0.0, emptyList(), 0L)
         val logSkip = ln(blankSkip)
         val logFloor = ln(candFloor)
-        val reach = beta + alpha * maxLogp
+        val reach = beta + alpha * maxLogp + (wb?.maxStep ?: 0.0)
         for (t in 0 until steps) {
             val b0 = blank[t].toDouble()
             if (b0 > logSkip) {
@@ -146,7 +188,8 @@ class IndraLm private constructor(
             }
             for (x in ext) {
                 val lmp = logpKey((x.h shl b) or (x.c + 1).toLong())
-                add(x.prefix + x.c, Double.NEGATIVE_INFINITY, x.newFrom, x.s + alpha * lmp + beta, x.st + t, ((x.h shl b) or (x.c + 1).toLong()) and hmask)
+                val wd = if (wb != null) biasDelta(wb, vocab!!, x.prefix, x.c) else 0.0
+                add(x.prefix + x.c, Double.NEGATIVE_INFINITY, x.newFrom, x.s + alpha * lmp + beta + wd, x.st + t, ((x.h shl b) or (x.c + 1).toLong()) and hmask)
             }
             val sorted = nxt.entries.sortedByDescending { lse(it.value.b, it.value.nb) + it.value.s }
             beams = LinkedHashMap<List<Int>, Beam>().apply { for (en in sorted.take(beam)) put(en.key, en.value) }
@@ -154,7 +197,12 @@ class IndraLm private constructor(
         var best: Map.Entry<List<Int>, Beam>? = null
         var bestScore = Double.NEGATIVE_INFINITY
         for (en in beams) {
-            val sc = lse(en.value.b, en.value.nb) + en.value.s
+            var sc = lse(en.value.b, en.value.nb) + en.value.s
+            if (wb != null) {
+                // Fin de línea: la palabra en curso se cierra.
+                val w = tailWord(vocab!!, en.key)
+                if (w.isNotEmpty()) sc += wb.complete(w) - wb.partial(w)
+            }
             if (best == null || sc > bestScore) { best = en; bestScore = sc }
         }
         return best!!.key.toIntArray() to best.value.steps.toIntArray()

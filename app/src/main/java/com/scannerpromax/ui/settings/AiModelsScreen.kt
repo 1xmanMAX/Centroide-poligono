@@ -187,6 +187,8 @@ internal fun AiModelsContent(
             onDelete = { onDelete(fast) },
         )
 
+        VocabularySection(settings, onUpdate)
+
         val layout = ModelCatalog.PAGE_LAYOUT
         Text(
             "OPCIONAL",

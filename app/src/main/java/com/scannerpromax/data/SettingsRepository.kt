@@ -60,6 +60,8 @@ class SettingsRepository(private val context: Context) {
             prefs[Keys.ATTACH_ANY_FORMAT] = updated.attachAnyFormat.name
             prefs[Keys.ATTACH_SAVE_COPY] = updated.attachSaveCopy
             prefs[Keys.ATTACH_REVIEW] = updated.attachReview
+            prefs[Keys.USER_VOCABULARY] = updated.userVocabulary.joinToString("\n")
+            prefs[Keys.SPELL_CHECK] = updated.spellCheck
         }
     }
 
@@ -95,6 +97,8 @@ class SettingsRepository(private val context: Context) {
             attachAnyFormat = enumOr(this[Keys.ATTACH_ANY_FORMAT], d.attachAnyFormat),
             attachSaveCopy = this[Keys.ATTACH_SAVE_COPY] ?: d.attachSaveCopy,
             attachReview = this[Keys.ATTACH_REVIEW] ?: d.attachReview,
+            userVocabulary = this[Keys.USER_VOCABULARY]?.split('\n')?.map { it.trim() }?.filter { it.isNotEmpty() } ?: d.userVocabulary,
+            spellCheck = this[Keys.SPELL_CHECK] ?: d.spellCheck,
         )
     }
 
@@ -122,6 +126,8 @@ class SettingsRepository(private val context: Context) {
         val ATTACH_ANY_FORMAT = stringPreferencesKey("attach_any_format")
         val ATTACH_SAVE_COPY = booleanPreferencesKey("attach_save_copy")
         val ATTACH_REVIEW = booleanPreferencesKey("attach_review")
+        val USER_VOCABULARY = stringPreferencesKey("user_vocabulary")
+        val SPELL_CHECK = booleanPreferencesKey("spell_check")
     }
 
     private companion object {
@@ -168,6 +174,13 @@ data class AppSettings(
      * entregar. false (por defecto) = directo: al terminar en la cámara se adjunta al instante.
      */
     val attachReview: Boolean = false,
+    /**
+     * "Mi vocabulario" (Ajustes › Reconocimiento): términos propios (nombres, cursos, términos técnicos) con prioridad
+     * en la corrección del OCR y en el modelo de lenguaje de Indra.
+     */
+    val userVocabulary: List<String> = emptyList(),
+    /** Corregir palabras mal leídas con el diccionario español (solo correcciones claras). */
+    val spellCheck: Boolean = true,
 ) {
     fun cloudConsent(id: com.scannerpromax.ai.cloud.CloudProviderId): Boolean = when (id) {
         com.scannerpromax.ai.cloud.CloudProviderId.DEEPSEEK -> cloudConsentDeepSeek

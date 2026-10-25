@@ -610,6 +610,7 @@ internal fun ZoomableFileImage(
                 )
             }
         }
+        if (live != null) LiveTextDoubtMarks(live, mapping)
         if (live != null) LiveTextLayer(live, mapping, onCopy, onShare)
     }
 }

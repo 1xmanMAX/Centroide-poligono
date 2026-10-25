@@ -141,6 +141,28 @@ internal fun Modifier.liveTextGestures(
 }
 
 /**
+ * Marca discreta de las lecturas DUDOSAS (líneas o palabras de confianza baja: manuscrito difícil, campos de
+ * formulario): subrayado punteado naranja translúcido bajo cada palabra. Siguen siendo seleccionables y copiables.
+ */
+@Composable
+internal fun BoxScope.LiveTextDoubtMarks(live: LiveTextState, mapping: () -> LiveTextMapping?) {
+    if (live.status != LiveTextStatus.READY) return
+    val boxes = remember(live.words) { LiveText.doubtfulBoxes(live.words) }
+    if (boxes.isEmpty()) return
+    val m = mapping() ?: return
+    val color = MaterialTheme.ui.orange.copy(alpha = 0.75f)
+    Canvas(Modifier.fillMaxSize()) {
+        val stroke = 1.5.dp.toPx()
+        val dash = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(3.dp.toPx(), 2.dp.toPx()))
+        for (b in boxes) {
+            val r = m.toView(b)
+            val y = r.bottom + stroke
+            drawLine(color, Offset(r.left, y), Offset(r.right, y), strokeWidth = stroke, pathEffect = dash)
+        }
+    }
+}
+
+/**
  * Capa de selección sobre la imagen (mismo tamaño que la vista del visor): resaltado por líneas, dos tiradores
  * arrastrables y el menú flotante Copiar · Seleccionar todo · Compartir. [mapping] da las coordenadas actuales
  * (cambian con el zoom y el desplazamiento).

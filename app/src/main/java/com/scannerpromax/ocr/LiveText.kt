@@ -1,5 +1,6 @@
 package com.scannerpromax.ocr
 
+import com.scannerpromax.domain.OcrLine
 import com.scannerpromax.domain.OcrRect
 import com.scannerpromax.domain.OcrResult
 import kotlin.math.max
@@ -15,8 +16,11 @@ import kotlin.math.sqrt
  */
 object LiveText {
 
-    /** Palabra seleccionable: texto, caja (coordenadas OCR) e índices de su línea y bloque (globales). */
-    data class Word(val text: String, val box: OcrRect, val line: Int, val block: Int)
+    /**
+     * Palabra seleccionable: texto, caja (coordenadas OCR) e índices de su línea y bloque (globales). [doubtful]:
+     * lectura dudosa (línea o palabra con confianza baja): se marca con un subrayado discreto.
+     */
+    data class Word(val text: String, val box: OcrRect, val line: Int, val block: Int, val doubtful: Boolean = false)
 
     /** Rango de palabras seleccionado (índices en la lista de [words], ambos incluidos, [start] <= [end]). */
     data class Range(val start: Int, val end: Int) {
@@ -39,19 +43,30 @@ object LiveText {
         if (result == null) return emptyList()
         val out = ArrayList<Word>()
         var lineIndex = 0
-        result.blocks.forEachIndexed { bi, block ->
-            for (line in block.lines) {
-                val ws = line.words.filter { it.text.isNotBlank() }
-                if (ws.isNotEmpty()) {
-                    ws.forEach { out += Word(it.text, it.box, lineIndex, bi) }
-                } else {
-                    splitLine(line.text, line.box).forEach { (t, b) -> out += Word(t, b, lineIndex, bi) }
-                }
-                lineIndex++
+        // Las líneas DUDOSAS (fuera de los bloques) entran como bloques propios delante del primer bloque que empieza
+        // más abajo que ellas: así quedan seleccionables en un orden de lectura razonable.
+        val pending = result.doubtful.filter { it.text.isNotBlank() }.sortedBy { it.box.top }.toMutableList()
+        var bi = 0
+        fun addLine(line: OcrLine, block: Int, doubtLine: Boolean) {
+            val ws = line.words.filter { it.text.isNotBlank() }
+            if (ws.isNotEmpty()) {
+                ws.forEach { out += Word(it.text, it.box, lineIndex, block, doubtLine || it.isDoubtful) }
+            } else {
+                splitLine(line.text, line.box).forEach { (t, b) -> out += Word(t, b, lineIndex, block, doubtLine) }
             }
+            lineIndex++
         }
+        for (block in result.blocks) {
+            while (pending.isNotEmpty() && pending[0].box.top < block.box.top) addLine(pending.removeAt(0), bi++, true)
+            for (line in block.lines) addLine(line, bi, line.isDoubtful)
+            bi++
+        }
+        for (line in pending) addLine(line, bi++, true)
         return out
     }
+
+    /** Cajas (coordenadas OCR) de las palabras dudosas, para el subrayado discreto del visor. */
+    fun doubtfulBoxes(words: List<Word>): List<OcrRect> = words.filter { it.doubtful }.map { it.box }
 
     /** Reparte [text] en palabras con cajas proporcionales a sus caracteres (espacios incluidos). */
     internal fun splitLine(text: String, box: OcrRect): List<Pair<String, OcrRect>> {

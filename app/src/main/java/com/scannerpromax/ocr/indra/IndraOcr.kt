@@ -37,9 +37,15 @@ import kotlin.math.min
  */
 class IndraOcr(dir: File, threads: Int = 4, private val orientMin: Float = ORIENT_MIN) : Closeable {
 
-    class Token(val id: Int, val x: Float)
-    class Word(val text: String, val box: FloatArray)
-    class Line(val box: FloatArray, val text: String, val conf: Float, val words: List<Word>)
+    /** Ficha CTC: clase, x en la página y probabilidad de la clase elegida en su paso (confianza por carácter). */
+    class Token(val id: Int, val x: Float, val p: Float = 1f)
+    /** Palabra con su confianza (media de las probabilidades de sus caracteres). */
+    class Word(val text: String, val box: FloatArray, val conf: Float = 1f, val charP: FloatArray? = null)
+    /**
+     * Línea. [doubtful]: confianza bajo [MIN_CONF] (antes se vaciaba): su texto se conserva si no es basura evidente
+     * ([IndraDoubt.keep]) para mostrarlo como DUDOSO.
+     */
+    class Line(val box: FloatArray, val text: String, val conf: Float, val words: List<Word>, val doubtful: Boolean = false)
     class Block(val label: String, val box: FloatArray, val lines: List<Int>)
 
     /**
@@ -92,6 +98,18 @@ class IndraOcr(dir: File, threads: Int = 4, private val orientMin: Float = ORIEN
 
     val hasLm: Boolean get() = lm != null
 
+    /** Sesgo de palabras en la búsqueda en haz (vocabulario del usuario, léxico): null = el LM de Indra tal cual. */
+    @Volatile var bias: IndraLm.WordBias? = null
+
+    /**
+     * Confianza mínima para conservar una línea como dudosa (bajo [MIN_CONF]); por encima de 1 = comportamiento
+     * original (líneas dudosas vacías).
+     */
+    @Volatile var doubtFloor: Float = DOUBT_FLOOR
+
+    /** Modelo de lenguaje (null sin lm.npz): lo usa el corrector para desempatar. */
+    val languageModel: IndraLm? get() = lm
+
     // ------------------------------------------------------------------ página completa
 
     /**
@@ -124,7 +142,7 @@ class IndraOcr(dir: File, threads: Int = 4, private val orientMin: Float = ORIEN
         if (skew != 0.0) {
             fun un(b: FloatArray) = IndraImage.unrotateBox(b, skew, g.w, g.h)
             page = Page(
-                page.lines.map { l -> Line(un(l.box), l.text, l.conf, l.words.map { Word(it.text, un(it.box)) }) },
+                page.lines.map { l -> Line(un(l.box), l.text, l.conf, l.words.map { Word(it.text, un(it.box), it.conf, it.charP) }, l.doubtful) },
                 page.blocks.map { Block(it.label, un(it.box), it.lines) },
                 0, 0.0, g.w, g.h, emptyMap(),
             )
@@ -227,7 +245,11 @@ class IndraOcr(dir: File, threads: Int = 4, private val orientMin: Float = ORIEN
 
     // ------------------------------------------------------------------ reconocimiento CTC
 
-    class Rec(val text: String, val conf: Float, val tokens: List<Token>)
+    /**
+     * Lectura de una línea. Bajo [MIN_CONF] [text]/[tokens] quedan vacíos (como el original: no cambian el corte de
+     * líneas ni el orden de lectura) y la lectura va en [doubtText]/[doubtTokens].
+     */
+    class Rec(val text: String, val conf: Float, val tokens: List<Token>, val doubtText: String = "", val doubtTokens: List<Token> = emptyList())
 
     fun recognize(g: Gray, boxes: List<FloatArray>, batch: Int = 64): List<Rec> {
         val n = boxes.size
@@ -278,20 +300,33 @@ class IndraOcr(dir: File, threads: Int = 4, private val orientMin: Float = ORIEN
                             val conf = if (keepT.isNotEmpty()) (confSum / keepT.size).toFloat() else 0f
                             var tokIds = IntArray(keepT.size) { ids[k * tSteps + keepT[it]].toInt() }
                             var steps = keepT.toIntArray()
-                            if (lm != null && conf >= MIN_CONF && conf < lmGate) {
+                            val floor = min(MIN_CONF, doubtFloor)
+                            var probs = FloatArray(keepT.size) { pmax[k * tSteps + keepT[it]] }
+                            if (lm != null && conf >= floor && conf < lmGate) {
                                 val bl = FloatArray(len) { blank!![k * tSteps + it] }
                                 val tv = FloatArray(len * kTop) { topv!![(k * tSteps) * kTop + it] }
                                 val ti = LongArray(len * kTop) { topi!![(k * tSteps) * kTop + it] }
-                                val (bi, bs) = lm.beamSearch(bl, tv, ti, kTop, len, lmAlpha, lmBeta, LM_BEAM, candFloor = LM_CAND_FLOOR)
+                                val (bi, bs) = lm.beamSearch(bl, tv, ti, kTop, len, lmAlpha, lmBeta, LM_BEAM, candFloor = LM_CAND_FLOOR, bias = bias?.takeIf { it.active }, vocab = vocab)
                                 tokIds = bi; steps = bs
+                                // Probabilidad de la clase elegida en su paso (entre las kTop mejores; si no está, casi nula).
+                                probs = FloatArray(bi.size) { q ->
+                                    val s0 = bs[q]
+                                    var pr = 0.01f
+                                    for (jj in 0 until kTop) if (ti[s0 * kTop + jj].toInt() == bi[q]) { pr = exp(tv[s0 * kTop + jj]); break }
+                                    pr
+                                }
                             }
                             val bx = boxes[j]
                             val h = max(1.0, (bx[3] - bx[1]).toDouble())
                             val ix0 = floor(bx[0] - IndraImage.PAD_X * h)
                             val cw = ceil(bx[2] + IndraImage.PAD_X * h) - ix0
                             val f = cw / crops[j].w
-                            val toks = List(tokIds.size) { Token(tokIds[it], (ix0 + (steps[it] + 0.5) * stride * f).toFloat()) }
-                            out[j] = if (conf >= MIN_CONF) Rec(vocab.decode(tokIds), conf, toks) else Rec("", conf, emptyList())
+                            val toks = List(tokIds.size) { Token(tokIds[it], (ix0 + (steps[it] + 0.5) * stride * f).toFloat(), probs[it]) }
+                            out[j] = when {
+                                conf >= MIN_CONF -> Rec(vocab.decode(tokIds), conf, toks)
+                                conf >= floor -> Rec("", conf, emptyList(), vocab.decode(tokIds), toks)
+                                else -> Rec("", conf, emptyList())
+                            }
                         }
                     }
                 }
@@ -349,7 +384,7 @@ class IndraOcr(dir: File, threads: Int = 4, private val orientMin: Float = ORIEN
         return out
     }
 
-    private class LineRec(var box: FloatArray, var text: String, val conf: Float, var tokens: List<Token>)
+    private class LineRec(var box: FloatArray, var text: String, val conf: Float, var tokens: List<Token>, val src: Int = -1)
 
     /** Líneas sin texto propio (rellenos de puntos/rayas) fuera; viñetas sueltas unidas a su elemento (tidy_lines). */
     private fun tidyLines(lines: MutableList<LineRec>): List<LineRec> {
@@ -403,7 +438,10 @@ class IndraOcr(dir: File, threads: Int = 4, private val orientMin: Float = ORIEN
             if (text.isNotEmpty()) {
                 val x0 = max(box[0], cur.minOf { it.x } - 0.35f * h)
                 val x1 = min(box[2], cur.maxOf { it.x } + 0.35f * h)
-                out += Word(text, floatArrayOf(x0, box[1], max(x0 + 1f, x1), box[3]))
+                var ps = 0f
+                for (t in cur) ps += t.p
+                val cp = if (text.length == cur.size) FloatArray(cur.size) { cur[it].p } else null
+                out += Word(text, floatArrayOf(x0, box[1], max(x0 + 1f, x1), box[3]), ps / cur.size, cp)
             }
             cur = ArrayList()
         }
@@ -415,7 +453,7 @@ class IndraOcr(dir: File, threads: Int = 4, private val orientMin: Float = ORIEN
     fun assemble(w: Int, h: Int, boxes: List<FloatArray>, recs: List<Rec>): Page {
         val cuts = if (boxes.isNotEmpty()) gutterCuts(boxes, recs) else emptyList()
         val split = ArrayList<LineRec>()
-        for (i in boxes.indices) for (s in splitLine(boxes[i], recs[i].tokens, SPLIT_GAP, cuts[i])) split += LineRec(s.box, s.text, recs[i].conf, s.tokens)
+        for (i in boxes.indices) for (s in splitLine(boxes[i], recs[i].tokens, SPLIT_GAP, cuts[i])) split += LineRec(s.box, s.text, recs[i].conf, s.tokens, i)
         val lines = tidyLines(split)
         val bx = lines.map { it.box }
         val texts = lines.map { it.text }
@@ -446,9 +484,20 @@ class IndraOcr(dir: File, threads: Int = 4, private val orientMin: Float = ORIEN
             }
         }
         val pos = IntArray(lines.size).also { p -> ord.forEachIndexed { k, i -> p[i] = k } }
+        val medH = if (lines.isEmpty()) 1f else IndraOrder.median(FloatArray(lines.size) { lines[it].box[3] - lines[it].box[1] })
         val outLines = ord.map { i ->
             val l = lines[i]
-            Line(l.box.map { round1(it) }.toFloatArray(), l.text.trim(), l.conf, words(l.box, l.tokens))
+            val r = recs.getOrNull(l.src)
+            if (l.text.isBlank() && r != null && r.doubtTokens.isNotEmpty()) {
+                // Línea dudosa: su lectura, salvo basura evidente (rayas, casillas, sueltas de 1 carácter).
+                val t = r.doubtText.trim()
+                val bh = l.box[3] - l.box[1]
+                val keep = IndraDoubt.keep(t, l.conf, bh / max(1f, medH), (l.box[2] - l.box[0]) / max(1f, bh), doubtFloor)
+                if (keep) Line(l.box.map { round1(it) }.toFloatArray(), t, l.conf, words(l.box, r.doubtTokens), doubtful = true)
+                else Line(l.box.map { round1(it) }.toFloatArray(), "", l.conf, emptyList())
+            } else {
+                Line(l.box.map { round1(it) }.toFloatArray(), l.text.trim(), l.conf, words(l.box, l.tokens))
+            }
         }
         val blocks = if (cls != null && same != null) {
             IndraOrder.pageBlocks(bx, ord, cls!!, same!!).map { b -> Block(b.label, b.box, b.lines.map { pos[it] }) }
@@ -488,6 +537,12 @@ class IndraOcr(dir: File, threads: Int = 4, private val orientMin: Float = ORIEN
         const val GUTTER_EDGES = 3
         const val ORIENT_MIN = 0.95f
         const val MIN_CONF = 0.5f
+        /**
+         * Líneas entre esta confianza y [MIN_CONF] se conservan como dudosas (si [IndraDoubt.keep]). Banco: bajo 0,3
+         * casi todo es basura (casillas, rayas, "1"/"I" sueltos); entre 0,3 y 0,5 con el filtro, %palabras igual y
+         * precisión de palabras −0,8 pp (las dudosas van marcadas y fuera del texto plano).
+         */
+        const val DOUBT_FLOOR = 0.3f
         const val LM_GATE = 0.9
         const val LM_ALPHA = 0.5
         const val LM_BETA = 1.5

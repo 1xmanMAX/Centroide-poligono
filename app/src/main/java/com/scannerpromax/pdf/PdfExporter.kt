@@ -225,7 +225,7 @@ class PdfExporter(private val context: Context) {
             cs.drawImage(image, placement.left, placement.top, placement.width(), placement.height())
             val ocr = input.ocr
             val wantsLayer = mode == PdfTextMode.BUSCABLE || mode == PdfTextMode.BUSCABLE_CON_TEXTO
-            if (wantsLayer && ocr != null && ocr.blocks.isNotEmpty() && sameAspect(ocr, srcW, srcH)) {
+            if (wantsLayer && ocr != null && (ocr.blocks.isNotEmpty() || ocr.doubtful.isNotEmpty()) && sameAspect(ocr, srcW, srcH)) {
                 val map = ImageToPage(
                     x0 = placement.left,
                     yTop = placement.top + placement.height(),
@@ -309,7 +309,10 @@ class PdfExporter(private val context: Context) {
      *    el número de palabras se reutilizan sus cajas, si no se ajusta la línea completa a su caja.
      */
     private fun writeTextLayer(cs: PDPageContentStream, ocr: OcrResult, map: ImageToPage, fonts: Fonts) {
-        val lines: List<OcrLine> = ocr.blocks.flatMap { it.lines }
+        val main: List<OcrLine> = ocr.blocks.flatMap { it.lines }
+        // Líneas DUDOSAS (manuscrito difícil, campos): también buscables, salvo si el usuario corrigió el texto (su
+        // corrección manda y se alinea solo con las líneas reconocidas con seguridad).
+        val lines = if (ocr.editedText == null) main + ocr.doubtful.filter { it.text.isNotBlank() } else main
         if (lines.isEmpty()) return
         val original = lines.map { wordsOf(it) }
         val corrected = ocr.editedText?.let { TextAligner.align(original, it) }

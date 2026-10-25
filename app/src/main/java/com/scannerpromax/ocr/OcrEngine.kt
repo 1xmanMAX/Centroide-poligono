@@ -61,12 +61,20 @@ class OcrEngine(@Suppress("unused") private val context: Context) {
      * leer. No se interrumpe a mitad (ONNX Runtime no es cancelable): la cancelación se comprueba al terminar.
      */
     @Suppress("UNUSED_PARAMETER")
-    suspend fun recognize(bitmap: Bitmap, filter: FilterType?, lightweight: Boolean, partial: Partial?): OcrResult = Gate.lock.withLock {
+    suspend fun recognize(bitmap: Bitmap, filter: FilterType?, lightweight: Boolean, partial: Partial?): OcrResult =
+        recognize(bitmap, bitmap.width, bitmap.height, partial)
+
+    /**
+     * OCR de [bitmap] con las cajas en px de una imagen de [outW]×[outH]: [bitmap] puede ser otra versión de la
+     * misma página (la de solo geometría, sin el filtro que ve el usuario: [com.scannerpromax.ocr.indra.IndraPrep])
+     * a otra escala; el resultado se expresa sobre la imagen procesada que se muestra.
+     */
+    suspend fun recognize(bitmap: Bitmap, outW: Int, outH: Int, partial: Partial? = null): OcrResult = Gate.lock.withLock {
         withContext(Dispatchers.Default) {
             require(!bitmap.isRecycled) { "Bitmap reciclado" }
             val engine = indra?.takeIf { it.isReady() }
                 ?: throw OcrUnavailableException("El lector de texto (Indra) aún no está descargado")
-            val r = engine.recognize(bitmap)
+            val r = engine.recognize(bitmap, outW, outH)
                 ?: throw if (engine.isReady()) OcrFailedException("Indra no pudo leer la página")
                 else OcrUnavailableException("No se pudo cargar el lector de texto (Indra)")
             partial?.result = r

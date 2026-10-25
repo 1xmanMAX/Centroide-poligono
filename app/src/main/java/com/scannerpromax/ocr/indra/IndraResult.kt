@@ -17,7 +17,10 @@ import com.scannerpromax.domain.OcrWord
 object IndraResult {
 
     /** [scale] = px de la imagen recibida por px de la imagen que vio Indra (si se redujo antes). */
-    fun toOcrResult(page: IndraOcr.Page, imageW: Int, imageH: Int, scale: Float = 1f): OcrResult {
+    fun toOcrResult(page: IndraOcr.Page, imageW: Int, imageH: Int, scale: Float = 1f): OcrResult = toOcrResult(page, imageW, imageH, scale, scale)
+
+    /** Con escalas distintas en x e y (Indra leyó otra versión de la página, p. ej. solo geometría, de otro tamaño). */
+    fun toOcrResult(page: IndraOcr.Page, imageW: Int, imageH: Int, scaleX: Float, scaleY: Float): OcrResult {
         val k = ((page.rotation / 90) % 4 + 4) % 4
         // Dimensiones de la imagen que vio Indra (antes de girar).
         val w0 = if (k % 2 == 1) page.height else page.width
@@ -31,8 +34,8 @@ object IndraResult {
                 else -> b
             }
             return OcrRect(
-                (r[0] * scale).coerceIn(0f, imageW.toFloat()), (r[1] * scale).coerceIn(0f, imageH.toFloat()),
-                (r[2] * scale).coerceIn(0f, imageW.toFloat()), (r[3] * scale).coerceIn(0f, imageH.toFloat()),
+                (r[0] * scaleX).coerceIn(0f, imageW.toFloat()), (r[1] * scaleY).coerceIn(0f, imageH.toFloat()),
+                (r[2] * scaleX).coerceIn(0f, imageW.toFloat()), (r[3] * scaleY).coerceIn(0f, imageH.toFloat()),
             )
         }
         var angle = (page.skew - 90.0 * k).toFloat()
@@ -42,16 +45,19 @@ object IndraResult {
             OcrLine(
                 text = l.text,
                 box = map(l.box),
-                words = l.words.map { OcrWord(it.text, map(it.box), l.conf) },
+                // Confianza por palabra (media de las probabilidades de sus caracteres).
+                words = l.words.map { OcrWord(it.text, map(it.box), it.conf) },
                 angle = angle,
-                confidence = l.conf,
+                // Una línea dudosa conserva su confianza (< 0,5); las demás, al menos 0,5 (no se marcan como dudosas).
+                confidence = if (l.doubtful) l.conf.coerceAtMost(0.499f) else l.conf.coerceAtLeast(0.5f),
             )
         }
+        val doubtful = page.lines.indices.filter { page.lines[it].doubtful && page.lines[it].text.isNotBlank() }.map { lines[it] }
         val blocks = page.blocks.mapNotNull { b ->
-            val ls = b.lines.map { lines[it] }.filter { it.text.isNotBlank() }
+            val ls = b.lines.filter { !page.lines[it].doubtful }.map { lines[it] }.filter { it.text.isNotBlank() }
             if (ls.isEmpty()) null else OcrBlock(ls.joinToString("\n") { it.text }, map(b.box), ls)
         }
         val text = blocks.joinToString("\n\n") { it.text }
-        return OcrResult(text = text, imageWidth = imageW, imageHeight = imageH, blocks = blocks)
+        return OcrResult(text = text, imageWidth = imageW, imageHeight = imageH, blocks = blocks, doubtful = doubtful)
     }
 }

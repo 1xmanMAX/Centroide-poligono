@@ -149,7 +149,13 @@ data class OcrRect(val left: Float, val top: Float, val right: Float, val bottom
 
 /** Palabra reconocida (Indra) con su caja alineada a los ejes y confianza (-1 = desconocida). */
 @Serializable
-data class OcrWord(val text: String, val box: OcrRect, val confidence: Float = -1f)
+data class OcrWord(val text: String, val box: OcrRect, val confidence: Float = -1f) {
+    /** Lectura dudosa (confianza conocida y bajo [OCR_DOUBT]): se muestra con un subrayado discreto. */
+    val isDoubtful: Boolean get() = confidence >= 0f && confidence < OCR_DOUBT
+}
+
+/** Confianza (0..1) bajo la que una línea o palabra se considera DUDOSA. */
+const val OCR_DOUBT = 0.5f
 
 /**
  * Línea reconocida. [words] y [angle] (grados, positivo = horario en coordenadas de imagen; la caja es la envolvente
@@ -162,7 +168,10 @@ data class OcrLine(
     val words: List<OcrWord> = emptyList(),
     val angle: Float = 0f,
     val confidence: Float = -1f,
-)
+) {
+    /** Línea dudosa (confianza conocida y bajo [OCR_DOUBT]). */
+    val isDoubtful: Boolean get() = confidence >= 0f && confidence < OCR_DOUBT
+}
 
 @Serializable
 data class OcrBlock(val text: String, val box: OcrRect, val lines: List<OcrLine>)
@@ -176,6 +185,12 @@ data class OcrResult(
     val blocks: List<OcrBlock>,
     /** Texto corregido por el usuario (lo rellena el repositorio desde [Page.ocrEditedText] al cargar). */
     val editedText: String? = null,
+    /**
+     * Líneas DUDOSAS (confianza baja: manuscrito difícil, campos de formulario) que antes se descartaban. NO están en
+     * [blocks] ni en [text] (exportaciones de texto, maquetación y reconstrucción siguen igual): se muestran marcadas
+     * en Texto en vivo y van en la capa invisible del PDF buscable. En orden de lectura.
+     */
+    val doubtful: List<OcrLine> = emptyList(),
 ) {
     /** Texto a mostrar/exportar: el corregido si existe, si no el reconocido. */
     val displayText: String get() = editedText ?: text

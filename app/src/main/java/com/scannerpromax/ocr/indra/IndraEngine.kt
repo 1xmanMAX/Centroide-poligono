@@ -6,6 +6,8 @@ import com.scannerpromax.ai.ModelCatalog
 import com.scannerpromax.ai.ModelManager
 import com.scannerpromax.ai.parts.OrtNative
 import com.scannerpromax.domain.OcrResult
+import com.scannerpromax.ocr.lexicon.Hunspell
+import com.scannerpromax.ocr.lexicon.UserVocabulary
 import java.io.Closeable
 import kotlin.math.max
 import kotlin.math.min
@@ -16,9 +18,32 @@ import kotlin.math.roundToInt
  * baja sola: [IndraProvisioner]) y conversión Bitmap → gris → [OcrResult]. Si el modelo no está o algo falla devuelve
  * null y el llamador ([com.scannerpromax.ocr.OcrEngine]) deja la página pendiente.
  */
-class IndraEngine(private val modelsProvider: () -> ModelManager, private val threads: Int) : Closeable {
+class IndraEngine(
+    private val modelsProvider: () -> ModelManager,
+    private val threads: Int,
+    /** Léxico español (assets/lexicon, hunspell es_ES); null = sin corrección por léxico. Se carga al primer uso. */
+    private val lexiconLoader: () -> Hunspell? = { null },
+) : Closeable {
 
     private val models: ModelManager get() = modelsProvider()
+
+    /** "Mi vocabulario" (Ajustes › Reconocimiento). */
+    @Volatile var vocabulary: List<String> = emptyList()
+        set(v) { field = v; corrector = null }
+
+    /** Corregir palabras dudosas con el diccionario español (Ajustes › Reconocimiento). */
+    @Volatile var spellCheck: Boolean = true
+        set(v) { field = v; corrector = null }
+
+    private val lexicon: Hunspell? by lazy {
+        runCatching { lexiconLoader() }.onFailure { Log.w(TAG, "léxico no disponible", it) }.getOrNull()
+    }
+    @Volatile private var corrector: IndraCorrector? = null
+
+    private fun correctorFor(e: IndraOcr): IndraCorrector {
+        corrector?.let { return it }
+        return IndraCorrector(if (spellCheck) lexicon else null, UserVocabulary(vocabulary), e.languageModel, e.vocab).also { corrector = it }
+    }
 
     @Volatile private var ocr: IndraOcr? = null
     @Volatile private var failed = false
@@ -50,21 +75,37 @@ class IndraEngine(private val modelsProvider: () -> ModelManager, private val th
         }
     }
 
-    /** OCR de [bitmap] (no se recicla); null si no está disponible o falla. Coordenadas en px de [bitmap]. */
+    /**
+     * OCR de [bitmap] (no se recicla); null si no está disponible o falla. Indra lee la página PREPARADA
+     * ([IndraPrep]: fondo normalizado + enfoque suave), no la que ve el usuario. Coordenadas en px de una imagen de
+     * [outW]×[outH] (por defecto la propia [bitmap]; si [bitmap] es otra versión de la misma página, p. ej. solo
+     * geometría, el tamaño de la imagen procesada que se muestra).
+     */
     @Synchronized
-    fun recognize(bitmap: Bitmap): OcrResult? {
+    fun recognize(bitmap: Bitmap, outW: Int = bitmap.width, outH: Int = bitmap.height): OcrResult? {
         val e = engine() ?: return null
         return try {
-            val (gray, scale) = toGray(bitmap, MAX_SIDE)
+            val (gray, _) = toGray(bitmap, MAX_SIDE)
             val t0 = System.currentTimeMillis()
-            val page = e.run(gray)
-            Log.i(TAG, "Indra ${gray.w}x${gray.h}: ${page.lines.size} líneas, ${page.blocks.size} bloques, giro ${page.rotation}, " +
-                "inclinación ${"%.1f".format(page.skew)}, ${System.currentTimeMillis() - t0} ms ${page.timings}")
-            IndraResult.toOcrResult(page, bitmap.width, bitmap.height, scale)
+            val page = recognizeGray(e, gray)
+            Log.i(TAG, "Indra ${gray.w}x${gray.h}: ${page.lines.size} líneas (${page.lines.count { it.doubtful && it.text.isNotBlank() }} dudosas), " +
+                "${page.blocks.size} bloques, giro ${page.rotation}, inclinación ${"%.1f".format(page.skew)}, ${System.currentTimeMillis() - t0} ms ${page.timings}")
+            IndraResult.toOcrResult(page, outW, outH, outW.toFloat() / gray.w, outH.toFloat() / gray.h)
         } catch (t: Throwable) {
             Log.w(TAG, "Indra falló", t)
             null
         }
+    }
+
+    /** Preparación + OCR + corrección con léxico/vocabulario (cajas en px de [gray]). */
+    private fun recognizeGray(e: IndraOcr, gray: Gray): IndraOcr.Page {
+        val prepared = try { IndraPrep.prepare(gray) } catch (t: Throwable) { Log.w(TAG, "preparación fallida", t); gray }
+        val c = correctorFor(e)
+        e.bias = c.bias()
+        val page = e.run(prepared)
+        val r = c.correct(page)
+        if (r.changes.isNotEmpty()) Log.i(TAG, "corregidas ${r.changes.size} palabras (español: ${r.spanish}): " + r.changes.take(8).joinToString { "${it.from}→${it.to}" })
+        return r.page
     }
 
     /** Tras borrar/volver a descargar el modelo: olvida un fallo de carga anterior y libera lo cargado. */
@@ -79,6 +120,7 @@ class IndraEngine(private val modelsProvider: () -> ModelManager, private val th
     override fun close() {
         runCatching { ocr?.close() }
         ocr = null
+        corrector = null // guarda el LM del motor liberado
     }
 
     companion object {

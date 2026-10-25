@@ -50,7 +50,20 @@ class AppContainer(context: Context) {
 
     /** Indra, el único OCR (ONNX Runtime con hasta 4 hilos). Crearlo no carga nada: eso ocurre al primer OCR. */
     val indraEngine: com.scannerpromax.ocr.indra.IndraEngine by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
-        com.scannerpromax.ocr.indra.IndraEngine({ models }, com.scannerpromax.ai.CpuInfo.recommendedThreads().coerceIn(1, 4))
+        com.scannerpromax.ocr.indra.IndraEngine({ models }, com.scannerpromax.ai.CpuInfo.recommendedThreads().coerceIn(1, 4)) {
+            // Léxico español (hunspell es_ES, ~240 KB comprimido en assets): se carga al primer OCR.
+            appContext.assets.open("lexicon/es_ES.aff.gz").use { aff ->
+                appContext.assets.open("lexicon/es_ES.dic.gz").use { dic -> com.scannerpromax.ocr.lexicon.Hunspell.load(aff, dic) }
+            }
+        }.also { engine ->
+            // "Mi vocabulario" y la corrección con diccionario siguen a los ajustes.
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default).launch {
+                settings.settings.collect { s ->
+                    if (engine.vocabulary != s.userVocabulary) engine.vocabulary = s.userVocabulary
+                    if (engine.spellCheck != s.spellCheck) engine.spellCheck = s.spellCheck
+                }
+            }
+        }
     }
 
     /**

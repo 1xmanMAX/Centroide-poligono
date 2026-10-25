@@ -1193,11 +1193,16 @@ class DocumentRepository(
         edits: PageEdits,
         lightweight: Boolean,
         clearEdited: Boolean = false,
+        page: Page? = null,
     ): OcrResult {
-        val bmp = withContext(Dispatchers.Default) { BitmapIO.decode(file.absolutePath, ocrDecodePixels(lightweight)) }
+        // Indra lee la página SOLO con geometría (sin el filtro que ve el usuario) si se puede: banco
+        // notes_indra_afinado.md, mejor que Texto resaltado / B/N. Las cajas se expresan sobre la imagen procesada.
+        val geo = if (page != null && !(lowEndOcr && lightweight)) indraSource(docId, page, edits, file, ocrDecodePixels(lightweight)) else null
+        val bmp = geo?.first ?: withContext(Dispatchers.Default) { BitmapIO.decode(file.absolutePath, ocrDecodePixels(lightweight)) }
         val partial = OcrEngine.Partial()
         val result = try {
-            ocr().recognize(bmp, edits.filter, lightweight, partial)
+            if (geo != null) ocr().recognize(bmp, geo.second.first, geo.second.second, partial)
+            else ocr().recognize(bmp, edits.filter, lightweight, partial)
         } catch (c: kotlinx.coroutines.CancellationException) {
             partial.result?.let { r ->
                 withContext(NonCancellable) {
@@ -1210,6 +1215,39 @@ class DocumentRepository(
         }
         saveOcrFor(docId, pageId, edits, result, clearEdited)
         return result
+    }
+
+    /**
+     * Versión de la página que lee Indra: la de SOLO geometría (recorte, perspectiva, enderezado) del original, sin el
+     * filtro (Texto resaltado / B/N), a la escala de la procesada como mucho; con su tamaño de salida = el de la
+     * procesada [processed] (las cajas se reescalan a ella). null = leer la procesada tal cual (filtro Color original,
+     * trazos de borrado del usuario, original ausente, proporciones distintas o error).
+     */
+    private suspend fun indraSource(docId: String, page: Page, edits: PageEdits, processed: File, decodePx: Int): Pair<Bitmap, Pair<Int, Int>>? {
+        if (edits.filter.uiFilter == FilterType.ORIGINAL || edits.eraseStrokes.isNotEmpty()) return null
+        val orig = File(docDir(docId), page.originalFile)
+        if (!orig.isFile) return null
+        return try {
+            withContext(Dispatchers.Default) {
+                val (pw, ph) = BitmapIO.decodeBounds(processed.absolutePath)
+                if (pw <= 0 || ph <= 0) return@withContext null
+                val original = BitmapIO.decode(orig.absolutePath, decodePx)
+                val geo = try {
+                    val work = edits.quad?.let { q -> edits.copy(quad = toSpace(q, page.width, page.height, original.width, original.height)) } ?: edits
+                    processor.geometryOnly(original, work, maxSide = minOf(maxOf(pw, ph), INDRA_GEO_MAX_SIDE))
+                } finally {
+                    original.recycle()
+                }
+                // La procesada puede estar ampliada (Texto resaltado/B/N) pero no con otras proporciones.
+                val ra = geo.width.toFloat() / geo.height; val rb = pw.toFloat() / ph
+                if (kotlin.math.abs(ra / rb - 1f) > 0.02f) { geo.recycle(); null } else geo to (pw to ph)
+            }
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            Log.w(TAG, "Sin versión de geometría para Indra; se lee la procesada", t)
+            null
+        }
     }
 
     /**
@@ -1227,7 +1265,7 @@ class DocumentRepository(
                 val file = processedFile(docId, page)
                 val current = findPage(docId, pageId) ?: return@withLock null
                 // Solo se asocia a la página si sus ediciones no cambiaron mientras se reconocía.
-                val result = recognizeAndSave(docId, pageId, file, current.edits, lightweight)
+                val result = recognizeAndSave(docId, pageId, file, current.edits, lightweight, page = current)
                 result.copy(editedText = findPage(docId, pageId)?.ocrEditedText)
             } catch (c: kotlinx.coroutines.CancellationException) {
                 throw c
@@ -1254,7 +1292,7 @@ class DocumentRepository(
             // "Volver a reconocer": la maquetación anterior ya no corresponde al texto nuevo.
             withContext(Dispatchers.IO) { File(docDir(docId), PageFiles.layoutName(pageId, current.edits)).delete() }
             // El texto corregido se descarta solo si el nuevo reconocimiento sale bien.
-            val result = recognizeAndSave(docId, pageId, file, current.edits, lightweight = false, clearEdited = !keepEditedText)
+            val result = recognizeAndSave(docId, pageId, file, current.edits, lightweight = false, clearEdited = !keepEditedText, page = current)
             result.copy(editedText = if (keepEditedText) current.ocrEditedText else null)
         }
 
@@ -1511,6 +1549,8 @@ class DocumentRepository(
         /** Mínimo al reintentar un render sin memoria (solo equipos muy justos). */
         private const val MIN_RETRY_PIXELS = 4_000_000
         private const val OCR_MAX_PIXELS = 12_600_000
+        /** Lado máximo de la versión de solo geometría que lee Indra (su detector trabaja a 1024 px; los recortes no ganan más). */
+        private const val INDRA_GEO_MAX_SIDE = 3200
         private const val MIN_CONFIDENCE = 0.35f
         private const val BUFFER = 64 * 1024
         private const val OCR_LOW_RAM_PIXELS = 4_000_000

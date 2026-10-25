@@ -1,0 +1,15 @@
+Léxico español para la corrección del OCR (Indra) de ESCÁNER PRO MAX
+=====================================================================
+
+es_ES.aff.gz / es_ES.dic.gz: diccionario ortográfico hunspell "es_ES" del proyecto RLA-ES
+(https://github.com/sbosio/rla-es), tal como lo distribuye LibreOffice
+(https://github.com/LibreOffice/dictionaries/tree/master/es), sin modificar (solo comprimido con gzip).
+
+Autor: Santiago Bosio y colaboradores del proyecto RLA-ES.
+
+Licencia: triple esquema de licencias disjuntas a elegir — GNU GPL v3 o posterior, GNU LGPL v3 o posterior,
+o MPL 1.1 o posterior. Esta app lo usa y redistribuye bajo la MPL (Mozilla Public License) 1.1 o posterior:
+https://www.mozilla.org/MPL/  — el código fuente de estos archivos es el propio diccionario (los .gz son
+los mismos ficheros de texto comprimidos) y puede obtenerse en las direcciones de arriba.
+
+La app solo consulta si una palabra existe (raíces + reglas de afijos; ocr/lexicon/Hunspell.kt).
