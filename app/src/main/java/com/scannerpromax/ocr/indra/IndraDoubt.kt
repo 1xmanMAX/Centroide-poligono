@@ -24,9 +24,11 @@ object IndraDoubt {
         if (t.all { it in JUNK }) return false
         // Trazos/rayas (muy bajos) o varias líneas fundidas (muy altos).
         if (hRel < 0.45f || hRel > 2.6f) return false
-        // Solo palabras de 1–2 letras ("a ", "in", "on") a muy baja confianza: ruido de casillas.
+        // Solo palabras de 1–2 letras ("a ", "gi", "on"): ruido de casillas y trazos. Bajo 0,4, además, hace falta
+        // alguna palabra de 4 o más caracteres.
         val toks = t.split(' ').filter { it.isNotEmpty() }
-        if (conf < 0.4f && toks.all { it.length <= 2 } && t.none { it.isDigit() }) return false
+        if (t.none { it.isDigit() } && toks.all { it.length <= 2 }) return false
+        if (conf < 0.4f && t.none { it.isDigit() } && toks.none { it.length >= 4 }) return false
         return true
     }
 }
