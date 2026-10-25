@@ -44,12 +44,16 @@ class AppContainer(context: Context) {
     }
     val pageProcessor: PageProcessor by pageProcessorLazy
 
-    val ocr: OcrEngine by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+    private val ocrLazy = lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         OcrEngine(appContext, deviceTier).also {
             // Lector rápido Indra (si está descargado sustituye a ML Kit); ONNX Runtime con hasta 4 hilos.
             it.fastReader = com.scannerpromax.ocr.indra.IndraEngine({ models }, com.scannerpromax.ai.CpuInfo.recommendedThreads().coerceIn(1, 4))
         }
     }
+    val ocr: OcrEngine by ocrLazy
+
+    /** El motor OCR solo si ya existe (para liberar memoria sin crearlo). */
+    fun ocrIfCreated(): OcrEngine? = if (ocrLazy.isInitialized()) ocr else null
 
     val documents: DocumentRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         DocumentRepository(appContext, pageProcessor, deviceTier).also {

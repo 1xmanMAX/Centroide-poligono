@@ -135,6 +135,10 @@ class ScannerApp : Application(), ImageLoaderFactory {
             // el candado del modelo (puede estar ocupado con una ampliación): en un hilo aparte.
             Thread({ runCatching { SuperResolution.release() } }, "trim-sr").start()
         }
+        if (level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL || level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND) {
+            // Lector rápido Indra (~60 MB entre modelos ONNX y tablas del LM): se recarga en <1 s al siguiente OCR.
+            container.ocrIfCreated()?.fastReader?.let { r -> Thread({ runCatching { r.close() } }, "trim-indra").start() }
+        }
     }
 
     @Deprecated("Deprecated in Java")

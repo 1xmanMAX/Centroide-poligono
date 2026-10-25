@@ -35,7 +35,7 @@ import kotlin.math.min
  *
  * No es seguro entre hilos (las sesiones ORT sí, pero el caché del LM no): un reconocimiento a la vez.
  */
-class IndraOcr(dir: File, threads: Int = 4) : Closeable {
+class IndraOcr(dir: File, threads: Int = 4, private val orientMin: Float = ORIENT_MIN) : Closeable {
 
     class Token(val id: Int, val x: Float)
     class Word(val text: String, val box: FloatArray)
@@ -144,12 +144,12 @@ class IndraOcr(dir: File, threads: Int = 4) : Closeable {
         }
     }
 
-    /** Cuartos de vuelta (antihorario) del contenido; 0 si ninguno supera [ORIENT_MIN] o es una página vertical. */
+    /** Cuartos de vuelta (antihorario) del contenido; 0 si ninguno supera [orientMin] o es una página vertical. */
     fun orientation(g: Gray): Int {
         val p = orientationProbs(g) ?: return 0
         var k = 0
         for (i in p.indices) if (p[i] > p[k]) k = i
-        return if (p[k] > ORIENT_MIN && k < 4) k else 0
+        return if (p[k] > orientMin && k < 4) k else 0
     }
 
     // ------------------------------------------------------------------ detección (det_post.decode)

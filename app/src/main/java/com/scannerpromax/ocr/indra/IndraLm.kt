@@ -82,7 +82,7 @@ class IndraLm private constructor(
             for (i in 0..m) acc += hbv[i]
             acc - ln(vocabSize.toDouble())
         }
-        if (cache.size < 1_000_000) cache[full] = res
+        if (cache.size < CACHE_MAX) cache[full] = res
         return res
     }
 
@@ -162,6 +162,8 @@ class IndraLm private constructor(
 
     companion object {
         private const val TAG_SHIFT = 61
+        /** Tope del caché de log-probabilidades (~15 MB; Python usa 1M entradas, demasiado para gama baja). */
+        private const val CACHE_MAX = 200_000
 
         fun lse(a: Double, b: Double): Double {
             if (a == Double.NEGATIVE_INFINITY) return b

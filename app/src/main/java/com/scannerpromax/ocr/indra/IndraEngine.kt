@@ -39,7 +39,7 @@ class IndraEngine(private val modelsProvider: () -> ModelManager, private val th
         }
         return try {
             val t0 = System.currentTimeMillis()
-            IndraOcr(models.storage.dir(model), threads).also {
+            IndraOcr(models.storage.dir(model), threads, APP_ORIENT_MIN).also {
                 ocr = it
                 Log.i(TAG, "Indra cargado en ${System.currentTimeMillis() - t0} ms (LM: ${it.hasLm})")
             }
@@ -51,12 +51,13 @@ class IndraEngine(private val modelsProvider: () -> ModelManager, private val th
     }
 
     /** OCR de [bitmap] (no se recicla); null si no está disponible o falla. Coordenadas en px de [bitmap]. */
+    @Synchronized
     fun recognize(bitmap: Bitmap): OcrResult? {
         val e = engine() ?: return null
         return try {
             val (gray, scale) = toGray(bitmap, MAX_SIDE)
             val t0 = System.currentTimeMillis()
-            val page = synchronized(this) { e.run(gray) }
+            val page = e.run(gray)
             Log.i(TAG, "Indra ${gray.w}x${gray.h}: ${page.lines.size} líneas, ${page.blocks.size} bloques, giro ${page.rotation}, " +
                 "inclinación ${"%.1f".format(page.skew)}, ${System.currentTimeMillis() - t0} ms ${page.timings}")
             IndraResult.toOcrResult(page, bitmap.width, bitmap.height, scale)
@@ -66,6 +67,7 @@ class IndraEngine(private val modelsProvider: () -> ModelManager, private val th
         }
     }
 
+    /** Libera modelos y LM (~60 MB); se recargan solos al siguiente OCR. Espera a que termine uno en curso. */
     @Synchronized
     override fun close() {
         runCatching { ocr?.close() }
@@ -76,6 +78,11 @@ class IndraEngine(private val modelsProvider: () -> ModelManager, private val th
         private const val TAG = "IndraEngine"
         /** Lado largo máximo (px) que recibe Indra: el detector trabaja a 1024 y los recortes no ganan más allá. */
         const val MAX_SIDE = 4000
+        /**
+         * Umbral de giro de orient.onnx en la app: 0,9 en vez de 0,95 (Python). Banco (132 págs, scripts/orient_thr.py):
+         * a 0,9 giran 4 páginas, todas bien (añade la tabla1 del usuario, p = 0,948); a 0,8 ya entra un giro erróneo.
+         */
+        const val APP_ORIENT_MIN = 0.9f
 
         /** Bitmap → gris (luminancia BT.601 en punto fijo, como cv2.COLOR_BGR2GRAY); (gris, px originales por px). */
         fun toGray(src: Bitmap, maxSide: Int): Pair<Gray, Float> {

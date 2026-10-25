@@ -192,7 +192,17 @@ class IndraParityTest {
         val o = need()
         val csv = File("/tmp/claude-0/bench/ia_eval/subset.csv"); assumeTrue(csv.isFile)
         File(out).mkdirs()
-        val rows = csv.readLines().drop(1).map { it.split(',') }.filter { it.size > 7 && (it[6] == "texto" || it[6] == "palabras") }
+        fun fields(line: String): List<String> {  // CSV con comillas
+            val out = ArrayList<String>(); val sb = StringBuilder(); var q = false
+            for (ch in line) when {
+                ch == '"' -> q = !q
+                ch == ',' && !q -> { out += sb.toString(); sb.clear() }
+                else -> sb.append(ch)
+            }
+            out += sb.toString()
+            return out
+        }
+        val rows = csv.readLines().drop(1).map { fields(it) }.filter { it.size > 7 && (it[6] == "texto" || it[6] == "palabras") }
         var total = 0L
         for (r in rows) {
             val m = Imgcodecs.imread(r[1], Imgcodecs.IMREAD_GRAYSCALE)

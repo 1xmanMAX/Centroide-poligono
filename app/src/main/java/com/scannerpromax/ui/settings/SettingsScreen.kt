@@ -468,7 +468,7 @@ private fun engineShortLabel(e: RecognitionEngine): String = when (e) {
     RecognitionEngine.VISUAL_ASSISTANT -> "Asistente visual"
     RecognitionEngine.NUBE_DEEPSEEK -> "Nube · DeepSeek"
     RecognitionEngine.NUBE_CLAUDE_HAIKU -> "Nube · Haiku"
-    RecognitionEngine.BASIC -> "Básico"
+    RecognitionEngine.BASIC -> "Básico rápido"
     else -> e.label
 }
 
