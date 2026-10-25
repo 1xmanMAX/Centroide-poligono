@@ -212,13 +212,20 @@ object LatexText {
     fun linear(latex: String): String {
         var s = latex.trim().removePrefix("$$").removeSuffix("$$").removePrefix("$").removeSuffix("$")
             .removePrefix("\\[").removeSuffix("\\]").removePrefix("\\(").removeSuffix("\\)")
-        // \frac{a}{b} -> (a)/(b)
-        val frac = Regex("""\\frac\{([^{}]*)\}\{([^{}]*)\}""")
-        repeat(4) { s = frac.replace(s) { m -> "(${m.groupValues[1]})/(${m.groupValues[2]})" } }
-        s = Regex("""\\(?:text|mathrm|mathbf|mathit|operatorname)\{([^{}]*)\}""").replace(s) { it.groupValues[1] }
+        // De dentro afuera: ^{..}, _{..}, \sqrt{..}, \text{..} y \frac{a}{b} sin llaves dentro, hasta que no cambie.
+        val rules = listOf<Pair<Regex, (MatchResult) -> String>>(
+            Regex("""\^\{([^{}]*)\}""") to { m -> "^(" + m.groupValues[1] + ")" },
+            Regex("""_\{([^{}]*)\}""") to { m -> "_(" + m.groupValues[1] + ")" },
+            Regex("""\\sqrt\{([^{}]*)\}""") to { m -> "√(" + m.groupValues[1] + ")" },
+            Regex("""\\(?:text|mathrm|mathbf|mathit|operatorname)\{([^{}]*)\}""") to { m -> m.groupValues[1] },
+            Regex("""\\frac\{([^{}]*)\}\{([^{}]*)\}""") to { m -> "(" + m.groupValues[1] + ")/(" + m.groupValues[2] + ")" },
+        )
+        repeat(8) {
+            val before = s
+            for ((re, f) in rules) s = re.replace(s, f)
+            if (s == before) return@repeat
+        }
         for ((k, v) in SYMBOLS.entries.sortedByDescending { it.key.length }) s = s.replace(k, v)
-        s = Regex("""\^\{([^{}]*)\}""").replace(s) { "^(" + it.groupValues[1] + ")" }
-        s = Regex("""_\{([^{}]*)\}""").replace(s) { "_(" + it.groupValues[1] + ")" }
         s = s.replace("{", "").replace("}", "").replace(Regex("""\\([A-Za-z]+)"""), "$1")
         return s.replace(Regex("\\s+"), " ").trim()
     }
