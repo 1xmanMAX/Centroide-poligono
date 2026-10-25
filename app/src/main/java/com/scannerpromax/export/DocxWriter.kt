@@ -106,4 +106,72 @@ object DocxWriter {
             "</Relationships>"
 
     const val MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+    // ============================================================================================ paquete completo
+    // Documentos con estilos, numeración (listas), cabecera/pie e imágenes (lo usa la reconstrucción con IA,
+    // ai/docgen/DocxRenderer). El documento sencillo de arriba no cambia.
+
+    /** Archivo binario dentro de word/media (p. ej. "image1.jpeg"). */
+    class Media(val name: String, val bytes: ByteArray)
+
+    /** Relación de word/document.xml ([type] = sufijo tras .../relationships/, p. ej. "image", "header"). */
+    class Rel(val id: String, val type: String, val target: String)
+
+    /** Parte XML adicional de word/ (header1.xml, footer1.xml…) con su tipo de contenido. */
+    class Part(val name: String, val xml: String, val contentType: String)
+
+    class Package(
+        val documentXml: String,
+        val stylesXml: String? = null,
+        val numberingXml: String? = null,
+        val parts: List<Part> = emptyList(),
+        val media: List<Media> = emptyList(),
+        val rels: List<Rel> = emptyList(),
+        val title: String? = null,
+    )
+
+    const val CT_HEADER = "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"
+    const val CT_FOOTER = "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"
+    private const val REL_BASE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+
+    fun writePackage(p: Package, out: OutputStream) {
+        val zip = ZipOutputStream(out)
+        zip.setLevel(6)
+        fun entry(name: String, bytes: ByteArray) {
+            zip.putNextEntry(ZipEntry(name))
+            zip.write(bytes)
+            zip.closeEntry()
+        }
+        fun entry(name: String, content: String) = entry(name, content.toByteArray(Charsets.UTF_8))
+        val ct = StringBuilder()
+        ct.append("""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>""")
+        ct.append("""<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">""")
+        ct.append("""<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>""")
+        ct.append("""<Default Extension="xml" ContentType="application/xml"/>""")
+        ct.append("""<Default Extension="jpeg" ContentType="image/jpeg"/><Default Extension="png" ContentType="image/png"/>""")
+        ct.append("""<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>""")
+        if (p.stylesXml != null) ct.append("""<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>""")
+        if (p.numberingXml != null) ct.append("""<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>""")
+        p.parts.forEach { ct.append("""<Override PartName="/word/${it.name}" ContentType="${it.contentType}"/>""") }
+        ct.append("""<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>""")
+        ct.append("</Types>")
+        entry("[Content_Types].xml", ct.toString())
+        entry("_rels/.rels", RELS)
+        entry("docProps/core.xml", core(p.title))
+        entry("word/document.xml", p.documentXml)
+        p.stylesXml?.let { entry("word/styles.xml", it) }
+        p.numberingXml?.let { entry("word/numbering.xml", it) }
+        p.parts.forEach { entry("word/${it.name}", it.xml) }
+        p.media.forEach { entry("word/media/${it.name}", it.bytes) }
+        val rels = StringBuilder()
+        rels.append("""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>""")
+        rels.append("""<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">""")
+        if (p.stylesXml != null) rels.append("""<Relationship Id="rIdStyles" Type="${REL_BASE}styles" Target="styles.xml"/>""")
+        if (p.numberingXml != null) rels.append("""<Relationship Id="rIdNumbering" Type="${REL_BASE}numbering" Target="numbering.xml"/>""")
+        p.rels.forEach { rels.append("""<Relationship Id="${it.id}" Type="$REL_BASE${it.type}" Target="${escape(it.target)}"/>""") }
+        rels.append("</Relationships>")
+        entry("word/_rels/document.xml.rels", rels.toString())
+        zip.finish()
+        zip.flush()
+    }
 }

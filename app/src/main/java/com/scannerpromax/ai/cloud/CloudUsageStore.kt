@@ -40,6 +40,20 @@ class CloudUsageStore(context: Context) {
     fun record(id: CloudProviderId, tokens: CloudUsageTokens, page: Boolean, at: Instant = Instant.now()) =
         save(id, get(id).plus(id, tokens, at, page).copy(lastError = null))
 
+    /** Suma una respuesta con su coste ya calculado (modelos con otra tarifa que la del proveedor, p. ej. Sonnet). */
+    @Synchronized
+    fun recordCost(id: CloudProviderId, tokens: CloudUsageTokens, costUsd: Double, page: Boolean) {
+        val u = get(id)
+        save(
+            id,
+            u.copy(
+                pages = u.pages + if (page) 1 else 0, requests = u.requests + 1,
+                inputTokens = u.inputTokens + tokens.inputTokens, cachedInputTokens = u.cachedInputTokens + tokens.cachedInputTokens,
+                outputTokens = u.outputTokens + tokens.outputTokens, costUsd = u.costUsd + costUsd, lastError = null,
+            ),
+        )
+    }
+
     @Synchronized
     fun setError(id: CloudProviderId, message: String?) = save(id, get(id).copy(lastError = message))
 
