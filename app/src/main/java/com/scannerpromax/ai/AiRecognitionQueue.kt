@@ -620,7 +620,7 @@ class AiRecognitionQueue(
                     parts ?: recognizer.readWithPaddle(bmp, fullW, fullH, mlkit, docType, onProgress)
                 }
                 ModelRole.VISUAL_ASSISTANT -> recognizer.readWithQwen(bmp, fullW, fullH, mlkit, docType, onProgress)
-                ModelRole.PAGE_LAYOUT -> null  // no es un motor de lectura
+                ModelRole.PAGE_LAYOUT, ModelRole.FAST_READER -> null  // no son motores de la cola IA
             }
         } finally {
             bmp.recycle()

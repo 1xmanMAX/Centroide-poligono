@@ -49,6 +49,15 @@ class ModelStorage(val root: File, val abi: String? = NativeAbi.current) {
 
     fun isNativeLibComplete(model: AiModel, lib: NativeLib): Boolean = nativeLibFile(model, lib).let { it.isFile && it.length() == lib.sizeBytes }
 
+    /**
+     * La misma librería nativa ya bajada por OTRO modelo (p. ej. ONNX Runtime de la Maquetación para el Lector rápido):
+     * `<root>/<otro>/lib/<abi>/<archivo>` con el tamaño esperado, o null. El llamador verifica el sha256 al copiarla.
+     */
+    fun sharedNativeLib(model: AiModel, lib: NativeLib): File? = root.listFiles()?.asSequence()
+        ?.filter { it.isDirectory && it.name != model.id }
+        ?.map { File(File(File(it, "lib"), lib.abi), lib.fileName) }
+        ?.firstOrNull { it.isFile && it.length() == lib.sizeBytes }
+
     /** ¿Están todas las librerías nativas que necesita el modelo en esta ABI? (true si no necesita ninguna). */
     fun nativeLibsReady(model: AiModel): Boolean = nativeLibs(model)?.all { isNativeLibComplete(model, it) } ?: false
 

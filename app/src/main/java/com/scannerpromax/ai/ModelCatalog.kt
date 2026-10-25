@@ -189,12 +189,59 @@ object ModelCatalog {
         nativeLibs = ORT_NATIVE,
     )
 
+    /**
+     * Lector rápido: Indra OCR de Datalab (github.com/datalab-to/indra, pesos v1.1.0 en datalab-to/indra-ocr), solo lo
+     * necesario para latín (incluye manuscrito latino): detector de líneas, reconocedor CTC, orden de lectura +
+     * bloques de maquetación, orientación y modelo de lenguaje n-grama para las líneas dudosas (≈25 MB; el paquete
+     * completo son 76 MB con CJK/RTL/índicas). Se ejecuta con ONNX Runtime ([ORT_NATIVE], compartido con la
+     * Maquetación: si ya está, no se baja otra vez). Banco (notes_indra.md, 54 imágenes): CER 27,7 / %palabras 76,2
+     * frente a 53,8 / 46,5 de Tesseract (proxy de ML Kit) y 28,8 / 80,3 de PaddleOCR-VL Q8, a ~0,4 s por página en el
+     * PC (Paddle ~110 s). Manuscrito peor que el Lector de documentos (GNHK 49,7 vs 72,4 % de palabras).
+     * LICENCIA de los pesos: OpenRAIL-M modificada (gratis para uso personal/investigación/empresas < 20 M$ y sin
+     * competir con la API de Datalab); una distribución comercial de la app necesitaría licencia de Datalab.
+     * URLs fijadas al commit de la etiqueta v1.1.0 (sha256 = X-Linked-Etag/sha256 verificados el 2026-10-25).
+     */
+    val FAST_READER = AiModel(
+        id = "indra-ocr",
+        name = "Lector rápido Indra",
+        technicalName = "Indra OCR v1.1 (ONNX, latín)",
+        license = "Pesos OpenRAIL-M modificada (uso personal) · código Apache 2.0",
+        purpose = "Sustituye al OCR básico: lee texto impreso (y manuscrito sencillo) en ~1 s por página, con líneas, " +
+            "palabras, orden de lectura y bloques. Mucho más preciso que el básico incluido (ML Kit).",
+        description = "OCR ligero en el procesador (sin GPU): detector de líneas, reconocedor y orden de lectura de " +
+            "Datalab. Incluye el motor ONNX Runtime (~13 MB) si no lo descargaste con la Maquetación.",
+        role = ModelRole.FAST_READER,
+        files = listOf(
+            indra("det.onnx", 389_948L, "f2bd4cba23e9c328cf7ec824634e423e191a2c6aacbbf35c62bd79dd70f62f59"),
+            indra("rec.onnx", 5_042_161L, "475972a2710be4a3cbfeb2bc7f3624ffd563de07de42476fc7a290d4e1ece484"),
+            indra("order.onnx", 2_973_138L, "a42db2e8b536ad3d84045a4b7f9b0a72667cf8be4aa02d63f7b38004719fb180"),
+            indra("orient.onnx", 371_802L, "20eaf670f55a7cf9facfe1bdd6c7b8e40be75bbf4d48a3df43f66aa3bbd874fd"),
+            indra("meta.json", 211_869L, "4ce4c94b46f5d644033c02e718322014ff4081270f385038c571912b56696339", FileKind.DATA),
+            indra("lm.npz", 15_695_957L, "6c0fb618a363a0acdd05d4f5b0edd9e8146d2d990541b87f6130bbfe17cea58d", FileKind.DATA),
+        ),
+        recommendedRamMb = 2048,
+        minRamMb = 1024,
+        onDeviceQuantization = null,
+        defaults = GenerationDefaults(
+            temperature = 0f, maxTokens = 0, contextSize = 0, maxImageTokens = 0, maxImageSide = 0,
+            repeatPenalty = 1f, useChatTemplate = false, enableThinking = false,
+        ),
+        tasks = emptyList(),
+        nativeLibs = ORT_NATIVE,
+    )
+
+    /** Commit de la etiqueta v1.1.0 de datalab-to/indra-ocr (los archivos de una etiqueta no cambian). */
+    const val INDRA_REVISION = "bd02167fdf2005a19962cc15188f8496a2c87d3b"
+
+    private fun indra(file: String, size: Long, sha: String, kind: FileKind = FileKind.ONNX) =
+        ModelFile(kind = kind, fileName = file, url = hf("datalab-to/indra-ocr", file, INDRA_REVISION), sizeBytes = size, sha256 = sha)
+
     const val ORT_VERSION = "1.31.0"
 
     const val LAYOUT_FILE = "pp_doclayoutv3.onnx"
     const val ORIENTATION_FILE = "pp_lcnet_doc_ori.onnx"
 
-    val all: List<AiModel> = listOf(DOCUMENT_READER, VISUAL_ASSISTANT, PAGE_LAYOUT)
+    val all: List<AiModel> = listOf(FAST_READER, DOCUMENT_READER, VISUAL_ASSISTANT, PAGE_LAYOUT)
 
     /** Píxeles máximos de imagen para Paddle (image_max_pixels del GGUF = 1280 tokens). */
     const val PADDLE_MAX_PIXELS = 1_003_520
@@ -227,9 +274,12 @@ enum class ModelRole {
     DOCUMENT_READER, VISUAL_ASSISTANT,
     /** Detector de maquetación + orientación (ONNX, no es un LLM; no es un motor de reconocimiento por sí solo). */
     PAGE_LAYOUT,
+    /** OCR rápido ONNX (Indra): sustituye a ML Kit en el reconocimiento Básico cuando está descargado. */
+    FAST_READER,
 }
 
-enum class FileKind { LLM, MMPROJ, ONNX }
+/** DATA = otros archivos del modelo (meta.json, tablas del modelo de lenguaje). */
+enum class FileKind { LLM, MMPROJ, ONNX, DATA }
 
 /** Valores de llama_ftype de llama.cpp. */
 enum class QuantType(val ftype: Int, val label: String) {
@@ -373,8 +423,8 @@ enum class RecognitionEngine(
         com.scannerpromax.ai.cloud.CloudProviderId.CLAUDE_HAIKU,
     ),
     BASIC(
-        "Básico sin descarga (ML Kit)",
-        "Reconocimiento rápido incluido en la app, menos preciso.",
+        "Básico rápido (Indra / ML Kit)",
+        "Lector rápido Indra si está descargado (~1 s por página, mucho más preciso); si no, ML Kit incluido en la app.",
         null,
     ),
     ;

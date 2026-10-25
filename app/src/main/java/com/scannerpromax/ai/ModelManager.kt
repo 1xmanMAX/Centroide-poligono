@@ -273,6 +273,8 @@ class ModelManager(context: Context, private val engineProvider: () -> LlmEngine
         val source = zipFetcher.http(pkg.url)
         for (lib in libs) {
             if (storage.isNativeLibComplete(model, lib)) continue
+            // Ya bajada por otro modelo (Maquetación ↔ Lector rápido): copia local verificada en vez de 13 MB de red.
+            if (copySharedNativeLib(model, lib)) continue
             val before = total - libs.filterNot { storage.isNativeLibComplete(model, it) }.sumOf { it.compressedBytes }
             try {
                 zipFetcher.fetch(
@@ -296,6 +298,30 @@ class ModelManager(context: Context, private val engineProvider: () -> LlmEngine
             }
         }
         com.scannerpromax.ai.parts.OrtNative.resetError()
+    }
+
+    private fun copySharedNativeLib(model: AiModel, lib: NativeLib): Boolean {
+        val src = storage.sharedNativeLib(model, lib) ?: return false
+        val dest = storage.nativeLibFile(model, lib)
+        val tmp = File(dest.parentFile, dest.name + ".copy")
+        return try {
+            dest.parentFile?.mkdirs()
+            val md = java.security.MessageDigest.getInstance("SHA-256")
+            src.inputStream().use { inp ->
+                tmp.outputStream().use { out ->
+                    val buf = ByteArray(1 shl 16)
+                    while (true) {
+                        val n = inp.read(buf)
+                        if (n < 0) break
+                        md.update(buf, 0, n); out.write(buf, 0, n)
+                    }
+                }
+            }
+            val sha = md.digest().joinToString("") { "%02x".format(it) }
+            if (sha != lib.sha256 || tmp.length() != lib.sizeBytes || !tmp.renameTo(dest)) { tmp.delete(); false } else true
+        } catch (e: java.io.IOException) {
+            Log.w(TAG, "copia de ${lib.fileName}", e); tmp.delete(); false
+        }
     }
 
     /**

@@ -56,6 +56,12 @@ class OcrEngine(private val context: Context) {
 
     @Volatile private var deviceTier: DeviceTier? = null
 
+    /**
+     * Lector rápido Indra (descarga opcional "Lector rápido Indra"): si está descargado sustituye a ML Kit en todo el
+     * OCR básico (banco: %palabras 76 frente a ~47); si falla o no lee nada, se sigue con ML Kit.
+     */
+    @Volatile var fastReader: com.scannerpromax.ocr.indra.IndraEngine? = null
+
     /** Asigna el perfil del dispositivo (lo llama el repositorio si el motor se creó sin él). */
     fun setDeviceTier(tier: DeviceTier) {
         deviceTier = tier
@@ -90,6 +96,13 @@ class OcrEngine(private val context: Context) {
     suspend fun recognize(bitmap: Bitmap, filter: FilterType?, lightweight: Boolean, partial: Partial?): OcrResult = Gate.lock.withLock {
         withContext(Dispatchers.Default) {
             require(!bitmap.isRecycled) { "Bitmap reciclado" }
+            fastReader?.takeIf { it.isReady() }?.let { fr ->
+                val r = fr.recognize(bitmap)
+                if (r != null && r.blocks.isNotEmpty()) {
+                    partial?.result = r
+                    return@withContext r
+                }
+            }
             val w = bitmap.width
             val h = bitmap.height
             val long = max(w, h)

@@ -31,6 +31,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CloudDownload
 import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Dashboard
 import androidx.compose.material.icons.rounded.DocumentScanner
 import androidx.compose.material.icons.rounded.Memory
@@ -398,6 +399,7 @@ private fun ModelCard(
                 icon = when (model.role) {
                     ModelRole.DOCUMENT_READER -> Icons.Rounded.DocumentScanner
                     ModelRole.PAGE_LAYOUT -> Icons.Rounded.Dashboard
+                    ModelRole.FAST_READER -> Icons.Rounded.Bolt
                     else -> Icons.Rounded.Visibility
                 },
                 iconTint = ui.accent,
