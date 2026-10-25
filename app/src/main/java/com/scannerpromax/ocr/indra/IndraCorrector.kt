@@ -96,39 +96,54 @@ class IndraCorrector(
             return null
         }
         if (c.length < MIN_LEN || !c.all { it.isLetter() }) return null
-        if (vocab.containsWord(c)) return null
+        vocab.words[key(c)]?.let { v ->
+            // Ya es un término del vocabulario: solo se le ponen sus tildes ("sismica" → "sísmica").
+            val fixed = matchCase(c, v)
+            return if (fixed != c && fixed.lowercase() != c.lowercase()) pre + fixed + post to "vocabulario" else null
+        }
         if (w.conf >= maxConf) return null
-        val inLex = spanish && inLexicon(c)
+        // Una palabra española correcta solo admite su forma con tildes del vocabulario (aunque la página no sea española).
+        val inLex = inLexicon(c)
         // 1) Vocabulario del usuario (prioridad): distancia ponderada pequeña.
         var best: String? = null; var bestCost = Double.MAX_VALUE; var second = Double.MAX_VALUE
         for (v in vocab.words.values) {
             if (v.any { it.isDigit() } || v.length < MIN_LEN) continue
-            if (inLex && key(v) != key(c)) continue // una palabra española correcta solo admite su forma con tildes del vocabulario
+            if (inLex && key(v) != key(c)) continue
+            if (editDistance(key(c), key(v)) > maxVocabEdits(c.length)) continue
             val cost = weightedDistance(c, v, probs)
             if (cost < bestCost) { second = bestCost; bestCost = cost; best = v } else if (cost < second) second = cost
         }
         if (best != null && bestCost <= vocabMaxCost(c.length) && second - bestCost >= MARGIN) return pre + matchCase(c, best) + post to "vocabulario"
-        // 2) Léxico español: una edición, candidato único (o preferido por el LM).
+        // 2) Léxico español: una edición, candidato único. Tildes/diéresis: basta con que sea único. Otras ediciones
+        //    (más arriesgadas: el léxico tiene muchas palabras raras y no hay frecuencias): palabra de ≥ 6 letras y el
+        //    LM de Indra debe preferir claramente el candidato a lo leído (más aún si empieza por mayúscula: nombres).
         if (!spanish || inLex || lexicon == null) return null
         if (c.length > 1 && c.all { it.isUpperCase() } && c.length <= 4) return null // siglas
+        val lower = c.lowercase()
         val cands = HashMap<String, Double>()
-        for (cand in edits1(c.lowercase())) {
+        for (cand in edits1(lower)) {
             if (cands.containsKey(cand)) continue
             if (!inLexicon(cand)) continue
             cands[cand] = weightedDistance(c, cand, probs)
         }
         if (cands.isEmpty()) return null
         val sorted = cands.entries.sortedBy { it.value }
-        val top = sorted[0]
+        var top = sorted[0]
         if (top.value > LEX_MAX_COST) return null
         if (sorted.size > 1 && sorted[1].value - top.value < MARGIN) {
             // Empate: decide el LM de Indra si hay un margen claro.
             val ties = sorted.filter { it.value - top.value < MARGIN }
-            val scored = ties.map { it.key to lmScore(it.key) }.sortedByDescending { it.second }
+            val scored = ties.map { it to lmScore(it.key) }.sortedByDescending { it.second }
             if (scored[0].second.isNaN() || scored[0].second - scored[1].second < LM_MARGIN) return null
-            return pre + matchCase(c, scored[0].first) + post to "léxico"
+            top = scored[0].first
         }
-        return pre + matchCase(c, top.key) + post to "léxico"
+        val accentOnly = key(top.key) == key(lower)
+        val gain = lmScore(top.key) - lmScore(lower)
+        if (!accentOnly) {
+            if (c.length < MIN_LEN_EDIT || gain.isNaN()) return null
+            if (gain < (if (c[0].isUpperCase()) lmGainUpper else lmGain)) return null
+        }
+        return pre + matchCase(c, top.key) + post to (if (accentOnly) "tilde" else "léxico %.1f".format(java.util.Locale.ROOT, gain))
     }
 
     /** log P de la palabra (con espacio delante y detrás) según el LM de Indra; NaN sin LM. */
@@ -166,6 +181,11 @@ class IndraCorrector(
 
     companion object {
         const val MIN_LEN = 4
+        /** Ediciones que no son tildes: palabras de al menos 6 letras. */
+        const val MIN_LEN_EDIT = 6
+        /** Ventaja mínima (nats) del candidato frente a lo leído según el LM de Indra (minúscula / Mayúscula inicial). */
+        @JvmField var lmGain = 5.0
+        @JvmField var lmGainUpper = 10.0
         const val MIN_WORDS = 5
         const val SPANISH_SHARE = 0.4
         /** Palabras con confianza (media de sus caracteres) desde aquí no se corrigen. */
@@ -173,14 +193,28 @@ class IndraCorrector(
         const val MARGIN = 0.15
         const val LM_MARGIN = 1.0
         const val LEX_MAX_COST = 0.75
-        const val LEX_BIAS = 0.0
+        /** Bonificación del LM por palabra completa del léxico (banco: manuscrito español AK137 20,5 → 23,2 % palabras). */
+        const val LEX_BIAS = 1.0
         const val VOCAB_BIAS = 0.5
         const val VOCAB_END = 1.0
         private const val INS_COST = 0.6
         private const val ACCENT_COST = 0.1
         private const val LETTERS = "abcdefghijklmnopqrstuvwxyzñáéíóúü"
 
-        fun vocabMaxCost(len: Int): Double = min(3.0, max(0.8, 0.2 * len))
+        fun vocabMaxCost(len: Int): Double = min(2.0, 0.3 + 0.12 * len)
+
+        /** Ediciones (sin tildes) permitidas hacia un término del vocabulario: 1 hasta 9 letras, 2 desde 10, 3 desde 15. */
+        fun maxVocabEdits(len: Int): Int = max(1, len / 5)
+
+        fun editDistance(a: String, b: String): Int {
+            var prev = IntArray(b.length + 1) { it }
+            for (i in 1..a.length) {
+                val cur = IntArray(b.length + 1); cur[0] = i
+                for (j in 1..b.length) cur[j] = minOf(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + if (a[i - 1] == b[j - 1]) 0 else 1)
+                prev = cur
+            }
+            return prev[b.length]
+        }
 
         fun core(t: String): String = t.trim { !it.isLetterOrDigit() }
 

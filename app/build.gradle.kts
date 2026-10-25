@@ -181,6 +181,8 @@ tasks.withType<Test>().configureEach {
         // Indra (IndraParityTest): carpeta de pesos latín y referencias Python; -PindraEval=DIR escribe <id>.txt del
         // subconjunto OCR del banco (ia_eval/subset.csv) para puntuar con tools/ia_score.py.
         "indraDir" to "indra.dir", "indraParity" to "indra.parity", "indraEval" to "indra.eval", "indraDebug" to "indra.debug",
+        // IndraAfinadoEvalTest: -PindraOpts="src=GEO;prep=1;doubt=0.3;lex=1;vocab=a,b;set=all" (ver el test).
+        "indraOpts" to "indra.opts",
     ).forEach { (p, sp) ->
         (project.findProperty(p) as String?)?.let { systemProperty(sp, it) }
     }

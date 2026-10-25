@@ -41,7 +41,8 @@ class IndraParityTest {
         private val openCv: Boolean by lazy { runCatching { nu.pattern.OpenCV.loadLocally(); Mat(1, 1, 0).release(); true }.getOrDefault(false) }
 
         @BeforeClass @JvmStatic fun load() {
-            if (openCv && IndraOcr.FILES.all { File(dir, it).isFile }) ocr = IndraOcr(dir, 4)
+            // Como el original de Python: sin líneas dudosas (afinado de la app).
+            if (openCv && IndraOcr.FILES.all { File(dir, it).isFile }) ocr = IndraOcr(dir, 4).apply { doubtFloor = 2f }
         }
 
         @AfterClass @JvmStatic fun close() { ocr?.close() }
