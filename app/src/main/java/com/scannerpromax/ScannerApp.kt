@@ -140,6 +140,8 @@ class ScannerApp : Application(), ImageLoaderFactory {
         if (level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL || level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND) {
             // Indra (~60 MB entre modelos ONNX y tablas del LM): se recarga en <1 s al siguiente OCR.
             container.ocrIfCreated()?.let { r -> Thread({ runCatching { r.close() } }, "trim-indra").start() }
+            // Encuadre IA (sesión ORT de ~10 MB): se recarga sola en la siguiente captura.
+            container.neuralCornersIfCreated()?.let { n -> Thread({ runCatching { n.close() } }, "trim-encuadre").start() }
         }
     }
 

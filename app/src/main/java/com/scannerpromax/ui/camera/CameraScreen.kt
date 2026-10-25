@@ -353,6 +353,12 @@ private fun CameraContent(
     var idFront by remember { mutableStateOf<Deferred<Result<Bitmap>>?>(null) }
     var viewSize by remember { mutableStateOf(IntSize.Zero) }
     var stableProgress by remember { mutableFloatStateOf(0f) }
+    /** «Encuadre IA»: acuerdo red/clásico de la última detección (null = sin red) → color del contorno. */
+    var neuralAgree by remember { mutableStateOf<Boolean?>(null) }
+    // La red en vivo sólo con el ajuste activado (sin él ni siquiera se copia el frame)
+    LaunchedEffect(engine, settings.neuralFraming) {
+        engine.neural = if (settings.neuralFraming) container.neuralCorners else null
+    }
     var focusPoint by remember { mutableStateOf<Offset?>(null) }
     var lowLight by rememberSaveable { mutableStateOf(LowLightSetting.AUTO) }
     /** Ráfaga en curso: fotos hechas / total (0 = sin ráfaga). */
@@ -732,9 +738,12 @@ private fun CameraContent(
         var cooldownUntil = 0L
         engine.detection.collect { det ->
             smoothed.submit(det, System.currentTimeMillis())
+            if (det != null && det.neuralAgree != neuralAgree) neuralAgree = det.neuralAgree
             val now = SystemClock.elapsedRealtime()
+            // Encuadre IA: si la red discrepa del clásico, sólo se dispara con el clásico muy seguro (sin red: como siempre)
             val eligible = det != null && autoCapture && modeState != ScanMode.PHOTO && !busy &&
-                now >= cooldownUntil && det.confidence >= 0.55f && normalizedArea(det) >= 0.12f
+                now >= cooldownUntil && det.confidence >= 0.55f && normalizedArea(det) >= 0.12f &&
+                (det.neuralAgree != false || det.confidence >= com.scannerpromax.imaging.LiveNeuralTracker.CLASSIC_SURE)
             stable = if (!eligible) 0 else if (prev != null && maxCornerShift(prev!!, det!!) < 0.022f) stable + 1 else 1
             prev = det
             // Con imagen borrosa no se completa la cuenta: se espera a que el usuario sujete firme.
@@ -884,7 +893,13 @@ private fun CameraContent(
                         )
                     },
             ) {
-                DetectionOverlay(smoothed, mode, { stableProgress }, accent, accent)
+                // Contorno verde si red y clásico coinciden, ámbar si discrepan; sin red, el color de siempre
+                val quadColor = when (neuralAgree) {
+                    true -> com.scannerpromax.ui.theme.SystemGreen
+                    false -> com.scannerpromax.ui.theme.SystemOrange
+                    null -> accent
+                }
+                DetectionOverlay(smoothed, mode, { stableProgress }, quadColor, quadColor)
                 FocusRing(focusPoint, focusKey, CameraYellow)
             }
             ShutterFlashOverlay { shutterFlash.value }

@@ -367,7 +367,7 @@ internal class EditorSession(
         detecting = true
         try {
             val det = withContext(Dispatchers.Default) {
-                work.withLock { if (src.isRecycled) null else processor.detector.detect(src) }
+                work.withLock { if (src.isRecycled) null else processor.detector.detect(src, useNeural = true) }
             } ?: return false
             if (det.confidence < 0.2f || det.frameWidth <= 0 || det.frameHeight <= 0) return false
             val sx = src.width.toFloat() / det.frameWidth

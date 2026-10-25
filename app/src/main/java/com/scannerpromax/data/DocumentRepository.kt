@@ -822,7 +822,7 @@ class DocumentRepository(
      */
     private fun detectQuadWithConfidence(bmp: Bitmap): Pair<Quad?, Float?>? {
         val det = try {
-            processor.detector.detect(bmp)
+            processor.detector.detect(bmp, useNeural = true)
         } catch (t: Throwable) {
             Log.w(TAG, "Fallo en detección de bordes", t)
             null

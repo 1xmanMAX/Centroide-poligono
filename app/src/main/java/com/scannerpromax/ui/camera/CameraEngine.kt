@@ -79,6 +79,11 @@ internal data class LiveDetection(
     val cropTop: Float = 0f,
     val cropRight: Float = 1f,
     val cropBottom: Float = 1f,
+    /**
+     * «Encuadre IA» en vivo: true si la red y el detector clásico coinciden (IoU ≥ 0,85), false si discrepan, null si no
+     * hay red (desactivada, ONNX Runtime sin descargar) o no hay inferencia reciente = comportamiento clásico.
+     */
+    val neuralAgree: Boolean? = null,
 )
 
 /** Calidad en vivo para guiar al usuario y frenar la autocaptura con fotos movidas o con reflejos. */
@@ -178,6 +183,52 @@ internal class CameraEngine(
 
     private val _zoom = MutableStateFlow(ZoomInfo())
     val zoom: StateFlow<ZoomInfo> = _zoom.asStateFlow()
+
+    /**
+     * «Encuadre IA» en vivo (null = desactivado): la red corre en su propio hilo cada ~300 ms (600 ms en gama baja) sobre
+     * el frame de análisis a media resolución; el acuerdo con el clásico va en [LiveDetection.neuralAgree].
+     */
+    @Volatile var neural: com.scannerpromax.imaging.NeuralCornerSource? = null
+    private val neuralTracker = com.scannerpromax.imaging.LiveNeuralTracker(if (tier.isLowRam || tier.cores <= 4) 600L else 300L)
+    @Volatile private var neuralBusy = false
+    private val neuralExecutor: ExecutorService = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "scan-encuadre-ia").apply { priority = Thread.NORM_PRIORITY - 1; isDaemon = true }
+    }
+
+    /** Lanza la red sobre este frame si toca (copia a media resolución aquí; la inferencia, en su hilo). */
+    private fun maybeRunNeural(image: androidx.camera.core.ImageProxy, rotation: Int, now: Long) {
+        val n = neural ?: run { neuralTracker.clear(); return }
+        if (neuralBusy || !neuralTracker.due(now)) return
+        val y = image.planes[0]; val u = image.planes[1]; val v = image.planes[2]
+        val (w, h, argb) = com.scannerpromax.imaging.LiveNeuralTracker.yuvToArgbHalf(
+            y.buffer, y.rowStride, u.buffer, v.buffer, u.rowStride, u.pixelStride, image.width, image.height, rotation,
+        )
+        neuralBusy = true
+        try {
+            neuralExecutor.execute {
+                try {
+                    if (!released) {
+                        val q = n.corners(com.scannerpromax.imaging.LiveNeuralTracker.pixels(w, h, argb))
+                        // null = red no disponible (sin ORT, desactivada): sin acuerdo, como sin red
+                        if (q == null) neuralTracker.clear() else neuralTracker.update(q, w, h, SystemClock.elapsedRealtime())
+                    }
+                } catch (t: Throwable) {
+                    Log.w(TAG, "Encuadre IA en vivo", t)
+                } finally {
+                    neuralBusy = false
+                }
+            }
+        } catch (t: Throwable) {
+            neuralBusy = false  // ejecutor cerrado (release)
+        }
+    }
+
+    /** Acuerdo red/clásico para una detección en vivo (coordenadas del frame rotado de [w]x[h]). */
+    private fun neuralAgreement(q: Quad, w: Int, h: Int, now: Long): Boolean? {
+        if (neural == null || w <= 0 || h <= 0) return null
+        val norm = floatArrayOf(q.tl.x / w, q.tl.y / h, q.tr.x / w, q.tr.y / h, q.br.x / w, q.br.y / h, q.bl.x / w, q.bl.y / h)
+        return neuralTracker.agreement(norm, w.toFloat() / h, now)
+    }
 
     /** Si es false, el analizador descarta frames (p. ej. modo Foto o mientras se procesa). */
     @Volatile var detectionEnabled: Boolean = true
@@ -527,8 +578,10 @@ internal class CameraEngine(
                 val u = image.planes[1]; val v = image.planes[2]
                 val det = detector.detectLive(plane.buffer, image.width, image.height, plane.rowStride, rotation,
                     u.buffer, v.buffer, u.rowStride, u.pixelStride)
+                runCatching { maybeRunNeural(image, rotation, now) }.onFailure { Log.w(TAG, "Encuadre IA en vivo", it) }
                 _detection.value = det?.let {
-                    LiveDetection(it.quad, it.confidence, it.frameWidth, it.frameHeight, now, crop[0], crop[1], crop[2], crop[3])
+                    LiveDetection(it.quad, it.confidence, it.frameWidth, it.frameHeight, now, crop[0], crop[1], crop[2], crop[3],
+                        neuralAgreement(it.quad, it.frameWidth, it.frameHeight, now))
                 }
                 // Nitidez/reflejos cada pocos frames (barato a 640 px); la luz cambia despacio.
                 if (frameCounter++ % qualityEvery == 0) {
@@ -850,6 +903,7 @@ internal class CameraEngine(
         } catch (_: Throwable) {
         }
         analysisExecutor.shutdown()
+        neuralExecutor.shutdown()
     }
 
     /** Desvincula solo los casos de uso de esta instancia (nunca unbindAll: no tocar otra cámara activa). */

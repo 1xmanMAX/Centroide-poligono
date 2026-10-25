@@ -189,6 +189,8 @@ fun ReviewScreen(
      * ([onExport] recibe la lista, sin las borradas pendientes de "Deshacer"). null = pantalla Documento normal.
      */
     callerMode: ReviewCallerMode? = null,
+    /** Abre Ajustes › IA en la nube (desde la hoja "Reconstruir con IA" si falta la clave). */
+    onOpenCloudAi: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -230,6 +232,9 @@ fun ReviewScreen(
     val pendingDeletes = remember { mutableStateListOf<String>() }
     // Modo selección (estilo Fotos de iOS): pulsación larga en una página. Sobrevive a ir a Exportar y volver.
     var selectionMode by rememberSaveable { mutableStateOf(false) }
+    // Hoja "Reconstruir con IA" (null = todas las páginas).
+    var showAiRebuild by rememberSaveable { mutableStateOf(false) }
+    var aiRebuildPages by remember { mutableStateOf<List<String>?>(null) }
     var selectedIds by rememberSaveable(stateSaver = StringListSaver) { mutableStateOf(emptyList<String>()) }
     val gridState = rememberLazyGridState()
     val reorder = remember(gridState) {
@@ -465,6 +470,16 @@ fun ReviewScreen(
 
     val d = doc
 
+    if (showAiRebuild) {
+        com.scannerpromax.ui.docgen.AiRebuildSheet(
+            container = container,
+            docId = docId,
+            pageIds = aiRebuildPages,
+            onDismiss = { showAiRebuild = false },
+            onOpenCloudSettings = onOpenCloudAi,
+        )
+    }
+
     val docMenuGroups = listOf(
         listOf(
             MoreMenuItem("Renombrar", AppIcons.Rename, enabled = d != null) { renaming = true },
@@ -479,6 +494,7 @@ fun ReviewScreen(
             MoreMenuItem("Volver a reconocer", AppIcons.Sparkles, enabled = order.isNotEmpty() && aiDocStatuses.isEmpty()) {
                 readWithAi(order.toList())
             },
+            MoreMenuItem("Reconstruir con IA", AppIcons.Document, enabled = order.isNotEmpty()) { aiRebuildPages = null; showAiRebuild = true },
         ),
     )
     // ••• del modo selección: solo lo que no está ya en la barra inferior (volver a reconocer las páginas marcadas).
@@ -489,6 +505,11 @@ fun ReviewScreen(
                 AppIcons.Sparkles,
                 enabled = selectedIds.isNotEmpty() && aiDocStatuses.isEmpty(),
             ) { readWithAi(selectedPages()); exitSelection() },
+            MoreMenuItem(
+                if (selectedIds.size > 1) "Reconstruir con IA (${selectedIds.size})" else "Reconstruir con IA",
+                AppIcons.Document,
+                enabled = selectedIds.isNotEmpty(),
+            ) { aiRebuildPages = selectedPages().map { it.id }; showAiRebuild = true },
         ),
     )
 

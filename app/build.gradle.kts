@@ -183,6 +183,8 @@ tasks.withType<Test>().configureEach {
         "indraDir" to "indra.dir", "indraParity" to "indra.parity", "indraEval" to "indra.eval", "indraDebug" to "indra.debug",
         // IndraAfinadoEvalTest: -PindraOpts="src=GEO;prep=1;doubt=0.3;lex=1;vocab=a,b;set=all" (ver el test).
         "indraOpts" to "indra.opts",
+        // Reconstrucción con IA (DocRenderersTest): carpeta donde dejar los PDF de muestra.
+        "docgenOut" to "docgen.out",
     ).forEach { (p, sp) ->
         (project.findProperty(p) as String?)?.let { systemProperty(sp, it) }
     }

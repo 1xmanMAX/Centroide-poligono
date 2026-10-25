@@ -175,6 +175,7 @@ fun CloudAiScreen(container: AppContainer, onBack: () -> Unit) {
         onUse = { use(it) },
         onStop = { id -> update { it.withCloudConsent(id, false) } },
         onResetUsage = { container.cloudUsage.reset(it) },
+        docGen = { com.scannerpromax.ui.docgen.DocGenSettingsGroup(container) },
     )
 
     consentFor?.let { id ->
@@ -216,6 +217,8 @@ internal fun CloudAiContent(
     onUse: (CloudProviderId) -> Unit,
     onStop: (CloudProviderId) -> Unit,
     onResetUsage: (CloudProviderId) -> Unit,
+    /** Grupo de la reconstrucción de documentos con IA (modelo de alta calidad y precios). */
+    docGen: @Composable () -> Unit = {},
 ) {
     val ui = MaterialTheme.ui
     Column(
@@ -253,6 +256,8 @@ internal fun CloudAiContent(
                 onResetUsage = { onResetUsage(id) },
             )
         }
+
+        docGen()
 
         InsetGroup(
             header = "Opciones",
