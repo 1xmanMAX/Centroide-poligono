@@ -47,7 +47,7 @@ class AppContainer(context: Context) {
     val ocr: OcrEngine by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         OcrEngine(appContext, deviceTier).also {
             // Lector rápido Indra (si está descargado sustituye a ML Kit); ONNX Runtime con hasta 4 hilos.
-            it.fastReader = com.scannerpromax.ocr.indra.IndraEngine({ models }, deviceTier.cores.coerceIn(1, 4))
+            it.fastReader = com.scannerpromax.ocr.indra.IndraEngine({ models }, com.scannerpromax.ai.CpuInfo.recommendedThreads().coerceIn(1, 4))
         }
     }
 

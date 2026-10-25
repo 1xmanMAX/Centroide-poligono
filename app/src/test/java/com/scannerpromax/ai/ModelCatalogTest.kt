@@ -41,7 +41,9 @@ class ModelCatalogTest {
 
     @Test fun onnxRuntimeNativoSeBajaConLaMaquetacion() {
         val n = ModelCatalog.PAGE_LAYOUT.nativeLibs!!
-        assertTrue(ModelCatalog.all.filter { it !== ModelCatalog.PAGE_LAYOUT }.all { it.nativeLibs == null })
+        // Solo los modelos ONNX (Maquetación y Lector rápido) la traen, y la comparten (se copia si ya está).
+        assertTrue(ModelCatalog.all.filter { it !== ModelCatalog.PAGE_LAYOUT && it !== ModelCatalog.FAST_READER }.all { it.nativeLibs == null })
+        assertTrue(ModelCatalog.FAST_READER.nativeLibs === n)
         assertEquals(
             "https://repo1.maven.org/maven2/com/microsoft/onnxruntime/onnxruntime-android/${n.version}/onnxruntime-android-${n.version}.aar",
             n.url,
@@ -67,6 +69,15 @@ class ModelCatalogTest {
         assertEquals(dep, ModelCatalog.ORT_VERSION)
         assertEquals(dep, ModelCatalog.ORT_NATIVE.version)
         assertTrue("libonnxruntime.so debe quedar fuera del APK", gradle.contains("\"lib/*/libonnxruntime.so\""))
+    }
+
+    @Test fun lectorRapidoIndraSoloLatin() {
+        val m = ModelCatalog.FAST_READER
+        assertTrue(!m.isLlm)
+        assertEquals(com.scannerpromax.ocr.indra.IndraOcr.FILES.toSet(), m.files.map { it.fileName }.toSet())
+        // ~25 MB (sin CJK/RTL/world ni matemáticas) + ORT
+        assertEquals(24_684_875L, m.downloadBytes(null))
+        for (f in m.files) assertTrue(f.url, f.url.contains("/datalab-to/indra-ocr/resolve/${ModelCatalog.INDRA_REVISION}/"))
     }
 
     @Test fun prefijosDePaddle() {

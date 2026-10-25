@@ -114,7 +114,7 @@ object IndraOrder {
     fun orderTopDown(boxes: List<FloatArray>): List<Int> {
         if (boxes.isEmpty()) return emptyList()
         val h = median(FloatArray(boxes.size) { boxes[it][3] - boxes[it][1] })
-        val q = max(h * 0.5, 1e-3f).toDouble()
+        val q = max(h * 0.5f, 1e-3f).toDouble()
         return boxes.indices.sortedWith(compareBy<Int>({ Math.rint(((boxes[it][1] + boxes[it][3]) / 2) / q) }, { boxes[it][0] }))
     }
 

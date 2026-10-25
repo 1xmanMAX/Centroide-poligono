@@ -332,7 +332,7 @@ class IndraOcr(dir: File, threads: Int = 4) : Closeable {
         for (tk in toks) {
             if (!isSpace(tk)) {
                 val p = prev
-                if (p != null && (tk.x - p > gap * h || cuts.any { p < it && it < tk.x })) segs += ArrayList()
+                if (p != null && (tk.x - p > gap * h || cuts.any { p < it && it < tk.x })) segs.add(ArrayList())
                 prev = tk.x
             }
             segs.last() += tk
@@ -365,8 +365,7 @@ class IndraOcr(dir: File, threads: Int = 4) : Closeable {
         val hs = FloatArray(lines.size) { lines[it].box[3] - lines[it].box[1] }
         for (i in lines.indices) {
             val t = lines[i].text.trim()
-            // `t in BULLETS` de Python es "subcadena de": incluye la cadena vacía (una línea sin texto se une a su vecina).
-            if (!keep[i] || !(BULLETS.contains(t) || ENUMERATOR.matches(t))) continue
+            if (!keep[i] || !((t.length == 1 && t[0] in BULLETS) || ENUMERATOR.matches(t))) continue
             val bi = lines[i].box
             val hi = hs[i]
             var best = -1; var bestGap = 0f

@@ -96,6 +96,9 @@ object IndraImage {
         return acc
     }
 
+    /** Elemento [i] de np.arange(start, …, step): numpy usa delta = (start + step) − start y start + i·delta. */
+    private fun npArange(start: Double, step: Double, i: Int): Double = start + i * ((start + step) - start)
+
     /** Grados (antihorario) que enderezan los renglones (estimate_skew). */
     fun estimateSkew(g: Gray, side: Int = 800): Double {
         val fine = inkThumb(g, side)
@@ -112,14 +115,14 @@ object IndraImage {
             val idx = scores.indices.sortedWith(compareBy<Int> { scores[it] }.thenBy { it })
             val starts = LinkedHashSet<Double>().apply { add(0.0); add(grid[idx[idx.size - 2]]); add(grid[idx[idx.size - 1]]) }
             val near = ArrayList<Double>()
-            for (a0 in starts) for (k in 0..8) near += (a0 - 2.0) + k * 0.5
+            for (a0 in starts) for (k in 0..8) near += npArange(a0 - 2.0, 0.5, k)
             val seen = LinkedHashMap<Double, Double>()
             for (x in near) if (x !in seen) seen[x] = rowSharpness(fine, x)
             var a1 = near[0]; var b1 = seen.getValue(a1)
             for (x in near) { val v = seen.getValue(x); if (v > b1) { b1 = v; a1 = x } }
             var best = a1 - 0.5; var bv = Double.NEGATIVE_INFINITY
             for (k in 0..10) { // np.arange(a1 - 0.5, a1 + 0.5 + 1e-6, 0.1)
-                val x = (a1 - 0.5) + k * 0.1
+                val x = npArange(a1 - 0.5, 0.1, k)
                 val v = rowSharpness(fine, x)
                 if (v > bv) { bv = v; best = x }
             }
