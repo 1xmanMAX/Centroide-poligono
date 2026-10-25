@@ -251,7 +251,7 @@ class ModelManager(context: Context) {
         val source = zipFetcher.http(pkg.url)
         for (lib in libs) {
             if (storage.isNativeLibComplete(model, lib)) continue
-            // Ya bajada por otro modelo (Maquetación ↔ Lector rápido): copia local verificada en vez de 13 MB de red.
+            // Ya bajada por otro modelo (Maquetación ↔ Indra): copia local verificada en vez de 13 MB de red.
             if (copySharedNativeLib(model, lib)) continue
             val before = total - libs.filterNot { storage.isNativeLibComplete(model, it) }.sumOf { it.compressedBytes }
             try {

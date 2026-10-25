@@ -60,7 +60,7 @@ class MainActivity : ComponentActivity() {
                     if (ready) {
                         AppNavHost(container = container, incomingPdf = incomingPdf, incomingImages = incomingImages)
                         CrashReportDialog()
-                        // Avisos discretos de la lectura con IA (fallback al OCR básico, mejora aplicada…).
+                        // Avisos discretos de la cola de reconocimiento (página enderezada, fallos…).
                         androidx.compose.runtime.LaunchedEffect(Unit) {
                             container.aiQueue.notices.collect { msg ->
                                 android.widget.Toast.makeText(this@MainActivity, msg, android.widget.Toast.LENGTH_SHORT).show()

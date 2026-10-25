@@ -23,7 +23,7 @@ object OrtNative {
 
     @Volatile private var loadedFrom: String? = null
 
-    /** Último error de carga (en español), o null. Se muestra en Ajustes → Modelos IA. */
+    /** Último error de carga (en español), o null. Se muestra en Ajustes → Reconocimiento. */
     @Volatile var lastError: String? = null
         private set
 

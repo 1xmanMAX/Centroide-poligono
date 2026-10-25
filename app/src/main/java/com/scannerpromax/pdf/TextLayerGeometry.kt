@@ -26,7 +26,7 @@ data class GlyphRun(val x: Float, val y: Float, val angleRad: Float, val fontSiz
 /**
  * Geometría pura de la capa de texto invisible (probada en JVM).
  *
- * ML Kit da cajas alineadas a los ejes (envolventes) y el ángulo de la línea. Para un rectángulo girado de ancho W,
+ * El OCR da cajas alineadas a los ejes (envolventes) y el ángulo de la línea. Para un rectángulo girado de ancho W,
  * alto H y ángulo θ, la envolvente mide bw = W·cosθ + H·sinθ y bh = W·sinθ + H·cosθ; de ahí se recupera W y H.
  * Cada palabra se coloca en el centro de su caja, girada como su línea y con su ancho exacto (escala horizontal),
  * de modo que al seleccionar en un visor el resaltado cae justo encima de la palabra impresa.

@@ -367,7 +367,7 @@ class PartsPipeline {
         /**
          * Orden de lectura de líneas: por filas (centros a menos de media altura mediana de la fila en curso) y, dentro
          * de la fila, de izquierda a derecha. (El banco ordenaba por arriba/(0,6·alto propio), que desordena líneas de
-         * alturas distintas, p. ej. las del OCR básico.)
+         * alturas distintas, p. ej. las de Indra.)
          */
         fun <T> readingSort(items: List<T>, box: (T) -> Box): List<T> {
             if (items.size < 2) return items

@@ -54,7 +54,7 @@ class IndraProvisioner(
         scope.launch {
             // Vigila la transición a "listo" (descarga terminada aquí o reinstalación desde Ajustes).
             var wasReady = isReady()
-            models.states.map { it[model.id] is ModelState.Ready }.distinctUntilChanged().collect { ready ->
+            models.states.map { m -> m[model.id]?.let { it is ModelState.Ready } ?: isReady() }.distinctUntilChanged().collect { ready ->
                 if (ready && !wasReady) {
                     Log.i(TAG, "Indra listo: reconociendo páginas pendientes")
                     runCatching { onReady() }.onFailure { Log.w(TAG, "onReady", it) }

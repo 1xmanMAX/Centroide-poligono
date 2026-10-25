@@ -83,7 +83,7 @@ internal data class AboutInfo(
 /**
  * Ajustes (rediseño estilo Apple, maqueta "Ajustes"): lista agrupada con iconos de color.
  *  - ESCANEO: Filtro por defecto (hoja), Captura automática, Quitar rayas sueltas, Cámara del teléfono.
- *  - INTELIGENCIA ARTIFICIAL: Reconocimiento y modelos (pantalla Modelos IA), IA en la nube.
+ *  - INTELIGENCIA ARTIFICIAL: Reconocimiento (Indra y maquetación opcional), IA en la nube.
  *  - GENERAL: Exportación (subpantalla: tamaño, calidad, texto en PDF), Apariencia (tema + color dinámico),
  *    Integración con otras apps (formato si piden cualquier archivo, guardar copia), Acerca de.
  */

@@ -111,7 +111,7 @@ data class PageEdits(
     val keepRuling: Boolean = true,         // conservar la cuadrícula / renglones del cuaderno (limpia, tono claro) en Texto resaltado y B/N
     val eraseStrokes: List<EraseStroke> = emptyList(),
     /**
-     * Tipo de documento según la IA (clasificación de Qwen: "receipt", "whiteboard", "screen"…) que orienta el filtro
+     * Tipo de documento según la IA (antigua clasificación local, ya eliminada; se conserva por compatibilidad con documentos guardados: "receipt", "whiteboard", "screen"…) que orienta el filtro
      * AUTO (ver ImageEnhancer.withAiHint). null = ninguno; al ser null no se serializa (explicitNulls = false), así que
      * el hash de las ediciones ya guardadas NO cambia.
      */
@@ -147,7 +147,7 @@ data class Document(
 @Serializable
 data class OcrRect(val left: Float, val top: Float, val right: Float, val bottom: Float)
 
-/** Palabra reconocida (Text.Element de ML Kit) con su caja alineada a los ejes y confianza (-1 = desconocida). */
+/** Palabra reconocida (Indra) con su caja alineada a los ejes y confianza (-1 = desconocida). */
 @Serializable
 data class OcrWord(val text: String, val box: OcrRect, val confidence: Float = -1f)
 

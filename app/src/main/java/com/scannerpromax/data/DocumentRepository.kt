@@ -592,7 +592,7 @@ class DocumentRepository(
         if (docId in deletedIds) return
         val dir = docDir(docId)
         val name = ocrName(pageId, edits)
-        // El OCR de la IA (con su maquetación) manda: un OCR básico de fondo que termina después no lo pisa.
+        // El OCR de la IA (con su maquetación) manda: un OCR de fondo que termina después no lo pisa.
         if (!fromAi && withContext(Dispatchers.IO) { File(dir, PageFiles.layoutName(pageId, edits)).exists() }) return
         val edited = result.editedText?.takeIf { it.isNotBlank() && it != result.text }
         withContext(Dispatchers.IO) {
