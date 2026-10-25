@@ -244,6 +244,7 @@ fun AppNavHost(
                     onEditPage = { pageId -> entry.ifActive(nav) { nav.navigate(Routes.editor(docId, pageId)) } },
                     onAddPages = { mode -> entry.ifActive(nav) { nav.navigate(Routes.camera(mode, docId)) } },
                     onExport = { ids -> entry.ifActive(nav) { nav.navigate(Routes.export(docId, ids)) } },
+                    onOpenCloudAi = { entry.ifActive(nav) { nav.navigate(Routes.CLOUD_AI) { launchSingleTop = true } } },
                 )
             }
 
@@ -274,6 +275,7 @@ fun AppNavHost(
                     docId = entry.arguments?.getString("docId").orEmpty(),
                     pageIds = com.scannerpromax.export.ExportSelection.decode(entry.arguments?.getString("pages")),
                     onBack = { entry.ifActive(nav) { nav.popBackStack() } },
+                    onOpenCloudAi = { entry.ifActive(nav) { nav.navigate(Routes.CLOUD_AI) { launchSingleTop = true } } },
                 )
             }
 

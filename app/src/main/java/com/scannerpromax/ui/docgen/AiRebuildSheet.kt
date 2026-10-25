@@ -91,6 +91,7 @@ fun AiRebuildSheet(
     val ui = MaterialTheme.ui
     val prefs = container.docGenPrefs
     val jobs by container.docGenJobs.states.collectAsState()
+    val appSettings by container.settings.settings.collectAsState(initial = null)
     val fullDoc by remember(docId) { container.documents.observe(docId) }.collectAsState(initial = null)
     val hasClaude = remember { container.cloudKeys.has(CloudProviderId.CLAUDE_HAIKU) }
     val hasDeepSeek = remember { container.cloudKeys.has(CloudProviderId.DEEPSEEK) }
@@ -219,7 +220,8 @@ fun AiRebuildSheet(
                         "Reconstruir",
                         onClick = {
                             if (m == null) return@PrimaryCapsuleButton
-                            if (!prefs.consented(m)) consentFor = m else start(m)
+                            // Consentimiento: el de esta hoja o el "Activar" del proveedor en Ajustes › IA en la nube.
+                            if (!prefs.consented(m) && appSettings?.cloudConsent(m.keyId) != true) consentFor = m else start(m)
                         },
                         icon = AppIcons.Sparkles,
                         enabled = m != null && count > 0,

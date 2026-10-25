@@ -184,8 +184,11 @@ fun ExportScreen(
     onBack: () -> Unit,
     /** Solo estas páginas (modo selección del Documento), en el orden del documento; null = todas. */
     pageIds: List<String>? = null,
+    /** Abre Ajustes › IA en la nube (hoja "Reconstruir con IA" sin clave). */
+    onOpenCloudAi: () -> Unit = {},
 ) {
     val context = LocalContext.current
+    var showAiRebuild by rememberSaveable { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val fullDoc by remember(docId) { container.documents.observe(docId) }.collectAsState(initial = null)
     // Todo lo de esta pantalla (PDF, imágenes, texto, Word, estimaciones) trabaja con el subconjunto elegido.
@@ -522,6 +525,7 @@ fun ExportScreen(
         onSave = { start(ExportAction.SAVE) },
         onShare = { start(ExportAction.SHARE) },
         thumbnail = { p, i, m -> ExportThumb(container, docId, p, i, m) },
+        onAiRebuild = { showAiRebuild = true },
     ) {
         // ------------------------------------------------ progreso
         val pr = progress
@@ -531,6 +535,15 @@ fun ExportScreen(
             progress = pr?.value,
             onCancel = { job?.cancel() },
             modifier = Modifier.fillMaxSize(),
+        )
+    }
+    if (showAiRebuild) {
+        com.scannerpromax.ui.docgen.AiRebuildSheet(
+            container = container,
+            docId = docId,
+            pageIds = pageIds,
+            onDismiss = { showAiRebuild = false },
+            onOpenCloudSettings = onOpenCloudAi,
         )
     }
 }
@@ -623,6 +636,8 @@ internal fun ExportSheetContent(
     onSave: () -> Unit,
     onShare: () -> Unit,
     thumbnail: @Composable (Page, Int, Modifier) -> Unit,
+    /** "Reconstruir con IA" (Word/PDF editable con IA en la nube); null = sin la fila. */
+    onAiRebuild: (() -> Unit)? = null,
     overlays: @Composable BoxScope.() -> Unit = {},
 ) {
     val ui = MaterialTheme.ui
@@ -742,6 +757,16 @@ internal fun ExportSheetContent(
                     }
                     item {
                         NavigationRow("Nombre", { editingName = true }, value = (fileName.ifBlank { title ?: "" }) + ext)
+                    }
+                }
+
+                // ------------------------------------------------ reconstruir con IA (Word / PDF editable)
+                if (onAiRebuild != null && (isPdf || kind == ExportKind.DOCX)) {
+                    InsetGroup(
+                        modifier = Modifier.padding(top = 22.dp),
+                        footer = "La IA en la nube vuelve a escribir el documento: mismo texto, títulos, tablas reales e imágenes.",
+                    ) {
+                        item { NavigationRow("Reconstruir con IA", onAiRebuild, icon = AppIcons.Sparkles, iconTint = ui.accent, enabled = !busy) }
                     }
                 }
 
