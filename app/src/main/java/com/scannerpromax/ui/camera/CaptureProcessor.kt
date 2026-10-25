@@ -247,7 +247,7 @@ internal class CaptureProcessor(private val container: AppContainer) {
     /** Quad en coordenadas de [bmp] o null si no hay detección fiable / es casi la imagen completa. */
     private fun detectQuad(bmp: Bitmap, minConfidence: Float, minAreaFraction: Float): Quad? {
         val det = try {
-            container.pageProcessor.detector.detect(bmp)
+            container.pageProcessor.detector.detect(bmp, useNeural = true)
         } catch (t: Throwable) {
             Log.w(TAG, "Fallo al detectar", t)
             null

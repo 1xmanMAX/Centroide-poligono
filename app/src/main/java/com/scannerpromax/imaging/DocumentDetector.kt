@@ -142,8 +142,12 @@ class DocumentDetector(private val tier: DeviceTier) {
     // API pública
     // =====================================================================================
 
-    /** Detección precisa sobre una foto completa (tras capturar). */
-    fun detect(bitmap: Bitmap): DetectionResult? {
+    /**
+     * Detección precisa sobre una foto completa (tras capturar). [useNeural] = consultar además el árbitro neuronal
+     * ([neural], «Encuadre IA») sobre [bitmap]: en la captura y en Editar › Recortar › Auto-detectar, no en la vista
+     * previa en vivo. Sin [neural] (o si devuelve null) el resultado es idéntico al clásico.
+     */
+    fun detect(bitmap: Bitmap, useNeural: Boolean = false): DetectionResult? {
         val w = bitmap.width; val h = bitmap.height
         if (w < 32 || h < 32) return null
         val bag = MatBag()
@@ -152,7 +156,8 @@ class DocumentDetector(private val tier: DeviceTier) {
             // sal y pimienta, disparaba la densidad de bordes y creaba contornos espurios.
             val rgba = bag.add(Cv.toRgbaScaled(bitmap, detectSide).first)
             val rgb = bag.mat(); Imgproc.cvtColor(rgba, rgb, Imgproc.COLOR_RGBA2RGB)
-            return detectScaled(rgb, w, h) { x0, y0, rw, rh ->
+            val nn = if (useNeural) neural?.let { n -> { n.corners(NeuralCorners.Pixels.of(bitmap)) } } else null
+            return detectScaled(rgb, w, h, neural = nn) { x0, y0, rw, rh ->
                 var crop: Bitmap? = null
                 try {
                     crop = Bitmap.createBitmap(bitmap, x0, y0, rw, rh)
@@ -176,7 +181,12 @@ class DocumentDetector(private val tier: DeviceTier) {
      * Mat, lo libera quien llama) para el refinamiento sub-píxel de esquinas. Coordenadas del resultado en
      * píxeles de la imagen completa.
      */
-    internal fun detectScaled(rgbSmall: Mat, fullW: Int, fullH: Int, grayCrop: ((Int, Int, Int, Int) -> Mat?)?): DetectionResult? {
+    internal fun detectScaled(
+        rgbSmall: Mat, fullW: Int, fullH: Int,
+        /** Esquinas neuronales de la imagen completa (px de [fullW]x[fullH]); se calcula sólo si hace falta. */
+        neural: (() -> NeuralQuad?)? = null,
+        grayCrop: ((Int, Int, Int, Int) -> Mat?)?,
+    ): DetectionResult? {
         val buf = Buffers()
         val bag = MatBag()
         try {
@@ -188,7 +198,7 @@ class DocumentDetector(private val tier: DeviceTier) {
                 // (la hoja encontrada tampoco puede tener papel con contenido alrededor: sería otro marco)
                 val r = runCatching { refineSheet(rgbSmall, frame) }.getOrNull()?.takeIf { !printedFrame(it.pts, buf) && !(buf.scanLike && scanInside(it.pts, buf)) }
                 if (r != null || det0 == null) {
-                    val c = paperArbitrate(rgbSmall, r, buf) ?: return null
+                    val c = neuralArbitrate(rgbSmall, paperArbitrate(rgbSmall, r, buf), buf, fullW, fullH, neural) ?: return null
                     val pts = scaleToFrame(c.pts, rgbSmall.cols(), rgbSmall.rows(), fullW, fullH)
                     if (grayCrop != null) refineCorners(fullW, fullH, grayCrop, pts)
                     clampPts(pts, fullW, fullH)
@@ -205,13 +215,46 @@ class DocumentDetector(private val tier: DeviceTier) {
             // (Un contorno con borde de contraste ya no se "corrige" buscando otra hoja a partir del contenido: en el banco
             // de pruebas eso desplazaba hacia dentro hojas correctas sobre mesas claras o tarjetas con texto alrededor.
             // Los marcos impresos y la falta de contorno sí pasan por [refineSheet], arriba.)
-            val cand = paperArbitrate(rgbSmall, cand0, buf) ?: return null
+            val cand = neuralArbitrate(rgbSmall, paperArbitrate(rgbSmall, cand0, buf), buf, fullW, fullH, neural) ?: return null
             val pts = scaleToFrame(cand.pts, rgbSmall.cols(), rgbSmall.rows(), fullW, fullH)
             if (grayCrop != null) refineCorners(fullW, fullH, grayCrop, pts)
             clampPts(pts, fullW, fullH)
             return DetectionResult(toQuad(pts), cand.conf.toFloat(), fullW, fullH)
         } finally {
             bag.close(); buf.release()
+        }
+    }
+
+    /**
+     * Árbitro neuronal del encuadre («Encuadre IA»: DocAligner lcnet100 con marco negro del 15 %, ver [NeuralCorners]).
+     * null = desactivado o ONNX Runtime aún no descargado: comportamiento clásico idéntico.
+     */
+    @Volatile var neural: NeuralCornerSource? = null
+
+    /**
+     * Árbitro clásico + neuronal (sin verdad; banco github_alt: fallo 38,3 → 16,6 %, exámenes sin cambio). [e] es el
+     * candidato clásico ya arbitrado por papel (null = ninguno); [nn] da el cuadrilátero de la red en px de la imagen
+     * completa y su puntuación (mínimo de los picos). No actúa en escaneos/páginas digitales.
+     * - sin candidato usable (null o conf < [PAPER_USE_CONF]): se usa la red si s ≥ [NN_T1], el cuadrilátero es convexo
+     *   con área 4–98,5 % y ocupa ≤ [NN_AMAX] de la foto (si la red dice «toda la foto», queda la imagen completa);
+     * - si ambos coinciden (IoU ≥ [NN_AGREE]) se queda el clásico (más preciso a resolución completa);
+     * - si discrepan y s ≥ [NN_T2] manda la red;
+     * - veto: s < [NN_TV], IoU < 0,5 y conf clásica < [NN_CV] → sin cuadrilátero (fotos sin documento).
+     * El cuadrilátero de la red NO se ajusta a los bordes ([snapQuad] empeoraba el banco: 16,6 → 17,4 %); sí pasa por
+     * el refinado sub-píxel de esquinas como cualquier otro.
+     */
+    private fun neuralArbitrate(rgbSmall: Mat, e: Candidate?, b: Buffers, fullW: Int, fullH: Int, nn: (() -> NeuralQuad?)?): Candidate? {
+        if (nn == null || b.scanLike) return e
+        val q = runCatching { nn() }.getOrNull() ?: return e
+        val d = arbitrate(e?.pts, e?.conf, q, rgbSmall.cols(), rgbSmall.rows(), fullW, fullH)
+        debugLog?.invoke("nn: s=%.2f conf=%s -> $d".format(java.util.Locale.ROOT, q.score, e?.conf?.let { "%.2f".format(java.util.Locale.ROOT, it) }))
+        return when (d) {
+            NeuralDecision.CLASSIC -> e
+            NeuralDecision.NONE -> null
+            NeuralDecision.NEURAL -> Candidate(
+                scaleNeural(q.pts, rgbSmall.cols(), rgbSmall.rows(), fullW, fullH),
+                max(e?.score ?: 0.0, 0.6), (0.36 + 0.6 * q.score).coerceIn(0.36, 0.96).toDouble(),
+            )
         }
     }
 
@@ -1881,6 +1924,63 @@ class DocumentDetector(private val tier: DeviceTier) {
         /** Radio de búsqueda del ajuste fino de los lados (px para un lado largo de 400; 1ª pasada el doble). */
         private const val SNAP_RADIUS = 7f
 
+        // Árbitro neuronal (banco github_alt: DocAligner lcnet100, marco 15 %). `var` para el banco de pruebas.
+        @JvmStatic internal var NN_T1 = 0.5f
+        @JvmStatic internal var NN_T2 = 0.7f
+        @JvmStatic internal var NN_TV = 0.2f
+        @JvmStatic internal var NN_CV = 0.6
+        @JvmStatic internal var NN_AGREE = 0.85
+        @JvmStatic internal var NN_AMAX = 0.9
+
+        /** Cuadrilátero neuronal (px de la imagen completa) → px de la imagen de trabajo de [w]x[h]. */
+        internal fun scaleNeural(q: FloatArray, w: Int, h: Int, fullW: Int, fullH: Int): FloatArray {
+            val sw = w.toFloat() / fullW; val sh = h.toFloat() / fullH
+            return FloatArray(8) { if (it % 2 == 0) q[it] * sw else q[it] * sh }
+        }
+
+        /**
+         * Reglas de fusión del árbitro neuronal (puras, testeables): [ePts]/[eConf] el candidato clásico en px de la imagen
+         * de trabajo [w]x[h] (null = ninguno), [q] la red en px de la imagen completa.
+         */
+        internal fun arbitrate(ePts: FloatArray?, eConf: Double?, q: NeuralQuad, w: Int, h: Int, fullW: Int, fullH: Int): NeuralDecision {
+            val qn = scaleNeural(q.pts, w, h, fullW, fullH)
+            val s = q.score
+            val area = abs(polyArea(qn)) / (w.toDouble() * h)
+            val okn = area in 0.04..0.985 && isConvexQuad(qn)
+            if (ePts == null || eConf == null || eConf < PAPER_USE_CONF) {
+                return if (okn && s >= NN_T1 && area <= NN_AMAX) NeuralDecision.NEURAL else NeuralDecision.CLASSIC
+            }
+            val iou = if (okn) quadIou(ePts, qn, w, h) else 0.0
+            if (iou >= NN_AGREE) return NeuralDecision.CLASSIC
+            if (okn && s >= NN_T2) return NeuralDecision.NEURAL
+            if (s < NN_TV && iou < 0.5 && eConf < NN_CV) return NeuralDecision.NONE
+            return NeuralDecision.CLASSIC
+        }
+
+        internal fun isConvexQuad(q: FloatArray): Boolean {
+            var sign = 0
+            for (i in 0 until 4) {
+                val ax = q[i * 2]; val ay = q[i * 2 + 1]; val bx = q[(i + 1) % 4 * 2]; val by = q[(i + 1) % 4 * 2 + 1]
+                val cx = q[(i + 2) % 4 * 2]; val cy = q[(i + 2) % 4 * 2 + 1]
+                val cr = (bx - ax) * (cy - by) - (by - ay) * (cx - bx)
+                val sg = if (cr > 0) 1 else if (cr < 0) -1 else return false
+                if (sign == 0) sign = sg else if (sg != sign) return false
+            }
+            return true
+        }
+
+        /** IoU de dos cuadriláteros rasterizados en una rejilla de [w]x[h] (la imagen de trabajo, ~500 px). */
+        internal fun quadIou(a: FloatArray, c: FloatArray, w: Int, h: Int): Double = MatBag().use { bag ->
+            val ma = bag.add(Mat.zeros(h, w, CvType.CV_8U)); val mc = bag.add(Mat.zeros(h, w, CvType.CV_8U))
+            fun poly(q: FloatArray) = MatOfPoint(*Array(4) { Point(q[it * 2].toDouble(), q[it * 2 + 1].toDouble()) })
+            val pa = bag.add(poly(a)); val pc = bag.add(poly(c))
+            Imgproc.fillPoly(ma, listOf(pa), Scalar(1.0)); Imgproc.fillPoly(mc, listOf(pc), Scalar(1.0))
+            val inter = bag.mat(); val uni = bag.mat()
+            Core.bitwise_and(ma, mc, inter); Core.bitwise_or(ma, mc, uni)
+            val u = Core.countNonZero(uni)
+            if (u == 0) 0.0 else Core.countNonZero(inter).toDouble() / u
+        }
+
         /** Tolerancia (px de trabajo, a lo largo de la normal) al buscar el borde bajo cada muestra de un lado. */
         private val SUPPORT_OFFSETS = floatArrayOf(0f, -2f, 2f)
 
@@ -1962,3 +2062,6 @@ class DocumentDetector(private val tier: DeviceTier) {
         internal fun toQuad(p: FloatArray) = Quad(Pt(p[0], p[1]), Pt(p[2], p[3]), Pt(p[4], p[5]), Pt(p[6], p[7]))
     }
 }
+
+/** Resultado del árbitro neuronal: quedarse con el clásico, usar la red o no dar cuadrilátero (veto). */
+internal enum class NeuralDecision { CLASSIC, NEURAL, NONE }

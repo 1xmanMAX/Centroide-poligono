@@ -42,6 +42,7 @@ class SettingsRepository(private val context: Context) {
             prefs[Keys.DEFAULT_FILTER] = updated.defaultFilter.name
             prefs[Keys.AUTO_CAPTURE] = updated.autoCapture
             prefs[Keys.AUTO_REMOVE_LINES] = updated.autoRemoveLines
+            prefs[Keys.NEURAL_FRAMING] = updated.neuralFraming
             prefs[Keys.PDF_PAGE_SIZE] = updated.pdfPageSize.name
             prefs[Keys.EXPORT_QUALITY] = updated.exportQuality.name
             prefs[Keys.PDF_TEXT_MODE] = updated.pdfTextMode.name
@@ -77,6 +78,7 @@ class SettingsRepository(private val context: Context) {
             defaultFilter = enumOr(this[Keys.DEFAULT_FILTER], d.defaultFilter).uiFilter,
             autoCapture = this[Keys.AUTO_CAPTURE] ?: d.autoCapture,
             autoRemoveLines = this[Keys.AUTO_REMOVE_LINES] ?: d.autoRemoveLines,
+            neuralFraming = this[Keys.NEURAL_FRAMING] ?: d.neuralFraming,
             pdfPageSize = enumOr(this[Keys.PDF_PAGE_SIZE], d.pdfPageSize),
             exportQuality = enumOr(this[Keys.EXPORT_QUALITY], d.exportQuality),
             searchablePdf = textMode != PdfTextMode.SOLO_IMAGEN,
@@ -108,6 +110,7 @@ class SettingsRepository(private val context: Context) {
         val DEFAULT_FILTER = stringPreferencesKey("default_filter")
         val AUTO_CAPTURE = booleanPreferencesKey("auto_capture")
         val AUTO_REMOVE_LINES = booleanPreferencesKey("auto_remove_lines")
+        val NEURAL_FRAMING = booleanPreferencesKey("neural_framing")
         val PDF_PAGE_SIZE = stringPreferencesKey("pdf_page_size")
         val EXPORT_QUALITY = stringPreferencesKey("export_quality")
         val SEARCHABLE_PDF = booleanPreferencesKey("searchable_pdf")
@@ -136,6 +139,11 @@ data class AppSettings(
     val defaultFilter: FilterType = FilterType.DEFAULT,
     val autoCapture: Boolean = true,
     val autoRemoveLines: Boolean = false,
+    /**
+     * «Encuadre IA»: la red DocAligner (incluida en la app) arbitra el recorte automático en la captura y en
+     * Editar › Recortar › Auto-detectar. Necesita ONNX Runtime, que llega con la descarga de Indra; sin él no actúa.
+     */
+    val neuralFraming: Boolean = true,
     val pdfPageSize: PageSize = PageSize.AUTO,
     val exportQuality: ExportQuality = ExportQuality.HIGH,
     /** Compatibilidad: true si el modo de texto lleva OCR. Cambiarlo con copy() se traduce a [pdfTextMode]. */

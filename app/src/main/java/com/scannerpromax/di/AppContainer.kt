@@ -35,7 +35,44 @@ class AppContainer(context: Context) {
             // Orientación automática de páginas nuevas: si está descargada la "Maquetación de páginas", el modelo
             // doc_ori apoya a la orientación por renglones (sin el modelo, sólo renglones; nunca se descarga aquí)
             p.orientationModel = { bmp -> orientationEngine.takeIf { it.isReady() }?.orientationProbs(bmp) }
+            // «Encuadre IA»: árbitro neuronal del recorte (captura y Auto-detectar; no en la vista en vivo ni escaneos).
+            p.detector.neural = neuralCorners
         }
+    }
+
+    /**
+     * «Encuadre IA» (DocAligner lcnet100 en assets, 4,8 MB). Usa el ONNX Runtime que llega con Indra (o con la
+     * maquetación); mientras no esté descargado no actúa. Sigue el ajuste [com.scannerpromax.data.AppSettings.neuralFraming].
+     */
+    private val neuralCornersLazy = lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        com.scannerpromax.imaging.NeuralCorners(
+            modelBytes = { appContext.assets.open(com.scannerpromax.imaging.NeuralCorners.ASSET).use { it.readBytes() } },
+            ortReady = ::ortAvailableNow,
+            threads = 2,
+        ).also { n ->
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default).launch {
+                settings.settings.collect { s -> n.enabled = s.neuralFraming }
+            }
+        }
+    }
+
+    val neuralCorners: com.scannerpromax.imaging.NeuralCorners by neuralCornersLazy
+
+    /** El árbitro neuronal solo si ya existe (para liberar memoria sin crearlo). */
+    fun neuralCornersIfCreated(): com.scannerpromax.imaging.NeuralCorners? = if (neuralCornersLazy.isInitialized()) neuralCorners else null
+
+    /**
+     * ONNX Runtime nativo ya cargado, o cargable AHORA desde una descarga completa (Indra o maquetación). Nunca descarga:
+     * sin la .so el árbitro neuronal simplemente no actúa.
+     */
+    private fun ortAvailableNow(): Boolean {
+        val ort = com.scannerpromax.ai.parts.OrtNative
+        if (ort.isLoaded) return true
+        for (m in listOf(com.scannerpromax.ai.ModelCatalog.FAST_READER, com.scannerpromax.ai.ModelCatalog.PAGE_LAYOUT)) {
+            val dir = models.storage.nativeLibDir(m)
+            if (models.isReady(m) && java.io.File(dir, ort.LIB_FILE).isFile && ort.ensureLoaded(dir)) return true
+        }
+        return false
     }
 
     /** Modelo de orientación (doc_ori) para la tubería normal: se carga al primer uso y sólo si está descargado. */

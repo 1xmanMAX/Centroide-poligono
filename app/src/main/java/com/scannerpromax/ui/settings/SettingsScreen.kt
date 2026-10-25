@@ -149,7 +149,8 @@ internal fun SettingsContent(
                 InsetGroup(
                     header = "Escaneo",
                     footer = "La captura automática dispara sola con el documento estable y enfocado. Quitar rayas sueltas " +
-                        "limpia dobleces, bolígrafo y bordes en las páginas nuevas. La cámara del teléfono abre la app de " +
+                        "limpia dobleces, bolígrafo y bordes en las páginas nuevas. Encuadre IA usa una red neuronal (en el " +
+                        "teléfono, sin conexión) para confirmar o corregir el recorte automático. La cámara del teléfono abre la app de " +
                         "cámara del sistema (máxima resolución, HDR y nitidez del fabricante) y procesa la foto al volver.",
                 ) {
                     item {
@@ -168,6 +169,15 @@ internal fun SettingsContent(
                             iconTint = SystemOrange,
                             checked = settings.autoCapture,
                             onCheckedChange = { v -> onUpdate { it.copy(autoCapture = v) } },
+                        )
+                    }
+                    item {
+                        ToggleRow(
+                            "Encuadre IA",
+                            icon = AppIcons.Crop,
+                            iconTint = SystemGreen,
+                            checked = settings.neuralFraming,
+                            onCheckedChange = { v -> onUpdate { it.copy(neuralFraming = v) } },
                         )
                     }
                     item {
