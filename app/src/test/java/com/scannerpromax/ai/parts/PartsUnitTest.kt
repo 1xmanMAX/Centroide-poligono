@@ -8,7 +8,6 @@ import com.scannerpromax.domain.LayoutBox
 import com.scannerpromax.domain.LayoutLine
 import com.scannerpromax.domain.TableCell
 import com.scannerpromax.pdf.DocLayoutFiles
-import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -16,7 +15,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** Lógica pura de la tubería por partes (sin modelos): post-proceso, orientación, tinta, tubería con lector falso. */
+/** Lógica pura de la tubería por partes (sin modelos): post-proceso, orientación, tinta, tubería con líneas de Indra. */
 class PartsUnitTest {
 
     private fun white(w: Int, h: Int) = Rgb(w, h, IntArray(w * h) { -1 })
@@ -134,22 +133,14 @@ class PartsUnitTest {
 
     // ------------------------------------------------------------------------------------------ tubería
 
-    /** Spotting con <|LOC_n|> (0..1000) de una línea en la caja [b] (0..1000 del recorte). */
-    private fun spot(text: String, b: IntArray) = "$text<|LOC_${b[0]}|><|LOC_${b[1]}|><|LOC_${b[2]}|><|LOC_${b[1]}|><|LOC_${b[2]}|><|LOC_${b[3]}|><|LOC_${b[0]}|><|LOC_${b[3]}|>"
-
-    private class FakeReader(val page: String?, val crop: (FloatArray) -> String, val tables: (List<PartsReader.Piece>) -> PartsReader.Out = { PartsReader.Out("", true) }) : PartsReader {
-        val calls = ArrayList<String>()
-        override suspend fun spotting(crop: FloatArray?, maxTokens: Int): PartsReader.Out {
-            calls += if (crop == null) "pagina" else "recorte"
-            return if (crop == null) PartsReader.Out(page ?: "", page == null) else PartsReader.Out(crop(crop), false)
-        }
-        override suspend fun table(pieces: List<PartsReader.Piece>) = tables(pieces).also { calls += "tabla${pieces.size}" }
-        override suspend fun chart(crop: FloatArray) = PartsReader.Out("", false)
-        override suspend fun formula(crop: FloatArray) = PartsReader.Out("\\frac{a}{b}", false).also { calls += "formula" }
+    /** Línea de Indra (px de la imagen analizada) en la caja [b]. */
+    private fun item(text: String, b: IntArray): PartsPipeline.Item {
+        val x0 = b[0].toFloat(); val y0 = b[1].toFloat(); val x1 = b[2].toFloat(); val y1 = b[3].toFloat()
+        return PartsPipeline.Item(text, floatArrayOf(x0, y0, x1, y0, x1, y1, x0, y1), floatArrayOf(x0, y0, x1, y1))
     }
 
     @Test
-    fun paginaImpresaConRegionesYEstilo() = runBlocking {
+    fun paginaImpresaConRegionesYEstilo() {
         val img = white(1000, 1000)
         img.rect(100, 100, 900, 130, BLACK); img.rect(100, 300, 900, 315, BLACK); img.rect(100, 330, 600, 345, BLACK)
         val regions = listOf(
@@ -158,22 +149,24 @@ class PartsUnitTest {
             PpLayout.Region("text", BlockType.TEXT, 0.9f, floatArrayOf(90f, 500f, 910f, 520f), 2),
             PpLayout.Region("display_formula", BlockType.FORMULA, 0.9f, floatArrayOf(300f, 700f, 700f, 760f), 3),
         )
-        val page = listOf(spot("Título", intArrayOf(100, 100, 900, 130)), spot("Primera línea del párrafo", intArrayOf(100, 300, 900, 315)),
-            spot("segunda", intArrayOf(100, 330, 600, 345))).joinToString("\n")
-        val r = FakeReader(page, { spot("Texto recortado", intArrayOf(5, 5, 995, 995)) })
-        val out = PartsPipeline(r).run(PartsPipeline.Input(img, regions))
+        val lines = listOf(
+            item("Título", intArrayOf(100, 100, 900, 130)), item("Primera línea del párrafo", intArrayOf(100, 300, 900, 315)),
+            item("segunda", intArrayOf(100, 330, 600, 345)), item("a/b", intArrayOf(320, 710, 680, 750)),
+        )
+        val out = PartsPipeline().run(PartsPipeline.Input(img, regions, lines = lines))
         val l = out.layout
-        assertEquals("pagina", out.meta.mode)
+        assertEquals("ocr", out.meta.mode)
         val title = l.blocks.first { it.type == BlockType.TITLE }
         assertEquals(true, title.bold)
         val para = l.blocks.first { it.role == "text" && it.lines.size == 2 }
         assertEquals("LEFT", para.align)
         assertNotNull(para.sizePx)
-        // región de texto sin líneas → Spotting del recorte
-        assertTrue(r.calls.count { it == "recorte" } >= 1)
-        assertTrue(l.blocks.any { it.text == "Texto recortado" })
-        assertEquals("\\frac{a}{b}", l.blocks.first { it.type == BlockType.FORMULA }.latex)
-        assertEquals(listOf(0, 1, 2, 3, 4).take(l.blocks.size), l.blocks.map { it.order })
+        // región de texto sin líneas de Indra: no sale bloque vacío
+        assertTrue(l.blocks.none { it.type == BlockType.TEXT && it.lines.isEmpty() && it.role == "text" })
+        // fórmula: la región como imagen con el texto de Indra (sin LaTeX: lo hará la IA en la nube)
+        val f = l.blocks.first { it.type == BlockType.FORMULA }
+        assertNull(f.latex); assertEquals("a/b", f.text)
+        assertEquals(l.blocks.indices.toList(), l.blocks.map { it.order })
         // capa de texto y escala a la imagen completa
         val full = PartsPipeline.scaleLayout(l, 2000, 2000)
         assertEquals(l.blocks[0].box.left * 2, full.blocks[0].box.left, 0.01f)
@@ -181,55 +174,42 @@ class PartsUnitTest {
     }
 
     @Test
-    fun bucleDePaginaPasaARegiones() = runBlocking {
+    fun manuscritoYSinMaquetacion() {
         val img = white(800, 800)
-        img.rect(100, 100, 700, 120, BLACK); img.rect(100, 600, 500, 620, BLACK)  // la 2.ª fuera de regiones
-        val regions = (0 until 3).map { PpLayout.Region("text", BlockType.TEXT, 0.9f, floatArrayOf(90f, 90f + it * 2, 710f, 130f + it * 2), it) }
-        val r = FakeReader(null, { spot("hola mundo", intArrayOf(20, 20, 980, 980)) })
-        val out = PartsPipeline(r).run(PartsPipeline.Input(img, regions.take(1)))
-        assertEquals("regiones", out.meta.mode)
-        // manuscrito → por regiones desde el principio (sin Spotting de página)
-        val r2 = FakeReader("x", { spot("hola", intArrayOf(20, 20, 980, 980)) })
-        val out2 = PartsPipeline(r2).run(PartsPipeline.Input(img, regions, docType = "manuscrito"))
-        assertEquals("regiones", out2.meta.mode)
-        assertFalse("pagina" in r2.calls)
+        img.rect(100, 100, 700, 120, BLACK); img.rect(100, 600, 500, 620, BLACK)
+        val lines = listOf(item("hola mundo", intArrayOf(100, 100, 700, 120)), item("adiós", intArrayOf(100, 600, 500, 620)))
+        // sin regiones (no está la Maquetación): líneas libres agrupadas en bloques
+        val out = PartsPipeline().run(PartsPipeline.Input(img, emptyList(), lines = lines))
+        assertEquals(2, out.layout.blocks.count { it.lines.isNotEmpty() })
+        val regions = listOf(PpLayout.Region("text", BlockType.TEXT, 0.9f, floatArrayOf(90f, 90f, 710f, 130f), 0))
+        val out2 = PartsPipeline().run(PartsPipeline.Input(img, regions, docType = "manuscrito", lines = lines))
         assertTrue(out2.layout.blocks.filter { it.lines.isNotEmpty() }.all { it.type == BlockType.HANDWRITING })
     }
 
     @Test
-    fun tablaAnchaPorBandasConColumnaClave() = runBlocking {
+    fun tablaPorRejillaGeometricaDeLasLineas() {
         val img = white(2000, 400)
-        // 12 columnas separadas por huecos
-        val items = (0 until 12).flatMap { c -> (0 until 6).map { r -> intArrayOf(20 + c * 160, 20 + r * 60, 120 + c * 160, 50 + r * 60) } }
-        val page = items.withIndex().joinToString("\n") { (k, b) -> spot("val" + "abcdefghijklmnopqrstuvwxyz"[k % 26] + (k / 26), intArrayOf(b[0] / 2, b[1] * 1000 / 400, b[2] / 2, b[3] * 1000 / 400)) }
-        val pieces = ArrayList<Int>()
-        val r = FakeReader(page, { "" }, tables = { p ->
-            pieces += p.size
-            if (p.size == 1 && p[0].src[2] - p[0].src[0] > 1500) PartsReader.Out("", true)  // la tabla entera hace bucle
-            else {
-                val n = if (p.size == 1) 8 else 5   // banda 1: 8 columnas; resto: clave + 4
-                PartsReader.Out((0 until 6).joinToString("") { "<fcel>c" + "<fcel>c".repeat(n - 1) + "<nl>" }, false)
-            }
-        })
-        val regions = listOf(PpLayout.Region("table", BlockType.TABLE, 0.9f, floatArrayOf(10f, 10f, 1990f, 390f), 0)) + textRegions(400, 2000f)
-        val out = PartsPipeline(r).run(PartsPipeline.Input(img, regions))
+        // 4 columnas separadas por huecos, 6 filas
+        val lines = (0 until 4).flatMap { c -> (0 until 6).map { r -> item("c${c}f$r", intArrayOf(20 + c * 400, 20 + r * 60, 300 + c * 400, 50 + r * 60)) } }
+        val regions = listOf(PpLayout.Region("table", BlockType.TABLE, 0.9f, floatArrayOf(10f, 10f, 1990f, 390f), 0))
+        val out = PartsPipeline().run(PartsPipeline.Input(img, regions, lines = lines))
         val t = out.layout.blocks.first { it.type == BlockType.TABLE }
-        assertEquals(12, t.tableCols)
+        assertEquals(4, t.tableCols)
         assertEquals(6, t.tableRows)
-        assertEquals(listOf(1, 1, 2), pieces)  // entera (bucle) + banda 1 + banda 2 con la columna clave
+        assertEquals("c2f3", t.cells.first { it.row == 3 && it.col == 2 }.text)
+        assertEquals(1, out.meta.tables)
         assertEquals(false, t.ruled)
-        assertEquals(listOf(0 until 8, 8 until 12), PartsPipeline.bands(12, 8))
+        // párrafo dentro de una "tabla": sin rejilla (se queda con sus líneas)
+        val para = (0 until 5).map { item("Línea de texto corrido número $it", intArrayOf(20, 20 + it * 60, 1900, 50 + it * 60)) }
+        assertNull(PartsPipeline.gridCells(floatArrayOf(10f, 10f, 1990f, 390f), para))
     }
 
-    /** 3 regiones de texto vacías abajo del todo (para que la página se lea con Spotting de página). */
-    private fun textRegions(h: Int, w: Float = 800f) = (0 until 3).map { PpLayout.Region("text", BlockType.TEXT, 0.9f, floatArrayOf(10f + it * w / 3, h - 8f, (it + 1) * w / 3 - 10f, h - 2f), 10 + it) }
-
     @Test
-    fun formulaConFrasesEsTexto() = runBlocking {
+    fun formulaConFrasesEsTexto() {
         val img = white(800, 800)
-        val regions = listOf(PpLayout.Region("display_formula", BlockType.FORMULA, 0.9f, floatArrayOf(50f, 50f, 750f, 200f), 0)) + textRegions(800)
-        val page = listOf(spot("buscar investigaciones sobre", intArrayOf(70, 70, 900, 120)), spot("whatsapp usado mucho", intArrayOf(70, 150, 900, 220))).joinToString("\n")
-        val out = PartsPipeline(FakeReader(page, { "" })).run(PartsPipeline.Input(img, regions))
+        val regions = listOf(PpLayout.Region("display_formula", BlockType.FORMULA, 0.9f, floatArrayOf(50f, 50f, 750f, 200f), 0))
+        val lines = listOf(item("buscar investigaciones sobre", intArrayOf(56, 56, 720, 96)), item("whatsapp usado mucho", intArrayOf(56, 120, 720, 176)))
+        val out = PartsPipeline().run(PartsPipeline.Input(img, regions, lines = lines))
         assertTrue(out.layout.blocks.none { it.type == BlockType.FORMULA })
         assertTrue(out.layout.blocks.any { it.type == BlockType.TEXT && it.lines.size == 2 })
     }
@@ -299,7 +279,7 @@ class PartsUnitTest {
 
     @Test
     fun hibridoImpresoMismaPosicionPrefiereLaNube() {
-        // Paddle trocea una línea de código en fragmentos; la nube la da entera y bien: misma posición → la de la nube.
+        // El OCR local trocea una línea de código en fragmentos; la nube la da entera y bien: misma posición → la de la nube.
         val lines = (0 until 6).map { i -> "linea correcta numero $i" to floatArrayOf(100f, 100f + 40 * i, 800f, 120f + 40 * i) }
         val localLines = lines.mapIndexed { i, (s, b) -> (if (i == 3) "rn d1sk 1d st4tvs" else s) to b }
         val local = DocLayout(1000, 1000, listOf(tb(BlockType.TEXT, 100f, 100f, 800f, 340f, *localLines.toTypedArray())))

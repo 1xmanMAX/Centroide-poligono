@@ -41,7 +41,6 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.unit.dp
 import com.scannerpromax.ai.ModelCatalog
 import com.scannerpromax.ai.ModelState
-import com.scannerpromax.ai.RecognitionEngine
 import com.scannerpromax.ai.cloud.CloudProviderId
 import com.scannerpromax.ai.cloud.CloudUsage
 import com.scannerpromax.data.AppSettings
@@ -382,26 +381,16 @@ class RedesignPhase2ScreenshotTest {
 
     @Composable
     private fun AiModels() {
-        val models = ModelCatalog.all
-        val states = buildMap<String, ModelState> {
-            models.getOrNull(0)?.let { put(it.id, ModelState.Downloading(1_240_000_000L, 2_300_000_000L, 4_800_000L, "modelo.gguf")) }
-            models.getOrNull(1)?.let { put(it.id, ModelState.Ready(1_050_000_000L, quantized = false)) }
-        }
+        val states = mapOf<String, ModelState>(
+            ModelCatalog.FAST_READER.id to ModelState.Downloading(12_400_000L, 37_500_000L, 1_800_000L, "lm.npz"),
+            ModelCatalog.PAGE_LAYOUT.id to ModelState.NotDownloaded,
+        )
         AiModelsContent(
-            settings = AppSettings(recognitionEngine = RecognitionEngine.BASIC),
+            settings = AppSettings(),
             states = states,
-            ramMb = 6144,
-            engineStatus = "",
             message = null, onDismissMessage = {},
-            cloudReady = { e -> e.cloud?.let { false } },
             onUpdate = {}, onBack = {},
-            onDownloadAll = {}, downloadAllLabel = "Descargar todos (3,4 GB)",
-            onDownload = {}, onCancel = {}, onDelete = {}, onQuantize = {},
-            testSection = {
-                InsetGroup(header = "Probar modelo") {
-                    item { Text("Descarga un modelo para probarlo aquí.", color = MaterialTheme.ui.secondaryLabel, modifier = Modifier.padding(16.dp)) }
-                }
-            },
+            onDownload = {}, onCancel = {}, onReinstall = {}, onDelete = {},
         )
     }
 
@@ -409,7 +398,7 @@ class RedesignPhase2ScreenshotTest {
     private fun Cloud() {
         val first = CloudProviderId.entries.first()
         CloudAiContent(
-            settings = AppSettings(recognitionEngine = RecognitionEngine.BASIC),
+            settings = AppSettings(),
             usage = mapOf(first to CloudUsage(pages = 42, requests = 42, inputTokens = 180_000, outputTokens = 61_000, costUsd = 0.31)),
             saved = mapOf(first to "sk-…a91F"),
             testing = emptyMap(),

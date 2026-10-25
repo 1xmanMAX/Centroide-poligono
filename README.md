@@ -8,7 +8,7 @@ Escáner de documentos para Android con mejora de imagen avanzada, OCR sin inter
 - **3 filtros**: *Blanco y negro* (texto negro nítido sobre blanco puro, sin sombras ni motas; quita la cuadrícula de color clara de los cuadernos conservando la escritura), *Texto resaltado* (por defecto: sin sombras, papel blanco neutro, tinta reforzada con su color; des-ruido, super-resolución y gamma para poca luz automáticos) y *Color original* (colores fieles, solo recorte y un toque de nitidez). Los filtros antiguos de documentos guardados se siguen renderizando y se muestran como su equivalente.
 - **Recorte preciso**: esquinas arrastrables con lupa, perspectiva corregida con relación de aspecto real, enderezado automático del texto y **enderezado de hojas curvadas/combadas** usando las líneas de tablas, cuadrículas o renglones (interruptor "Enderezar hoja curvada" en Limpieza).
 - **Limpieza**: quita ruido y rayas automáticamente; borrador manual (reparación inteligente o pintar blanco) con deshacer/rehacer.
-- **OCR** en el dispositivo (ML Kit) y **PDF con texto buscable**, contraseña opcional.
+- **OCR** en el dispositivo con **Indra** (único lector de texto; se descarga solo la primera vez, ~38 MB) y **PDF con texto buscable**, contraseña opcional.
 - **Texto en el PDF** (Ajustes → "Texto en el PDF", también en Exportar): *Solo imagen*, *Buscable* (capa invisible palabra a palabra), *Buscable + texto reconocido* (páginas legibles con el texto, tras cada página o al final) y *Solo texto*. Fuente Liberation Sans incrustada (acentos, ñ, ¿¡, €). Las correcciones hechas en la pantalla OCR se usan en el PDF, la búsqueda y las exportaciones.
 - **Exportar texto** como **.txt** (UTF-8) o **Word (.docx)**, desde Exportar o desde la pantalla OCR.
 - **Detección robusta**: segmentación por color (Cb/Cr) insensible a sombras duras y madera clara, cuadriláteros envolventes que recuperan esquinas tapadas o redondeadas, cuadernos abiertos (ambas páginas) y documentos que se salen del encuadre (el lado queda sobre el borde de la foto).
@@ -128,8 +128,36 @@ editar.launch(edit) // en el callback: RESULT_OK → reemplazar el archivo; ERRO
 Desde adb: `adb shell am start -a com.scannerpromax.action.SCAN --es mode book --es format jpeg` (con revisión:
 `--ez review true`). Editar: `adb shell am start -a com.scannerpromax.action.EDIT --es documentId <id>`.
 
+## Reconocimiento de texto (Indra)
+- **Indra** (Datalab, `ocr/indra/`, ONNX Runtime en el procesador) es el ÚNICO OCR de la app: detector de líneas,
+  reconocedor, orden de lectura, orientación y modelo de lenguaje para las líneas dudosas (solo latín).
+- Sus pesos (24,7 MB) y ONNX Runtime (`libonnxruntime.so`, ~13 MB para arm64) **no van en el APK**: se descargan solos en
+  el primer arranque (`ocr/indra/IndraProvisioner`, WorkManager con notificación silenciosa), respetando *Descargas solo
+  con Wi-Fi*. Sin red, las páginas quedan **pendientes** y se reconocen solas al terminar la descarga.
+- Cada página se reconoce en segundo plano al añadirse (Texto en vivo, búsqueda y PDF buscable).
+- **Maquetación de páginas** (opcional, Ajustes › Reconocimiento): PP-DocLayoutV3 + PP-LCNet doc_ori (137 MB) endereza
+  las páginas giradas y monta la maquetación por partes (regiones + líneas de Indra) para el PDF reconstruido.
+- La **IA en la nube** (DeepSeek / Claude Haiku con la clave del usuario) ya no es un motor de reconocimiento: se usa para la
+  reconstrucción con IA.
+
+## Dependencias y licencias (componentes de reconocimiento e IA)
+| Componente | Uso | Licencia | Cómo llega |
+|---|---|---|---|
+| Indra OCR (datalab-to/indra) — código portado a Kotlin | OCR | Apache-2.0 | En el APK (`ocr/indra/`) |
+| Indra OCR — pesos v1.1.0 (`datalab-to/indra-ocr`, latín) | OCR | OpenRAIL-M modificada (Datalab): gratis para uso personal/investigación y empresas < 20 M$; no para productos que compitan con Datalab. **Uso personal**: una distribución comercial necesitaría licencia de Datalab y trasladar sus restricciones de uso | Descarga automática (24,7 MB) |
+| ONNX Runtime 1.31 (Microsoft) | Motor de Indra y de la maquetación | MIT | API Java + JNI en el APK; `libonnxruntime.so` se descarga (~13 MB) |
+| PP-DocLayoutV3 + PP-LCNet doc_ori (PaddlePaddle, ONNX) | Maquetación por partes y orientación (opcional) | Apache-2.0 | Descarga opcional (137 MB) |
+| OpenCV 4.10 | Imagen | Apache-2.0 | En el APK |
+| PdfBox-Android | PDF | Apache-2.0 | En el APK |
+| SDK de Anthropic para Java / OkHttp | IA en la nube (opcional, clave del usuario) | MIT / Apache-2.0 | En el APK |
+| FSRCNN (super-resolución) | Imagen | Apache-2.0 | En el APK (`assets/models/`) |
+| Inter, Liberation Sans y fuentes del PDF reconstruido | Interfaz / PDF | OFL-1.1 | En el APK |
+
+Eliminados: ML Kit Text Recognition, PaddleOCR-VL-1.5 ("Lector de documentos"), Qwen3.5-0.8B ("Asistente visual") y
+llama.cpp (submódulo `third_party/llama.cpp` y JNI `app/src/main/cpp`).
+
 ## Compilar
-Requisitos: JDK 17+, Android SDK 35.
+Requisitos: JDK 17+, Android SDK 35 (ya no hace falta el NDK ni CMake).
 ```
 ./gradlew :app:assembleRelease   # APKs por ABI en app/build/outputs/apk/release/
 ./gradlew :app:testDebugUnitTest

@@ -8,7 +8,6 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
-import com.scannerpromax.ai.RecognitionEngine
 import com.scannerpromax.domain.ExportQuality
 import com.scannerpromax.domain.FilterType
 import com.scannerpromax.domain.PageSize
@@ -54,11 +53,7 @@ class SettingsRepository(private val context: Context) {
             }
             prefs[Keys.DYNAMIC_COLOR] = updated.dynamicColor
             prefs[Keys.USE_SYSTEM_CAMERA] = updated.useSystemCamera
-            prefs[Keys.RECOGNITION_ENGINE] = updated.recognitionEngine.name
             prefs[Keys.AI_WIFI_ONLY] = updated.aiWifiOnly
-            prefs[Keys.AI_QUANTIZE_ON_DEVICE] = updated.aiQuantizeOnDevice
-            prefs[Keys.AI_AUTO_ENHANCE] = updated.aiAutoEnhance
-            prefs[Keys.AI_FRAME_RESCUE] = updated.aiFrameRescue
             prefs[Keys.CLOUD_WIFI_ONLY] = updated.cloudWifiOnly
             prefs[Keys.CLOUD_CONSENT_DEEPSEEK] = updated.cloudConsentDeepSeek
             prefs[Keys.CLOUD_CONSENT_CLAUDE] = updated.cloudConsentClaude
@@ -93,11 +88,7 @@ class SettingsRepository(private val context: Context) {
             },
             dynamicColor = this[Keys.DYNAMIC_COLOR] ?: d.dynamicColor,
             useSystemCamera = this[Keys.USE_SYSTEM_CAMERA] ?: d.useSystemCamera,
-            recognitionEngine = enumOr(this[Keys.RECOGNITION_ENGINE], d.recognitionEngine),
             aiWifiOnly = this[Keys.AI_WIFI_ONLY] ?: d.aiWifiOnly,
-            aiQuantizeOnDevice = this[Keys.AI_QUANTIZE_ON_DEVICE] ?: d.aiQuantizeOnDevice,
-            aiAutoEnhance = this[Keys.AI_AUTO_ENHANCE] ?: d.aiAutoEnhance,
-            aiFrameRescue = this[Keys.AI_FRAME_RESCUE] ?: d.aiFrameRescue,
             cloudWifiOnly = this[Keys.CLOUD_WIFI_ONLY] ?: d.cloudWifiOnly,
             cloudConsentDeepSeek = this[Keys.CLOUD_CONSENT_DEEPSEEK] ?: d.cloudConsentDeepSeek,
             cloudConsentClaude = this[Keys.CLOUD_CONSENT_CLAUDE] ?: d.cloudConsentClaude,
@@ -124,11 +115,7 @@ class SettingsRepository(private val context: Context) {
         val DARK_THEME = stringPreferencesKey("dark_theme")
         val DYNAMIC_COLOR = booleanPreferencesKey("dynamic_color")
         val USE_SYSTEM_CAMERA = booleanPreferencesKey("use_system_camera")
-        val RECOGNITION_ENGINE = stringPreferencesKey("recognition_engine")
         val AI_WIFI_ONLY = booleanPreferencesKey("ai_wifi_only")
-        val AI_QUANTIZE_ON_DEVICE = booleanPreferencesKey("ai_quantize_on_device")
-        val AI_AUTO_ENHANCE = booleanPreferencesKey("ai_auto_enhance")
-        val AI_FRAME_RESCUE = booleanPreferencesKey("ai_frame_rescue")
         val CLOUD_WIFI_ONLY = booleanPreferencesKey("cloud_wifi_only")
         val CLOUD_CONSENT_DEEPSEEK = booleanPreferencesKey("cloud_consent_deepseek")
         val CLOUD_CONSENT_CLAUDE = booleanPreferencesKey("cloud_consent_claude")
@@ -162,22 +149,8 @@ data class AppSettings(
      * nitidez) y procesar la foto devuelta en el flujo normal del modo. La cámara propia sigue disponible.
      */
     val useSystemCamera: Boolean = false,
-    /**
-     * Motor de reconocimiento principal (Ajustes > Modelos IA). BASIC = ML Kit incluido; los otros requieren
-     * haber descargado el modelo (si no está, la tubería debe caer a BASIC).
-     */
-    val recognitionEngine: RecognitionEngine = RecognitionEngine.BASIC,
-    /** Descargar modelos de IA solo con Wi-Fi (red no medida). */
+    /** Descargar el lector de texto (Indra) y la maquetación solo con Wi-Fi (red no medida). */
     val aiWifiOnly: Boolean = true,
-    /** Tras descargar el Lector de documentos, cuantizarlo en el móvil (Q8_0: ~mitad de RAM y disco). */
-    val aiQuantizeOnDevice: Boolean = false,
-    /**
-     * Con el Asistente visual descargado: clasificar cada página (recibo, pizarra, pantalla…) y, si sigue con el filtro
-     * por defecto, elegir la mejora automática adecuada a ese tipo.
-     */
-    val aiAutoEnhance: Boolean = true,
-    /** Con el Asistente visual descargado: si no se detectan los bordes, pedirle dónde está el documento. */
-    val aiFrameRescue: Boolean = true,
     /** IA en la nube: enviar páginas solo con Wi-Fi / red no medida (si no, esperan en la cola). */
     val cloudWifiOnly: Boolean = false,
     /** Consentimiento explícito (una vez por proveedor) para enviar páginas a sus servidores. */

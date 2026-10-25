@@ -2,7 +2,6 @@ package com.scannerpromax.di
 
 import android.content.Context
 import com.scannerpromax.NativeLibs
-import com.scannerpromax.ai.LlmEngine
 import com.scannerpromax.ai.ModelManager
 import com.scannerpromax.data.DocumentRepository
 import com.scannerpromax.data.SettingsRepository
@@ -13,12 +12,13 @@ import com.scannerpromax.imaging.PageProcessor
 import com.scannerpromax.ocr.OcrEngine
 import com.scannerpromax.pdf.PdfCompressor
 import com.scannerpromax.pdf.PdfExporter
+import kotlinx.coroutines.launch
 
 /**
  * Inyección de dependencias manual (sin Hilt para mantener el APK liviano y el arranque rápido).
  *
  * Construir el contenedor es barato: solo el perfil del dispositivo y los ajustes se crean en el acto. Todo lo
- * que toca OpenCV, PdfBox, ML Kit o el disco es `lazy` sincronizado y se crea la primera vez que se usa (en la
+ * que toca OpenCV, PdfBox, ONNX Runtime o el disco es `lazy` sincronizado y se crea la primera vez que se usa (en la
  * práctica, en el hilo de arranque de [com.scannerpromax.ScannerApp] antes de que se vea la primera pantalla).
  * La API pública (propiedades) no cambia.
  */
@@ -45,9 +45,23 @@ class AppContainer(context: Context) {
     val pageProcessor: PageProcessor by pageProcessorLazy
 
     private val ocrLazy = lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
-        OcrEngine(appContext, deviceTier).also {
-            // Lector rápido Indra (si está descargado sustituye a ML Kit); ONNX Runtime con hasta 4 hilos.
-            it.fastReader = com.scannerpromax.ocr.indra.IndraEngine({ models }, com.scannerpromax.ai.CpuInfo.recommendedThreads().coerceIn(1, 4))
+        OcrEngine(appContext, deviceTier).also { it.indra = indraEngine }
+    }
+
+    /** Indra, el único OCR (ONNX Runtime con hasta 4 hilos). Crearlo no carga nada: eso ocurre al primer OCR. */
+    val indraEngine: com.scannerpromax.ocr.indra.IndraEngine by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        com.scannerpromax.ocr.indra.IndraEngine({ models }, com.scannerpromax.ai.CpuInfo.recommendedThreads().coerceIn(1, 4))
+    }
+
+    /**
+     * Descarga automática de Indra (primer arranque o cuando falte) y, al terminar, reconocimiento de las páginas
+     * pendientes. [com.scannerpromax.ScannerApp] lo arranca tras cargar los documentos.
+     */
+    val indraProvisioner: com.scannerpromax.ocr.indra.IndraProvisioner by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        com.scannerpromax.ocr.indra.IndraProvisioner(models, settings) {
+            indraEngine.reset()
+            aiQueue.resume()
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default).launch { documents.requeueMissingOcr() }
         }
     }
     val ocr: OcrEngine by ocrLazy
@@ -59,6 +73,7 @@ class AppContainer(context: Context) {
         DocumentRepository(appContext, pageProcessor, deviceTier).also {
             it.attachOcrEngine(ocr)
             it.aiHook = aiQueue
+            it.onOcrUnavailable = { indraProvisioner.ensure() }
         }
     }
 
@@ -74,29 +89,24 @@ class AppContainer(context: Context) {
 
     val imageExporter: ImageExporter by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { ImageExporter(appContext) }
 
-    /** Motor de IA local (llama.cpp). Crearlo no carga la biblioteca nativa: eso ocurre al primer uso. */
-    val llm: LlmEngine by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { LlmEngine(appContext) }
-
-    /** Modelos de IA descargables (estado, descargas en segundo plano, borrado). */
-    val models: ModelManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { ModelManager(appContext) { llm } }
+    /** Modelos descargables: Indra y la maquetación (estado, descargas en segundo plano, borrado). */
+    val models: ModelManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { ModelManager(appContext) }
 
     /**
-     * Cola de lectura con IA en segundo plano (motor principal de reconocimiento cuando el usuario elige un modelo
-     * descargado; además clasificación y rescate de encuadre con el Asistente visual). Crearla no carga modelos.
+     * Cola en segundo plano de "Volver a reconocer" y de la maquetación por partes (si está descargada). Crearla no
+     * carga modelos.
      */
     val aiQueue: com.scannerpromax.ai.AiRecognitionQueue by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
-        com.scannerpromax.ai.AiRecognitionQueue(
-            appContext, llm, models, settings,
-            documents = { documents },
-            detector = { pageProcessor.detector },
-            tier = deviceTier,
-            cloud = cloudRecognizer,
-            cloudKeys = cloudKeys,
-            cloudUsage = cloudUsage,
-        )
+        com.scannerpromax.ai.AiRecognitionQueue(appContext, models, documents = { documents }, tier = deviceTier).also {
+            it.ocrReady = { indraEngine.isReady() }
+            it.onOcrMissing = { indraProvisioner.ensure() }
+        }
     }
 
-    /** IA en la nube (opcional): claves cifradas con el Keystore, contadores de uso y lector. */
+    /**
+     * IA en la nube (opcional, con la clave del usuario): claves cifradas con el Keystore, contadores de uso y
+     * proveedores. Ya no es un motor de reconocimiento (el texto lo pone Indra): se usa para la reconstrucción.
+     */
     val cloudKeys: com.scannerpromax.ai.cloud.CloudKeyStore by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         com.scannerpromax.ai.cloud.CloudKeyStore(appContext)
     }

@@ -55,7 +55,6 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.scannerpromax.ai.RecognitionEngine
 import com.scannerpromax.ai.cloud.ClaudeHaikuProvider
 import com.scannerpromax.ai.cloud.CloudException
 import com.scannerpromax.ai.cloud.CloudKeyStore
@@ -71,7 +70,6 @@ import com.scannerpromax.ui.components.AppIcons
 import com.scannerpromax.ui.components.GroupArrangement
 import com.scannerpromax.ui.components.IconCircleButton
 import com.scannerpromax.ui.components.IconTile
-import com.scannerpromax.ui.components.InfoRow
 import com.scannerpromax.ui.components.InsetGroup
 import com.scannerpromax.ui.components.IosAlert
 import com.scannerpromax.ui.components.IosTextField
@@ -96,8 +94,8 @@ import kotlinx.coroutines.withContext
 import java.time.Instant
 
 /**
- * Ajustes > IA en la nube (opcional): DeepSeek o Claude Haiku 5.5 con la clave de API del propio usuario, como
- * alternativa a los modelos del teléfono y al básico. Clave cifrada (Keystore), "Probar clave" (llamada gratuita),
+ * Ajustes > IA en la nube (opcional): DeepSeek o Claude Haiku 5.5 con la clave de API del propio usuario, para la
+ * reconstrucción con IA (ya NO es un motor de reconocimiento: el texto lo pone Indra). "Activar" = aceptar el aviso. Clave cifrada (Keystore), "Probar clave" (llamada gratuita),
  * aviso de privacidad con consentimiento explícito la primera vez, solo Wi-Fi y contador de uso/coste.
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -150,8 +148,7 @@ fun CloudAiScreen(container: AppContainer, onBack: () -> Unit) {
     }
 
     fun use(id: CloudProviderId) {
-        if (!settings.cloudConsent(id)) { consentFor = id; return }
-        update { it.copy(recognitionEngine = engineFor(id)) }
+        if (!settings.cloudConsent(id)) consentFor = id
     }
 
     CloudAiContent(
@@ -172,11 +169,11 @@ fun CloudAiScreen(container: AppContainer, onBack: () -> Unit) {
             keys.remove(id)
             keyVersion++
             testResult.remove(id)
-            if (settings.recognitionEngine.cloud == id) update { it.copy(recognitionEngine = RecognitionEngine.BASIC) }
+            update { it.withCloudConsent(id, false) }
         },
         onTest = { test(it) },
         onUse = { use(it) },
-        onStop = { update { it.copy(recognitionEngine = RecognitionEngine.BASIC) } },
+        onStop = { id -> update { it.withCloudConsent(id, false) } },
         onResetUsage = { container.cloudUsage.reset(it) },
     )
 
@@ -184,7 +181,7 @@ fun CloudAiScreen(container: AppContainer, onBack: () -> Unit) {
         IosAlert(
             title = "Enviar páginas a ${id.company}",
             icon = AppIcons.Cloud,
-            message = "Las páginas que se lean con este motor (la imagen completa de cada página) se enviarán a " +
+            message = "Las páginas que reconstruyas con IA (la imagen completa de cada página) se enviarán a " +
                 "${id.company}, con servidores en ${id.serverLocation}, y se tratarán según su política de " +
                 "privacidad y sus condiciones de uso de la API. No lo uses con documentos que no quieras " +
                 "compartir con ese proveedor.\n\nEl coste lo cobra ${id.company} a tu cuenta.\n\n¿Aceptas?",
@@ -193,7 +190,7 @@ fun CloudAiScreen(container: AppContainer, onBack: () -> Unit) {
                 AlertAction("Cancelar") { },
                 AlertAction("Acepto", bold = true) {
                     val target = id
-                    update { it.withCloudConsent(target, true).copy(recognitionEngine = engineFor(target)) }
+                    update { it.withCloudConsent(target, true) }
                 },
             ),
         )
@@ -217,7 +214,7 @@ internal fun CloudAiContent(
     onDelete: (CloudProviderId) -> Unit,
     onTest: (CloudProviderId) -> Unit,
     onUse: (CloudProviderId) -> Unit,
-    onStop: () -> Unit,
+    onStop: (CloudProviderId) -> Unit,
     onResetUsage: (CloudProviderId) -> Unit,
 ) {
     val ui = MaterialTheme.ui
@@ -233,22 +230,18 @@ internal fun CloudAiContent(
     ) {
         LargeTitleHeader(title = "IA en la nube", backLabel = "Ajustes", onBack = onBack, subtitle = "Opcional")
         Text(
-            "Lee y reconstruye las páginas con un modelo de IA en internet usando TU propia clave de API. " +
-                "Suele leer mejor que el teléfono el manuscrito y las tablas. Pagas directamente al proveedor " +
-                "(fracciones de céntimo por página). Es una alternativa a los modelos del teléfono y al básico.",
+            "Reconstruye los documentos con un modelo de IA en internet usando TU propia clave de API. " +
+                "El texto de cada página lo reconoce Indra en el teléfono; la nube solo se usa para la reconstrucción. " +
+                "Pagas directamente al proveedor (fracciones de céntimo por página).",
             style = MaterialTheme.typography.bodyMedium,
             color = ui.secondaryLabel,
             modifier = Modifier.padding(horizontal = 20.dp),
         )
-        InsetGroup(separatorInset = SeparatorInsetPlain) {
-            item { InfoRow("Motor actual", settings.recognitionEngine.label, stacked = true) }
-        }
-
         CloudProviderId.entries.forEach { id ->
             ProviderCard(
                 id = id,
                 savedMasked = saved[id],
-                inUse = settings.recognitionEngine.cloud == id,
+                inUse = settings.cloudConsent(id),
                 usage = usage[id] ?: CloudUsage(),
                 testing = testing[id] == true,
                 testResult = testResult[id],
@@ -256,7 +249,7 @@ internal fun CloudAiContent(
                 onDelete = { onDelete(id) },
                 onTest = { onTest(id) },
                 onUse = { onUse(id) },
-                onStop = onStop,
+                onStop = { onStop(id) },
                 onResetUsage = { onResetUsage(id) },
             )
         }
@@ -265,8 +258,8 @@ internal fun CloudAiContent(
             header = "Opciones",
             footer = "Tus claves se guardan cifradas en este teléfono (Android Keystore), no se incluyen en las copias " +
                 "de seguridad y nunca se escriben en registros. Solo se envían al proveedor elegido. Sin conexión, " +
-                "las páginas esperan en la cola y se leen solas al volver la red. Si algo falla, la página se " +
-                "queda con el OCR básico.",
+                "las páginas esperan en la cola y siguen solas al volver la red. Si algo falla, la página se " +
+                "queda con el texto de Indra.",
         ) {
             item {
                 ToggleRow(
@@ -281,8 +274,6 @@ internal fun CloudAiContent(
         }
     }
 }
-
-private fun engineFor(id: CloudProviderId): RecognitionEngine = RecognitionEngine.entries.first { it.cloud == id }
 
 @Composable
 private fun ProviderCard(
@@ -325,7 +316,7 @@ private fun ProviderCard(
                         groups = listOf(
                             listOfNotNull(
                                 MoreMenuItem(if (testing) "Probando…" else "Probar clave", AppIcons.Check, enabled = savedMasked != null && !testing, onClick = onTest),
-                                if (inUse) MoreMenuItem("Dejar de usar", AppIcons.Close, onClick = onStop) else null,
+                                if (inUse) MoreMenuItem("Desactivar", AppIcons.Close, onClick = onStop) else null,
                                 MoreMenuItem("Poner a cero el uso", AppIcons.Rotate, enabled = usage.requests > 0, onClick = onResetUsage),
                             ),
                             listOf(MoreMenuItem("Borrar clave", AppIcons.Trash, destructive = true, enabled = savedMasked != null, onClick = onDelete)),
@@ -357,10 +348,10 @@ private fun ProviderCard(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(AppIcons.Check, null, tint = ui.green, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text("En uso como motor de reconocimiento", style = MaterialTheme.typography.titleSmall, color = ui.label)
+                            Text("Activada para la reconstrucción con IA", style = MaterialTheme.typography.titleSmall, color = ui.label)
                         }
                     } else {
-                        CardButton("Usar como motor", onUse, Modifier.fillMaxWidth())
+                        CardButton("Activar", onUse, Modifier.fillMaxWidth())
                     }
                 } else {
                     Box(Modifier.clip(RoundedCornerShape(10.dp)).background(ui.groupedBackground)) {
