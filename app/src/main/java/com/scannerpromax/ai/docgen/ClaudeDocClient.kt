@@ -3,7 +3,7 @@ package com.scannerpromax.ai.docgen
 import com.anthropic.client.AnthropicClientAsync
 import com.anthropic.client.okhttp.AnthropicOkHttpClientAsync
 import com.anthropic.core.JsonValue
-import com.anthropic.core.ObjectMappers
+import com.anthropic.core.jsonMapper
 import com.anthropic.models.beta.AnthropicBeta
 import com.anthropic.models.beta.messages.BetaBase64ImageSource
 import com.anthropic.models.beta.messages.BetaCacheControlEphemeral
@@ -239,7 +239,7 @@ class ClaudeDocClient(
                 val cat = m.stopDetails().flatMap { it.category() }.map { it.toString() }.orElse(null)
                 return AgentTurn("", emptyList(), stop, usage, served, cat)
             }
-            val mapper = ObjectMappers.jsonMapper()
+            val mapper = jsonMapper()
             val calls = m.content().mapNotNull { b ->
                 b.toolUse().orElse(null)?.let { tu -> ToolCall(tu.id(), tu.name(), mapper.writeValueAsString(tu._input())) }
             }

@@ -107,6 +107,17 @@ class AppContainer(context: Context) {
         com.scannerpromax.ai.cloud.CloudRecognizer(cloudKeys, cloudUsage)
     }
 
+    /** Reconstrucción de documentos con IA (Word/PDF con herramientas): cola en segundo plano, preferencias y ejecutor. */
+    val docGenJobs: com.scannerpromax.ai.docgen.DocGenJobs by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        com.scannerpromax.ai.docgen.DocGenJobs(appContext)
+    }
+    val docGenPrefs: com.scannerpromax.ai.docgen.DocGenPrefs by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        com.scannerpromax.ai.docgen.DocGenPrefs(appContext)
+    }
+    val docGenRunner: com.scannerpromax.ai.docgen.DocGenRunner by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        com.scannerpromax.ai.docgen.DocGenRunner(appContext, documents, cloudKeys, cloudUsage, imageExporter)
+    }
+
     /** El procesador solo si ya existe (para liberar cachés sin crearlo por accidente). */
     fun pageProcessorIfCreated(): PageProcessor? = if (pageProcessorLazy.isInitialized()) pageProcessor else null
 }
