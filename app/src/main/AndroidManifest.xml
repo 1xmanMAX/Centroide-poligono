@@ -4,7 +4,7 @@
 
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
     <uses-permission android:name="android.permission.CAMERA" />
-    <!-- Descarga de modelos de IA (opcional, desde Ajustes > Modelos IA) en segundo plano con notificación -->
+    <!-- Descarga del lector de texto Indra (automática) y de la maquetación (opcional) en segundo plano con notificación -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -120,9 +120,5 @@
             android:shell="true"
             tools:targetApi="29" />
 
-        <!-- Descarga el modelo OCR junto con la app (no en primer uso) -->
-        <meta-data
-            android:name="com.google.mlkit.vision.DEPENDENCIES"
-            android:value="ocr" />
     </application>
 </manifest>

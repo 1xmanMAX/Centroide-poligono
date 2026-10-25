@@ -18,8 +18,7 @@ class ModelStorageNativeTest {
         id = "maq", name = "Maquetación", technicalName = "t", license = "Apache 2.0", purpose = "p", description = "d",
         role = ModelRole.PAGE_LAYOUT,
         files = listOf(ModelFile(FileKind.ONNX, "m.onnx", ModelCatalog.hf("a/b", "inference.onnx"), 1000)),
-        recommendedRamMb = 1, minRamMb = 1, onDeviceQuantization = null,
-        defaults = ModelCatalog.PAGE_LAYOUT.defaults, tasks = emptyList(),
+        recommendedRamMb = 1, minRamMb = 1,
         nativeLibs = NativeLibs(
             version = "1.0", url = "https://example.org/x.aar", archiveSize = 9999, archiveSha256 = "0".repeat(64),
             libs = listOf(

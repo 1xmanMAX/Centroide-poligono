@@ -20,8 +20,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
 /**
- * Procesa la cola de lectura con IA ([AiRecognitionQueue.drain]) como servicio en primer plano con notificación
- * "Leyendo con IA… página x de n · 40 %" y botón Cancelar. Sobrevive a salir de la app; si el sistema lo detiene,
+ * Procesa la cola de reconocimiento / maquetación por partes ([AiRecognitionQueue.drain]) como servicio en primer plano
+ * con notificación "Reconociendo páginas… página x de n · 40 %" y botón Cancelar. Sobrevive a salir de la app; si el sistema lo detiene,
  * WorkManager lo vuelve a lanzar y la cola (guardada en disco) sigue donde iba.
  */
 class AiRecognitionWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
@@ -71,7 +71,7 @@ class AiRecognitionWorker(context: Context, params: WorkerParameters) : Coroutin
         val text = if (total > 0) "Página ${done + 1} de $total · $label · $pct %" else label
         val n = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_search)
-            .setContentTitle("Leyendo con IA…")
+            .setContentTitle("Reconociendo páginas…")
             .setContentText(text)
             .setOnlyAlertOnce(true)
             .setOngoing(true)
@@ -91,8 +91,8 @@ class AiRecognitionWorker(context: Context, params: WorkerParameters) : Coroutin
         val nm = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (nm.getNotificationChannel(CHANNEL_ID) == null) {
             nm.createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "Lectura con IA", NotificationManager.IMPORTANCE_LOW).apply {
-                    description = "Progreso del reconocimiento de páginas con la IA del teléfono"
+                NotificationChannel(CHANNEL_ID, "Reconocimiento de páginas", NotificationManager.IMPORTANCE_LOW).apply {
+                    description = "Progreso del reconocimiento y la maquetación de páginas en el teléfono"
                     setShowBadge(false)
                 },
             )
@@ -102,8 +102,6 @@ class AiRecognitionWorker(context: Context, params: WorkerParameters) : Coroutin
     companion object {
         private const val TAG = "AiRecognitionWorker"
         const val WORK_NAME = "ai-recognition"
-        /** Relanzamiento de la cola en cuanto haya red (IA en la nube en pausa por falta de conexión). */
-        const val WORK_NAME_NETWORK = "ai-recognition-network"
         const val TAG_WORK = "ai-recognition"
         const val CHANNEL_ID = "ai_recognition"
         private const val NOTIFICATION_ID = 0x4E01

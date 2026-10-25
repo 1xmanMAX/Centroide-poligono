@@ -116,19 +116,25 @@ class DocumentRepository(
     @Volatile var backgroundOcrEnabled: Boolean = true
 
     /**
-     * Avisos para el reconocimiento con IA ([com.scannerpromax.ai.AiRecognitionQueue]): páginas nuevas o con la imagen
+     * Avisos para la maquetación por partes ([com.scannerpromax.ai.AiRecognitionQueue]): páginas nuevas o con la imagen
      * cambiada. El repositorio no sabe nada de modelos: solo avisa.
      */
     interface AiHook {
-        /** Página nueva. [rescueFrame] = el detector clásico no dio bordes fiables ([detConfidence] o null). */
-        fun onPageAdded(docId: String, pageId: String, rescueFrame: Boolean, detConfidence: Float?)
-        /** La imagen procesada de la página cambió (ediciones): su OCR/maquetación de IA ya no vale. */
+        /** Página nueva. */
+        fun onPageAdded(docId: String, pageId: String)
+        /** La imagen procesada de la página cambió (ediciones): su OCR/maquetación ya no vale. */
         fun onPageChanged(docId: String, pageId: String)
     }
 
     @Volatile var aiHook: AiHook? = null
 
-    /** Motor OCR: el contenedor puede asignar el suyo con [attachOcrEngine]; si no, se crea uno (el cliente ML Kit es compartido). */
+    /**
+     * Se llama (en segundo plano) cuando una página no se pudo reconocer porque el lector de texto (Indra) aún no está
+     * descargado: el contenedor arranca la descarga. La página queda pendiente y [requeueMissingOcr] la reconoce al terminar.
+     */
+    @Volatile var onOcrUnavailable: (() -> Unit)? = null
+
+    /** Motor OCR (Indra): el contenedor asigna el suyo con [attachOcrEngine]. */
     @Volatile private var ocrEngine: OcrEngine? = null
     private val ocrQueue = Channel<Pair<String, String>>(Channel.UNLIMITED)
     private val queuedOcr: MutableSet<String> = ConcurrentHashMap.newKeySet()
@@ -172,7 +178,7 @@ class DocumentRepository(
      * Pausa el OCR de fondo mientras haya una pantalla sensible abierta (cámara: vista previa, análisis y ráfagas;
      * editor: vistas previas; fusión multi-foto). Es un contador: cada llamada debe ir seguida de
      * [resumeBackgroundOcr] (p. ej. en el onDispose de un DisposableEffect). Si hay un OCR de fondo en curso se
-     * cancela tras la pasada actual de ML Kit (lo ya reconocido se guarda) y la página se vuelve a encolar.
+     * cancela al terminar la página en curso y la página se vuelve a encolar.
      */
     fun pauseBackgroundOcr() {
         ocrPause.update { it + 1 }
@@ -290,8 +296,6 @@ class DocumentRepository(
         val dir = docDir(docId)
         val originalName = "$ORIGINAL_DIR/$pageId.jpg"
         val dst = File(dir, originalName)
-        var rescue = false
-        var detConf: Float? = null
 
         val page = heavyWork {
             withContext(Dispatchers.Default) {
@@ -312,10 +316,6 @@ class DocumentRepository(
 
                     val edits = presetEdits ?: run {
                         val det = if (autoDetect && m != ScanMode.PHOTO) detectQuadWithConfidence(bmp) else null
-                        detConf = det?.second
-                        rescue = autoDetect && m != ScanMode.PHOTO && m != ScanMode.ID_CARD &&
-                            (det?.first == null || (det.second ?: 0f) < RESCUE_CONFIDENCE ||
-                                nearlyFull(det.first!!, bmp.width, bmp.height))
                         val quad = det?.first?.let { toSpace(it, bmp.width, bmp.height, pw, ph) }
                         val base = defaultEdits(m, quad)
                         // Hoja girada 90° (renglones verticales) o del revés: se endereza SOLO si es muy fiable; el giro
@@ -353,7 +353,7 @@ class DocumentRepository(
             }
         }
         enqueueOcr(docId, page.id)
-        aiHook?.onPageAdded(docId, page.id, rescue, detConf)
+        aiHook?.onPageAdded(docId, page.id)
         return page
     }
 
@@ -449,7 +449,7 @@ class DocumentRepository(
             }
         }
         enqueueOcr(docId, page.id)
-        aiHook?.onPageAdded(docId, page.id, false, null)
+        aiHook?.onPageAdded(docId, page.id)
         return page
     }
 
@@ -592,7 +592,7 @@ class DocumentRepository(
         if (docId in deletedIds) return
         val dir = docDir(docId)
         val name = ocrName(pageId, edits)
-        // El OCR de la IA (con su maquetación) manda: un OCR básico de fondo que termina después no lo pisa.
+        // El OCR de la IA (con su maquetación) manda: un OCR de fondo que termina después no lo pisa.
         if (!fromAi && withContext(Dispatchers.IO) { File(dir, PageFiles.layoutName(pageId, edits)).exists() }) return
         val edited = result.editedText?.takeIf { it.isNotBlank() && it != result.text }
         withContext(Dispatchers.IO) {
@@ -791,9 +791,8 @@ class DocumentRepository(
                     from.copyTo(to, overwrite = true)
                     return newName
                 }
-                // La maquetación de la IA y su clasificación siguen a la página (mismo hash de ediciones).
+                // La maquetación sigue a la página (mismo hash de ediciones).
                 cp(PageFiles.layoutName(p.id, p.edits))
-                cp(PageFiles.aiClassName(p.id))
                 p.copy(
                     id = newId,
                     originalFile = cp(p.originalFile) ?: p.originalFile,
@@ -830,14 +829,6 @@ class DocumentRepository(
         } ?: return null
         if (det.confidence < MIN_CONFIDENCE || det.frameWidth <= 0 || det.frameHeight <= 0) return null to det.confidence
         return detQuadScaled(bmp, det) to det.confidence
-    }
-
-    /** El cuadrilátero es (casi) la imagen entera: el detector "cayó" a la foto completa. */
-    private fun nearlyFull(q: Quad, w: Int, h: Int): Boolean {
-        val p = q.points()
-        var a = 0f
-        for (i in p.indices) { val u = p[i]; val v = p[(i + 1) % p.size]; a += u.x * v.y - v.x * u.y }
-        return kotlin.math.abs(a) / 2f > 0.97f * w * h
     }
 
     private fun detQuadScaled(bmp: Bitmap, det: com.scannerpromax.imaging.DetectionResult): Quad {
@@ -1169,7 +1160,7 @@ class DocumentRepository(
 
     // ------------------------------------------------------------------ OCR
 
-    /** Usa el motor OCR del contenedor (comparte el cliente de ML Kit). Llamar una vez al crear el contenedor. */
+    /** Usa el motor OCR del contenedor (Indra). Llamar una vez al crear el contenedor. */
     fun attachOcrEngine(engine: OcrEngine) {
         // Mismo criterio de gama baja que el resto de la app (RAM total y núcleos, no solo memoryClass).
         engine.setDeviceTier(tier)
@@ -1186,7 +1177,7 @@ class DocumentRepository(
     private fun ocrDecodePixels(lightweight: Boolean): Int = when {
         lowEndOcr && lightweight -> OCR_BACKGROUND_PIXELS
         lowEndOcr -> OCR_LOW_RAM_PIXELS
-        // ML Kit no gana nada por encima de ~12 MP y tarda bastante más.
+        // Indra reduce a 1024 px para detectar y relee los recortes de cada línea: más de ~12 MP no aporta.
         else -> minOf(tier.maxWorkingPixels, OCR_MAX_PIXELS)
     }
 
@@ -1240,6 +1231,10 @@ class DocumentRepository(
                 result.copy(editedText = findPage(docId, pageId)?.ocrEditedText)
             } catch (c: kotlinx.coroutines.CancellationException) {
                 throw c
+            } catch (u: com.scannerpromax.ocr.OcrUnavailableException) {
+                // Indra aún no está descargado: la página queda pendiente (no cuenta como fallo).
+                onOcrUnavailable?.invoke()
+                null
             } catch (t: Throwable) {
                 Log.w(TAG, "OCR fallido en $docId/$pageId", t)
                 null
@@ -1256,7 +1251,7 @@ class DocumentRepository(
             val page = findPage(docId, pageId) ?: throw IOException("Página no encontrada")
             val file = processedFile(docId, page)
             val current = findPage(docId, pageId) ?: throw IOException("Página no encontrada")
-            // "Volver a reconocer" con el OCR básico: sustituye también al de la IA.
+            // "Volver a reconocer": la maquetación anterior ya no corresponde al texto nuevo.
             withContext(Dispatchers.IO) { File(docDir(docId), PageFiles.layoutName(pageId, current.edits)).delete() }
             // El texto corregido se descarta solo si el nuevo reconocimiento sale bien.
             val result = recognizeAndSave(docId, pageId, file, current.edits, lightweight = false, clearEdited = !keepEditedText)
@@ -1332,23 +1327,6 @@ class DocumentRepository(
         return withContext(Dispatchers.IO) { File(docDir(docId), PageFiles.layoutName(pageId, page.edits)).exists() }
     }
 
-    /** Tipo de documento que dio la IA para la página (null si no se clasificó). */
-    suspend fun aiDocType(docId: String, pageId: String): String? = withContext(Dispatchers.IO) {
-        runCatching { File(docDir(docId), PageFiles.aiClassName(pageId)).takeIf { it.exists() }?.readText()?.trim() }
-            .getOrNull()?.takeIf { it.isNotEmpty() }
-    }
-
-    suspend fun saveAiDocType(docId: String, pageId: String, docType: String) {
-        if (docId in deletedIds) return
-        withContext(Dispatchers.IO) {
-            runCatching {
-                val f = File(docDir(docId), PageFiles.aiClassName(pageId))
-                f.parentFile?.mkdirs()
-                f.writeText(docType)
-            }
-        }
-    }
-
     /** Páginas sin OCR guardado (para estimar el trabajo antes de exportar). */
     suspend fun pagesMissingOcr(docId: String, pageIds: List<String>? = null): Int = get(docId)?.pages?.filter { pageIds == null || it.id in pageIds }?.count { p ->
         val name = p.ocrFile
@@ -1374,6 +1352,20 @@ class DocumentRepository(
             f.writeText((ocrFailures(docId, pageId) + 1).toString())
         } catch (t: Throwable) {
             Log.w(TAG, "No se pudo marcar OCR fallido", t)
+        }
+    }
+
+    /**
+     * Vuelve a encolar el OCR de fondo de TODAS las páginas sin texto (p. ej. al terminar la descarga de Indra). Olvida
+     * los intentos fallidos anteriores (pudieron fallar por no tener aún el lector).
+     */
+    suspend fun requeueMissingOcr() {
+        loaded.await()
+        writeMutex.withLock { docs.values.toList() }.forEach { d ->
+            d.pages.filter { it.ocrFile == null }.forEach { p ->
+                withContext(Dispatchers.IO) { runCatching { ocrFailFile(d.id, p.id).delete() } }
+                enqueueOcr(d.id, p.id)
+            }
         }
     }
 
@@ -1405,6 +1397,8 @@ class DocumentRepository(
                 val page = findPage(docId, pageId) ?: continue
                 if (page.ocrFile != null) continue
                 if (withContext(Dispatchers.IO) { ocrFailures(docId, pageId) } >= OCR_MAX_BACKGROUND_ATTEMPTS) continue
+                // Sin Indra todavía: la página se queda pendiente (se reconoce sola al terminar la descarga).
+                if (!ocr().isReady()) { onOcrUnavailable?.invoke(); continue }
                 var interrupted = false
                 val result = coroutineScope {
                     val work = async { ensureOcr(docId, pageId, lightweight = true) }
@@ -1426,7 +1420,7 @@ class DocumentRepository(
                 val now = findPage(docId, pageId)
                 if (now != null && now.ocrFile == null) {
                     if (interrupted) enqueueOcr(docId, pageId)
-                    else if (result == null) withContext(Dispatchers.IO) { markOcrFailure(docId, pageId) }
+                    else if (result == null && ocr().isReady()) withContext(Dispatchers.IO) { markOcrFailure(docId, pageId) }
                 }
             } catch (c: kotlinx.coroutines.CancellationException) {
                 throw c
@@ -1518,8 +1512,6 @@ class DocumentRepository(
         private const val MIN_RETRY_PIXELS = 4_000_000
         private const val OCR_MAX_PIXELS = 12_600_000
         private const val MIN_CONFIDENCE = 0.35f
-        /** Por debajo de esta confianza del detector clásico se pide ayuda a la IA (rescate de encuadre). */
-        private const val RESCUE_CONFIDENCE = 0.5f
         private const val BUFFER = 64 * 1024
         private const val OCR_LOW_RAM_PIXELS = 4_000_000
         private const val OCR_BACKGROUND_PIXELS = 3_000_000

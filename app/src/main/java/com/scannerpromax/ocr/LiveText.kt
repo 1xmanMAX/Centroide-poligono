@@ -32,7 +32,7 @@ object LiveText {
 
     /**
      * Palabras en orden de lectura: bloques en el orden del OCR (ya ordenados con [ReadingOrder]), líneas y palabras
-     * en el orden de ML Kit. Las líneas sin palabras (JSON antiguos) se reparten en palabras con cajas proporcionales
+     * en el orden del OCR. Las líneas sin palabras (JSON antiguos) se reparten en palabras con cajas proporcionales
      * al número de caracteres a lo largo del eje mayor de la línea.
      */
     fun words(result: OcrResult?): List<Word> {

@@ -12,14 +12,10 @@ class ModelCatalogTest {
         ModelRole.entries.forEach { assertNotNull(ModelCatalog.forRole(it)) }
     }
 
-    @Test fun cadaModeloTieneLlmYMmproj() {
-        for (m in ModelCatalog.all.filter { it.isLlm }) {
-            assertEquals(1, m.files.count { it.kind == FileKind.LLM })
-            assertEquals(1, m.files.count { it.kind == FileKind.MMPROJ })
-            assertTrue(m.totalDownloadBytes > 100_000_000)
-            assertTrue(m.tasks.isNotEmpty())
-            assertTrue(m.purpose.isNotBlank())
-        }
+    @Test fun soloModelosOnnxIndraYMaquetacion() {
+        // Sin LLM locales (PaddleOCR-VL / Qwen) ni llama.cpp: Indra (obligatorio) + maquetación (opcional).
+        assertEquals(listOf(ModelCatalog.FAST_READER, ModelCatalog.PAGE_LAYOUT), ModelCatalog.all)
+        for (m in ModelCatalog.all) assertTrue(m.files.all { it.kind == FileKind.ONNX || it.kind == FileKind.DATA })
     }
 
     @Test fun urlsDeHuggingFaceBienFormadas() {
@@ -33,7 +29,6 @@ class ModelCatalogTest {
 
     @Test fun maquetacionDePaginasEsOnnx() {
         val m = ModelCatalog.PAGE_LAYOUT
-        assertTrue(!m.isLlm)
         assertEquals(2, m.files.count { it.kind == FileKind.ONNX })
         assertEquals(setOf(ModelCatalog.LAYOUT_FILE, ModelCatalog.ORIENTATION_FILE), m.files.map { it.fileName }.toSet())
         assertTrue(m.totalDownloadBytes in 130_000_000L..140_000_000L)
@@ -41,7 +36,7 @@ class ModelCatalogTest {
 
     @Test fun onnxRuntimeNativoSeBajaConLaMaquetacion() {
         val n = ModelCatalog.PAGE_LAYOUT.nativeLibs!!
-        // Solo los modelos ONNX (Maquetación y Lector rápido) la traen, y la comparten (se copia si ya está).
+        // Los dos modelos ONNX (Maquetación e Indra) la traen, y la comparten (se copia si ya está).
         assertTrue(ModelCatalog.all.filter { it !== ModelCatalog.PAGE_LAYOUT && it !== ModelCatalog.FAST_READER }.all { it.nativeLibs == null })
         assertTrue(ModelCatalog.FAST_READER.nativeLibs === n)
         assertEquals(
@@ -73,32 +68,10 @@ class ModelCatalogTest {
 
     @Test fun lectorRapidoIndraSoloLatin() {
         val m = ModelCatalog.FAST_READER
-        assertTrue(!m.isLlm)
         assertEquals(com.scannerpromax.ocr.indra.IndraOcr.FILES.toSet(), m.files.map { it.fileName }.toSet())
         // ~25 MB (sin CJK/RTL/world ni matemáticas) + ORT
         assertEquals(24_684_875L, m.downloadBytes(null))
         for (f in m.files) assertTrue(f.url, f.url.contains("/datalab-to/indra-ocr/resolve/${ModelCatalog.INDRA_REVISION}/"))
-    }
-
-    @Test fun prefijosDePaddle() {
-        val prompts = ModelCatalog.DOCUMENT_READER.tasks.map { it.prompt }
-        listOf("OCR:", "Table Recognition:", "Chart Recognition:", "Formula Recognition:", "Seal Recognition:", "Spotting:")
-            .forEach { assertTrue(it, it in prompts) }
-        assertEquals(0f, ModelCatalog.DOCUMENT_READER.defaults.temperature)
-    }
-
-    @Test fun cuantizacionSoloDelLlm() {
-        for (m in ModelCatalog.all) {
-            val q = m.onDeviceQuantization ?: continue
-            assertEquals(m.llmFile.fileName, q.sourceFileName)
-            assertTrue(q.outputFileName != q.sourceFileName)
-        }
-    }
-
-    @Test fun motoresDeReconocimiento() {
-        assertEquals(null, RecognitionEngine.BASIC.role)
-        assertEquals(ModelRole.DOCUMENT_READER, RecognitionEngine.DOCUMENT_READER.role)
-        assertEquals(ModelRole.VISUAL_ASSISTANT, RecognitionEngine.VISUAL_ASSISTANT.role)
     }
 
     @Test fun hilosSegunNucleosGrandes() {

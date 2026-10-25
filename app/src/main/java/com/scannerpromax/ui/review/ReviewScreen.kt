@@ -169,7 +169,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.scannerpromax.data.VersionedFile
 import com.scannerpromax.ai.AiRecognitionQueue
-import com.scannerpromax.ai.RecognitionEngine
 
 /** Ámbito de proceso para borrados diferidos (Deshacer): el borrado se completa aunque se salga de la pantalla. */
 private val reviewAppScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -432,12 +431,13 @@ fun ReviewScreen(
     /** Páginas a las que se aplica la hoja de filtro: en modo selección solo las marcadas; null = todas. */
     var filterTargets by remember { mutableStateOf<List<String>?>(null) }
 
-    // ---- Lectura con IA (antes en "Texto reconocido"): se encola en segundo plano (con notificación cancelable) para
-    // todas las páginas o las seleccionadas; el progreso se ve bajo la cabecera con "Cancelar".
+    // ---- "Volver a reconocer" (Indra + maquetación si está): se encola en segundo plano (con notificación cancelable)
+    // para todas las páginas o las seleccionadas; el progreso se ve bajo la cabecera con "Cancelar".
     val aiStatusMap by container.aiQueue.status.collectAsState()
     val aiDocStatuses = aiStatusMap.filterKeys { it.startsWith("$docId/") }
-    val engine by remember { container.settings.settings }.collectAsState(initial = null)
-    val aiEngineOn = engine?.recognitionEngine?.let { it != RecognitionEngine.BASIC } == true
+    // Progreso discreto de la descarga de Indra mientras haya páginas de este documento sin reconocer.
+    val modelStates by container.models.states.collectAsState()
+    val indraLabel = if (order.any { it.ocrFile == null }) indraDownloadLabel(modelStates[com.scannerpromax.ai.ModelCatalog.FAST_READER.id]) else null
 
     fun readWithAi(targets: List<Page>) {
         if (targets.isEmpty()) return
@@ -452,7 +452,7 @@ fun ReviewScreen(
                 }
                 queued++
             }
-            if (queued > 0) toast(if (queued == 1) "La página se leerá con IA en segundo plano" else "$queued páginas se leerán con IA en segundo plano")
+            if (queued > 0) toast(if (queued == 1) "La página se volverá a reconocer en segundo plano" else "$queued páginas se volverán a reconocer en segundo plano")
         }
     }
 
@@ -474,23 +474,23 @@ fun ReviewScreen(
             MoreMenuItem("Filtro para todas las páginas", AppIcons.Wand, enabled = order.isNotEmpty()) { showApplyAll = true },
             MoreMenuItem("Unir con otro documento…", AppIcons.Duplicate, enabled = d != null) { showMerge = true },
         ),
-    ) + if (aiEngineOn || aiDocStatuses.isNotEmpty()) listOf(
+    ) + listOf(
         listOf(
-            MoreMenuItem("Volver a leer con IA", AppIcons.Sparkles, enabled = order.isNotEmpty() && aiDocStatuses.isEmpty()) {
+            MoreMenuItem("Volver a reconocer", AppIcons.Sparkles, enabled = order.isNotEmpty() && aiDocStatuses.isEmpty()) {
                 readWithAi(order.toList())
             },
         ),
-    ) else emptyList()
-    // ••• del modo selección: solo lo que no está ya en la barra inferior (leer con IA las páginas marcadas).
-    val selectionMenuGroups = if (aiEngineOn || aiDocStatuses.isNotEmpty()) listOf(
+    )
+    // ••• del modo selección: solo lo que no está ya en la barra inferior (volver a reconocer las páginas marcadas).
+    val selectionMenuGroups = listOf(
         listOf(
             MoreMenuItem(
-                if (selectedIds.size > 1) "Volver a leer con IA (${selectedIds.size})" else "Volver a leer con IA",
+                if (selectedIds.size > 1) "Volver a reconocer (${selectedIds.size})" else "Volver a reconocer",
                 AppIcons.Sparkles,
                 enabled = selectedIds.isNotEmpty() && aiDocStatuses.isEmpty(),
             ) { readWithAi(selectedPages()); exitSelection() },
         ),
-    ) else emptyList()
+    )
 
     ReviewContent(
         title = d?.title,
@@ -539,7 +539,7 @@ fun ReviewScreen(
         },
         docMenuGroups = docMenuGroups,
         selectionMenuGroups = selectionMenuGroups,
-        aiStatus = aiProgressLabel(aiDocStatuses.values),
+        aiStatus = aiProgressLabel(aiDocStatuses.values) ?: indraLabel,
         onCancelAi = { cancelAi() },
         onBack = onBack,
         pageThumbnail = { page, number, modifier -> PageThumbnail(container, docId, page, number, modifier) },
@@ -672,19 +672,31 @@ internal fun reviewSubtitle(pages: List<Page>, mode: ScanMode): String =
     listOf(pagesLabel(pages.size), mode.label).joinToString(" · ")
 
 /**
- * Progreso de la lectura con IA de las páginas del documento ([statuses] = estados de la cola de ESTE documento):
- * "Leyendo con IA… 40 % · 3 en cola", "Esperando conexión…", "2 páginas en cola…"; null = nada en cola.
+ * Progreso del reconocimiento de las páginas del documento ([statuses] = estados de la cola de ESTE documento):
+ * "Reconociendo… 40 % · 3 en cola", "Esperando al lector de texto…", "2 páginas en cola…"; null = nada en cola.
  */
 internal fun aiProgressLabel(statuses: Collection<AiRecognitionQueue.PageStatus>): String? {
     if (statuses.isEmpty()) return null
     val n = statuses.size
     val running = statuses.filterIsInstance<AiRecognitionQueue.PageStatus.Running>().firstOrNull()
     return when {
-        running != null -> "Leyendo con IA… ${running.percent} %" + if (n > 1) " · $n en cola" else ""
-        statuses.all { it == AiRecognitionQueue.PageStatus.WaitingNetwork } -> "Esperando conexión para leer con IA"
-        n == 1 -> "1 página en cola para leer con IA"
-        else -> "$n páginas en cola para leer con IA"
+        running != null -> "Reconociendo… ${running.percent} %" + if (n > 1) " · $n en cola" else ""
+        statuses.all { it == AiRecognitionQueue.PageStatus.WaitingOcr } -> "Esperando al lector de texto (se está descargando)"
+        n == 1 -> "1 página en cola para reconocer"
+        else -> "$n páginas en cola para reconocer"
     }
+}
+
+/**
+ * Aviso discreto de la descarga de Indra (único OCR) mientras el documento tiene páginas sin reconocer:
+ * "Descargando el lector de texto… 40 %", "Lector de texto: esperando Wi-Fi"; null si ya está o no hay nada que decir.
+ */
+internal fun indraDownloadLabel(state: com.scannerpromax.ai.ModelState?): String? = when (state) {
+    is com.scannerpromax.ai.ModelState.Downloading -> "Descargando el lector de texto… ${(state.fraction * 100).toInt()} %"
+    is com.scannerpromax.ai.ModelState.Verifying -> "Preparando el lector de texto…"
+    is com.scannerpromax.ai.ModelState.Queued -> if (state.waitingForNetwork) "Lector de texto: esperando conexión (o Wi-Fi) para descargarse" else "Lector de texto en cola para descargarse"
+    is com.scannerpromax.ai.ModelState.Failed -> "No se pudo descargar el lector de texto: ${state.message}"
+    else -> null
 }
 
 /** Guarda la selección de páginas (ids) en el estado guardable. */

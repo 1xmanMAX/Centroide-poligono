@@ -17,27 +17,9 @@ android {
         versionName = "1.0.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
-        // Solo español (textos de la app) e inglés: quita cientos de traducciones de AndroidX/Material/ML Kit
+        // Solo español (textos de la app) e inglés: quita cientos de traducciones de AndroidX/Material
         // (APK y resources.arsc más pequeños = menos memoria y arranque algo más rápido).
         resourceConfigurations += listOf("es", "en")
-
-        // Motor de IA local (llama.cpp + mtmd) por JNI: app/src/main/cpp.
-        externalNativeBuild {
-            cmake {
-                arguments += listOf("-DANDROID_STL=c++_shared", "-DCMAKE_BUILD_TYPE=Release")
-                cppFlags += listOf("-O3")
-                // Mismas ABIs que los splits (sin x86 de 32 bits).
-                abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
-            }
-        }
-    }
-
-    ndkVersion = "27.3.13750724"
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.31.6"
-        }
     }
 
     // APKs por ABI: cada celular descarga solo las librerías nativas que necesita (APK más liviano).
@@ -80,12 +62,12 @@ android {
         // Librerías nativas comprimidas: APK mucho más liviano para descargar/compartir.
         jniLibs {
             useLegacyPackaging = true
-            // OpenCV trae su propio libc++_shared.so; el del NDK 27 (llama.cpp) es más nuevo y compatible hacia atrás.
+            // Por si dos dependencias traen libc++_shared.so (OpenCV la incluye): se queda con una.
             pickFirsts += setOf("**/libc++_shared.so")
             // Sin x86 de 32 bits (como los splits): ONNX Runtime y OpenCV lo traen y engordaría el APK universal.
             excludes += setOf("lib/x86/**")
             // ONNX Runtime nativo (libonnxruntime.so: 12,9 MB comprimido en arm64) FUERA del APK: se descarga con
-            // "Maquetación de páginas" (ai/ModelCatalog.ORT_NATIVE, misma versión) y se precarga con System.load
+            // el lector Indra / la "Maquetación de páginas" (ai/ModelCatalog.ORT_NATIVE, misma versión) y se precarga con System.load
             // (ai/parts/OrtNative). El puente JNI libonnxruntime4j_jni.so (~36 KB) SE QUEDA: en Android ORT lo carga
             // con System.loadLibrary, que solo busca en las librerías del APK (ignora onnxruntime.native.path).
             excludes += setOf("lib/*/libonnxruntime.so")
@@ -136,9 +118,6 @@ dependencies {
     // Visión por computadora (detección de bordes, perspectiva, mejora de imagen)
     implementation("org.opencv:opencv:4.10.0")
 
-    // OCR en el dispositivo (sin internet)
-    implementation("com.google.mlkit:text-recognition:16.0.1")
-
     // PDF (capa de texto invisible para PDF con búsqueda + compresión)
     implementation("com.tom-roush:pdfbox-android:2.0.27.0")
 
@@ -146,7 +125,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
-    // Descarga de modelos de IA en segundo plano (servicio en primer plano + notificación)
+    // Descarga del lector Indra / la maquetación en segundo plano (servicio en primer plano + notificación)
     implementation("androidx.work:work-runtime-ktx:2.10.0")
 
     // IA en la nube (opcional, con la clave del usuario): SDK oficial de Anthropic para Java (Claude Haiku 5.5) y
@@ -155,8 +134,8 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
 
-    // Maquetación de páginas (PP-DocLayoutV3, descarga opcional): OpenCV 4.10 no carga el modelo (Range/GridSample) y
-    // OpenCV 5 da otras detecciones (banco recon2_app) → ONNX Runtime. Su libonnxruntime.so NO va en el APK (ver
+    // OCR Indra (único OCR de la app) y maquetación de páginas (PP-DocLayoutV3, opcional) con ONNX Runtime (OpenCV 4.10
+    // no carga PP-DocLayoutV3 y OpenCV 5 da otras detecciones, banco recon2_app). Su libonnxruntime.so NO va en el APK (ver
     // packaging.jniLibs.excludes): se baja con el modelo. Si cambias la versión, cambia ModelCatalog.ORT_VERSION y
     // los tamaños/sha256 de ModelCatalog.ORT_NATIVE (ModelCatalogTest compara las versiones).
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.31.0")
@@ -195,8 +174,6 @@ tasks.matching { it.name.startsWith("process") && it.name.endsWith("UnitTestJava
 tasks.withType<Test>().configureEach {
     listOf(
         "reconOut" to "recon.out", "reconImages" to "recon.images",
-        // Banco recon2 en la app (Recon2AppBenchTest): salida, páginas, puerto de llama-server, etapas.
-        "r2appOut" to "r2app.out", "r2appOnly" to "r2app.only", "r2appPort" to "r2app.port", "r2appStage" to "r2app.stage",
         // ZipEntryFetcherTest contra el AAR real de Maven Central (red): -PortReal=DIR
         "ortReal" to "ort.real",
         // Capturas del rediseño (src/test/.../screenshots): carpeta de salida de los PNG.

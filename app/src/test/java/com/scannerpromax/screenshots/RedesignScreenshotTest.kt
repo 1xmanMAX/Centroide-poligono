@@ -27,7 +27,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.unit.dp
-import com.scannerpromax.ai.RecognitionEngine
 import com.scannerpromax.data.AppSettings
 import com.scannerpromax.domain.Document
 import com.scannerpromax.domain.ExportQuality
@@ -268,7 +267,6 @@ class RedesignScreenshotTest {
             autoRemoveLines = true,
             pdfPageSize = PageSize.A4,
             exportQuality = ExportQuality.HIGH,
-            recognitionEngine = RecognitionEngine.NUBE_CLAUDE_HAIKU,
         )
 
         val fakeAbout = AboutInfo(

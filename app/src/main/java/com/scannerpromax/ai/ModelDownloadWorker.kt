@@ -19,7 +19,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.coroutineScope
 
 /**
- * Descarga (y opcionalmente cuantiza) un modelo en segundo plano, como servicio en primer plano de tipo dataSync
+ * Descarga un modelo en segundo plano, como servicio en primer plano de tipo dataSync
  * con notificación de progreso. Sobrevive a salir de la pantalla; si el sistema mata el proceso, WorkManager lo
  * reintenta y la descarga se reanuda desde el `.part` (HTTP Range).
  */
@@ -28,7 +28,6 @@ class ModelDownloadWorker(context: Context, params: WorkerParameters) : Coroutin
     override suspend fun doWork(): Result {
         val id = inputData.getString(KEY_MODEL_ID) ?: return Result.failure()
         val model = ModelCatalog.byId(id) ?: return Result.failure(workDataOf(KEY_ERROR to "Modelo desconocido: $id"))
-        val quantize = inputData.getBoolean(KEY_QUANTIZE, false)
         val manager = (applicationContext as ScannerApp).container.models
         ensureChannel()
         runCatching { setForeground(foregroundInfo(model, "Preparando…", 0, 0)) }
@@ -45,7 +44,7 @@ class ModelDownloadWorker(context: Context, params: WorkerParameters) : Coroutin
                     }
                 }
                 try {
-                    manager.performDownload(model, quantize, isCancelled = { isStopped }) { d, t, phase ->
+                    manager.performDownload(model, isCancelled = { isStopped }) { d, t, phase ->
                         progress.value = Triple(d, t, phase)
                     }
                 } finally {
@@ -105,8 +104,8 @@ class ModelDownloadWorker(context: Context, params: WorkerParameters) : Coroutin
         val nm = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (nm.getNotificationChannel(CHANNEL_ID) == null) {
             nm.createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "Descarga de modelos IA", NotificationManager.IMPORTANCE_LOW).apply {
-                    description = "Progreso de la descarga de los modelos de IA"
+                NotificationChannel(CHANNEL_ID, "Descargas del lector de texto", NotificationManager.IMPORTANCE_LOW).apply {
+                    description = "Progreso de la descarga del lector de texto Indra y de la maquetación"
                     setShowBadge(false)
                 },
             )
@@ -116,7 +115,6 @@ class ModelDownloadWorker(context: Context, params: WorkerParameters) : Coroutin
     companion object {
         private const val TAG = "ModelDownloadWorker"
         const val KEY_MODEL_ID = "model_id"
-        const val KEY_QUANTIZE = "quantize"
         const val KEY_ERROR = "error"
         const val CHANNEL_ID = "model_downloads"
         private const val NOTIFICATION_BASE = 0x4D00

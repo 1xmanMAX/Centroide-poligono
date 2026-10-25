@@ -14,7 +14,7 @@ import java.util.Locale
 /**
  * Registro de cierres inesperados: guarda la traza del error en disco y, en el siguiente arranque, la app la
  * muestra para que el usuario pueda copiarla y enviarla. En Android 11+ también recupera los cierres nativos
- * (OpenCV/ML Kit) y por falta de memoria, que no pasan por el manejador de Java.
+ * (OpenCV/ONNX Runtime) y por falta de memoria, que no pasan por el manejador de Java.
  */
 object CrashReporter {
     private const val DIR = "crash"

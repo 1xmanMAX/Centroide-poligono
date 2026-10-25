@@ -134,7 +134,7 @@ object ImageEnhancer {
     }
 
     /**
-     * Ajusta la clasificación clásica de AUTO con el tipo de documento que dio la IA (Qwen: fiable en recibos,
+     * Ajusta la clasificación clásica de AUTO con el tipo de documento que dio la IA (antigua clasificación local, ya eliminada: fiable en recibos,
      * pizarras y pantallas según el banco; AUTO clásico solo reconocía el 6 % de los recibos). [hint] = clase de
      * Qwen ("receipt", "whiteboard", "screen"); otras clases no cambian nada. La pizarra oscura (tiza) se respeta.
      */

@@ -46,9 +46,6 @@ object PageFiles {
 
     const val LAYOUT_SUFFIX = ".layout.json"
 
-    /** Tipo de documento clasificado por la IA (no depende de las ediciones): `ocr/{id}.aiclass`. */
-    fun aiClassName(pageId: String) = "$OCR_DIR/$pageId.aiclass"
-
     /**
      * ¿La miniatura [thumbName] corresponde al procesado de [edits]? Una miniatura de otra versión (otras ediciones)
      * no se muestra nunca: se regenera desde el procesado actual.
