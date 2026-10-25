@@ -16,15 +16,12 @@ class ModelStorageTest {
 
     private val model = AiModel(
         id = "prueba", name = "Prueba", technicalName = "t", license = "Apache 2.0", purpose = "p", description = "d",
-        role = ModelRole.DOCUMENT_READER,
+        role = ModelRole.FAST_READER,
         files = listOf(
-            ModelFile(FileKind.LLM, "llm.gguf", ModelCatalog.hf("a/b", "llm.gguf"), 1000),
-            ModelFile(FileKind.MMPROJ, "mm.gguf", ModelCatalog.hf("a/b", "mm.gguf"), 500),
+            ModelFile(FileKind.ONNX, "llm.gguf", ModelCatalog.hf("a/b", "llm.gguf"), 1000),
+            ModelFile(FileKind.DATA, "mm.gguf", ModelCatalog.hf("a/b", "mm.gguf"), 500),
         ),
         recommendedRamMb = 1, minRamMb = 1,
-        onDeviceQuantization = OnDeviceQuantization("llm.gguf", "llm-q8.gguf", QuantType.Q8_0),
-        defaults = ModelCatalog.DOCUMENT_READER.defaults,
-        tasks = emptyList(),
     )
 
     @Before fun setUp() {
@@ -54,27 +51,13 @@ class ModelStorageTest {
         write("mm.gguf", 500)
         assertTrue(storage.isReady(model))
         assertEquals(0, storage.remainingBytes(model))
-        val (llm, mm) = storage.resolvePaths(model)!!
-        assertEquals("llm.gguf", llm.name)
-        assertEquals("mm.gguf", mm!!.name)
-    }
-
-    @Test fun cuantizadoSustituyeAlOriginal() {
-        write("llm.gguf", 1000)
-        write("mm.gguf", 500)
-        write("llm-q8.gguf.tmp", 600)
-        storage.commitQuantized(model)
-        assertFalse(File(storage.dir(model), "llm.gguf").exists())
-        assertTrue(storage.hasQuantized(model))
-        assertTrue(storage.isReady(model))
-        assertEquals("llm-q8.gguf", storage.resolvePaths(model)!!.first.name)
-        assertEquals(0, storage.remainingBytes(model))
+        assertEquals("llm.gguf", storage.readyFile(model, "llm.gguf")!!.name)
     }
 
     @Test fun borrar() {
         write("llm.gguf", 1000)
         assertTrue(storage.delete(model))
         assertFalse(storage.dir(model).exists())
-        assertNull(storage.resolvePaths(model))
+        assertNull(storage.readyFile(model, "llm.gguf"))
     }
 }

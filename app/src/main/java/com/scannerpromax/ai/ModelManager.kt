@@ -36,18 +36,17 @@ sealed interface ModelState {
         val fraction: Float get() = if (total > 0) (downloaded.toFloat() / total).coerceIn(0f, 1f) else 0f
     }
     data class Verifying(val fileName: String) : ModelState
-    data object Quantizing : ModelState
     /** [warning]: listo en disco pero con un problema al usarlo (p. ej. ONNX Runtime no carga en este teléfono). */
-    data class Ready(val diskBytes: Long, val quantized: Boolean, val warning: String? = null) : ModelState
+    data class Ready(val diskBytes: Long, val warning: String? = null) : ModelState
     data class Failed(val message: String, val downloaded: Long, val total: Long) : ModelState
 }
 
 /**
- * Gestor de modelos descargables: estado, descarga en segundo plano (WorkManager con servicio en primer plano y
- * notificación de progreso, sobrevive a salir de la pantalla), comprobación de espacio, verificación, cuantización
- * opcional en el dispositivo y borrado. Archivos en filesDir/models/<id>/.
+ * Gestor de modelos descargables (Indra y la maquetación): estado, descarga en segundo plano (WorkManager con servicio
+ * en primer plano y notificación de progreso, sobrevive a salir de la pantalla), comprobación de espacio, verificación
+ * y borrado. Archivos en filesDir/models/<id>/.
  */
-class ModelManager(context: Context, private val engineProvider: () -> LlmEngine) {
+class ModelManager(context: Context) {
     private val appContext = context.applicationContext
     val storage = ModelStorage(File(appContext.filesDir, "models"))
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -88,22 +87,6 @@ class ModelManager(context: Context, private val engineProvider: () -> LlmEngine
 
     fun isReady(model: AiModel): Boolean = storage.isReady(model)
 
-    /** Rutas (LLM, mmproj) para cargar el modelo, o null si no está descargado. */
-    fun resolvePaths(model: AiModel): Pair<File, File?>? = storage.resolvePaths(model)
-
-    /** Configuración de carga por defecto del catálogo para un modelo descargado. */
-    fun loadConfig(model: AiModel, lowRam: Boolean = totalRamMb() < 3072): LlmLoadConfig? {
-        val (llm, mm) = resolvePaths(model) ?: return null
-        val d = model.defaults
-        return LlmLoadConfig(
-            modelId = model.id,
-            modelPath = llm.absolutePath,
-            mmprojPath = mm?.absolutePath,
-            contextSize = if (lowRam) minOf(d.contextSize, 3072) else d.contextSize,
-            imageMaxTokens = d.maxImageTokens.let { if (lowRam && (it == 0 || it > 768)) 768 else it },
-        )
-    }
-
     /** Recalcula los estados a partir del disco, del worker en curso y de WorkManager. */
     suspend fun refresh() = withContext(Dispatchers.IO) {
         val map = ModelCatalog.all.associate { m -> m.id to computeState(m) }
@@ -128,7 +111,7 @@ class ModelManager(context: Context, private val engineProvider: () -> LlmEngine
     }
 
     private fun readyState(m: AiModel) = ModelState.Ready(
-        storage.diskUsage(m), storage.hasQuantized(m),
+        storage.diskUsage(m),
         warning = if (m.nativeLibs != null) com.scannerpromax.ai.parts.OrtNative.lastError else null,
     )
 
@@ -147,16 +130,16 @@ class ModelManager(context: Context, private val engineProvider: () -> LlmEngine
      * Encola la descarga en segundo plano. Devuelve un mensaje de error (en español) si no se puede empezar
      * (p. ej. sin espacio), o null si quedó en cola.
      */
-    fun enqueueDownload(model: AiModel, wifiOnly: Boolean, quantize: Boolean): String? {
+    fun enqueueDownload(model: AiModel, wifiOnly: Boolean): String? {
         if (storage.nativeLibs(model) == null) {
             return "Tu procesador (${storage.abi ?: "desconocido"}) no es compatible con ${model.name}"
         }
-        val need = requiredFreeBytes(model, quantize)
+        val need = requiredFreeBytes(model)
         val free = freeBytes()
         if (need > free) return "Espacio insuficiente: hacen falta ${formatBytes(need)} y hay ${formatBytes(free)} libres"
         workErrors.remove(model.id)
         val req = OneTimeWorkRequestBuilder<ModelDownloadWorker>()
-            .setInputData(workDataOf(ModelDownloadWorker.KEY_MODEL_ID to model.id, ModelDownloadWorker.KEY_QUANTIZE to quantize))
+            .setInputData(workDataOf(ModelDownloadWorker.KEY_MODEL_ID to model.id))
             .setConstraints(
                 Constraints.Builder()
                     .setRequiredNetworkType(if (wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED)
@@ -180,11 +163,9 @@ class ModelManager(context: Context, private val engineProvider: () -> LlmEngine
         scope.launch { refresh() }
     }
 
-    /** Borra el modelo del disco (y cancela su descarga). Descarga el motor si lo tenía cargado. */
+    /** Borra el modelo del disco (y cancela su descarga). El llamador libera antes el motor que lo use. */
     suspend fun delete(model: AiModel) {
         WorkManager.getInstance(appContext).cancelUniqueWork(workName(model))
-        val engine = engineProvider()
-        if (engine.loadedModelId.value == model.id) engine.unload()
         withContext(Dispatchers.IO) { storage.delete(model) }
         publishLive(model.id, null)
         workErrors.remove(model.id)
@@ -197,22 +178,20 @@ class ModelManager(context: Context, private val engineProvider: () -> LlmEngine
      */
     suspend fun performDownload(
         model: AiModel,
-        quantize: Boolean,
         isCancelled: () -> Boolean,
         onProgress: (downloaded: Long, total: Long, phase: String) -> Unit,
     ) = withContext(Dispatchers.IO) {
         try {
-            val need = requiredFreeBytes(model, quantize)
+            val need = requiredFreeBytes(model)
             val free = freeBytes()
             if (need > free) throw ModelDownloadException("Espacio insuficiente: hacen falta ${formatBytes(need)} y hay ${formatBytes(free)} libres")
             storage.dir(model).mkdirs()
             val total = storage.totalBytes(model)
-            val skipSource = model.onDeviceQuantization?.sourceFileName?.takeIf { storage.hasQuantized(model) }
             var speedT0 = System.nanoTime()
             var speedB0 = storage.downloadedBytes(model)
             var speed = 0L
             for (f in model.files) {
-                if (f.fileName == skipSource || storage.isComplete(model, f)) continue
+                if (storage.isComplete(model, f)) continue
                 val before = model.files.takeWhile { it !== f }.sumOf { it.sizeBytes.coerceAtLeast(0) }
                 try {
                     downloader.download(
@@ -251,7 +230,6 @@ class ModelManager(context: Context, private val engineProvider: () -> LlmEngine
                 }
             }
             downloadNativeLibs(model, total, isCancelled, onProgress)
-            if (quantize) quantizeIfNeeded(model, onProgress)
         } finally {
             publishLive(model.id, null)
         }
@@ -324,36 +302,12 @@ class ModelManager(context: Context, private val engineProvider: () -> LlmEngine
         }
     }
 
-    /**
-     * Cuantiza en el dispositivo el LLM del modelo (si el catálogo lo prevé y aún no está hecho). El mmproj se deja
-     * como está. Tras cuantizar se borra el original para ahorrar espacio.
-     */
-    suspend fun quantizeIfNeeded(model: AiModel, onProgress: (Long, Long, String) -> Unit = { _, _, _ -> }) {
-        val q = model.onDeviceQuantization ?: return
-        if (storage.hasQuantized(model)) return
-        val src = File(storage.dir(model), q.sourceFileName)
-        if (!src.isFile) throw ModelDownloadException("Falta ${q.sourceFileName} para cuantizar")
-        val tmp = storage.quantizedTempFile(model)!!
-        publishLive(model.id, ModelState.Quantizing)
-        onProgress(0, 0, "Optimizando (${q.ftype.label})")
-        try {
-            engineProvider().quantize(src, tmp, q.ftype)
-            storage.commitQuantized(model)
-        } catch (e: LlmException) {
-            tmp.delete()
-            throw ModelDownloadException("No se pudo optimizar el modelo: ${e.message}", e)
-        }
-    }
-
     // --------------------------------------------------------------------------------------- utilidades
 
-    fun requiredFreeBytes(model: AiModel, quantize: Boolean): Long {
+    fun requiredFreeBytes(model: AiModel): Long {
         val remaining = storage.remainingBytes(model)
-        val quant = if (quantize && model.onDeviceQuantization != null && !storage.hasQuantized(model)) {
-            (model.llmFile.sizeBytes * 0.6).toLong()  // Q8_0 ≈ 53 % de F16 (+ margen)
-        } else 0L
         // Librerías nativas: se guardan comprimidas (.zpart) y además descomprimidas.
-        return remaining + quant + storage.nativeUnpackedRemaining(model) + SAFETY_MARGIN_BYTES
+        return remaining + storage.nativeUnpackedRemaining(model) + SAFETY_MARGIN_BYTES
     }
 
     fun freeBytes(): Long = runCatching {
@@ -374,7 +328,7 @@ class ModelManager(context: Context, private val engineProvider: () -> LlmEngine
         private const val TAG = "ModelManager"
         const val WORK_TAG = "model-download"
         const val TAG_PREFIX = "model-id:"
-        const val SAFETY_MARGIN_BYTES = 150L * 1024 * 1024
+        const val SAFETY_MARGIN_BYTES = 50L * 1024 * 1024
 
         fun formatBytes(b: Long): String {
             val mb = b / (1024.0 * 1024.0)

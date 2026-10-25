@@ -1,6 +1,7 @@
 package com.scannerpromax.ui.review
 
 import com.scannerpromax.ai.AiRecognitionQueue.PageStatus
+import com.scannerpromax.ai.ModelState
 import com.scannerpromax.domain.Page
 import com.scannerpromax.domain.ScanMode
 import org.junit.Assert.assertEquals
@@ -19,16 +20,23 @@ class ReviewLabelsTest {
     }
 
     @Test fun progresoIaLeyendo() {
-        assertEquals("Leyendo con IA… 40 %", aiProgressLabel(listOf(PageStatus.Running(0.4f, "Leyendo texto"))))
+        assertEquals("Reconociendo… 40 %", aiProgressLabel(listOf(PageStatus.Running(0.4f, "Leyendo texto"))))
         assertEquals(
-            "Leyendo con IA… 40 % · 3 en cola",
+            "Reconociendo… 40 % · 3 en cola",
             aiProgressLabel(listOf(PageStatus.Queued, PageStatus.Running(0.4f, "x"), PageStatus.Queued)),
         )
     }
 
-    @Test fun progresoIaEnColaYSinRed() {
-        assertEquals("1 página en cola para leer con IA", aiProgressLabel(listOf(PageStatus.Queued)))
-        assertEquals("2 páginas en cola para leer con IA", aiProgressLabel(listOf(PageStatus.Queued, PageStatus.WaitingNetwork)))
-        assertEquals("Esperando conexión para leer con IA", aiProgressLabel(listOf(PageStatus.WaitingNetwork, PageStatus.WaitingNetwork)))
+    @Test fun progresoEnColaYEsperandoAIndra() {
+        assertEquals("1 página en cola para reconocer", aiProgressLabel(listOf(PageStatus.Queued)))
+        assertEquals("2 páginas en cola para reconocer", aiProgressLabel(listOf(PageStatus.Queued, PageStatus.WaitingOcr)))
+        assertEquals("Esperando al lector de texto (se está descargando)", aiProgressLabel(listOf(PageStatus.WaitingOcr, PageStatus.WaitingOcr)))
+    }
+
+    @Test fun descargaDeIndraDiscreta() {
+        assertNull(indraDownloadLabel(null))
+        assertNull(indraDownloadLabel(ModelState.Ready(1L)))
+        assertEquals("Descargando el lector de texto… 50 %", indraDownloadLabel(ModelState.Downloading(50, 100, 0, "rec.onnx")))
+        assertEquals("Lector de texto: esperando conexión (o Wi-Fi) para descargarse", indraDownloadLabel(ModelState.Queued(0, 100, true)))
     }
 }

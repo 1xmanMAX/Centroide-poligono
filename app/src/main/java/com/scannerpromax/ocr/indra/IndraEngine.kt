@@ -12,9 +12,9 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * "Lector rápido Indra" en la app: carga perezosa de [IndraOcr] desde la descarga ([ModelCatalog.FAST_READER]) y
- * conversión Bitmap → gris → [OcrResult]. Si el modelo no está o algo falla devuelve null y el llamador
- * ([com.scannerpromax.ocr.OcrEngine]) sigue con ML Kit.
+ Indra, el ÚNICO OCR de la app: carga perezosa de [IndraOcr] desde la descarga ([ModelCatalog.FAST_READER], que se
+ * baja sola: [IndraProvisioner]) y conversión Bitmap → gris → [OcrResult]. Si el modelo no está o algo falla devuelve
+ * null y el llamador ([com.scannerpromax.ocr.OcrEngine]) deja la página pendiente.
  */
 class IndraEngine(private val modelsProvider: () -> ModelManager, private val threads: Int) : Closeable {
 
@@ -62,9 +62,16 @@ class IndraEngine(private val modelsProvider: () -> ModelManager, private val th
                 "inclinación ${"%.1f".format(page.skew)}, ${System.currentTimeMillis() - t0} ms ${page.timings}")
             IndraResult.toOcrResult(page, bitmap.width, bitmap.height, scale)
         } catch (t: Throwable) {
-            Log.w(TAG, "Indra falló; se usa ML Kit", t)
+            Log.w(TAG, "Indra falló", t)
             null
         }
+    }
+
+    /** Tras borrar/volver a descargar el modelo: olvida un fallo de carga anterior y libera lo cargado. */
+    @Synchronized
+    fun reset() {
+        failed = false
+        close()
     }
 
     /** Libera modelos y LM (~60 MB); se recargan solos al siguiente OCR. Espera a que termine uno en curso. */

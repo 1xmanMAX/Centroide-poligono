@@ -120,9 +120,5 @@
             android:shell="true"
             tools:targetApi="29" />
 
-        <!-- Descarga el modelo OCR junto con la app (no en primer uso) -->
-        <meta-data
-            android:name="com.google.mlkit.vision.DEPENDENCIES"
-            android:value="ocr" />
     </application>
 </manifest>

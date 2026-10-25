@@ -84,6 +84,8 @@ class ScannerApp : Application(), ImageLoaderFactory {
                 }
             }
             runCatching { settingsThread.join(STARTUP_DATA_TIMEOUT_MS) }
+            // Indra (único OCR): si falta, se descarga ya en segundo plano (respeta "solo Wi-Fi").
+            runCatching { c.indraProvisioner.start() }.onFailure { Log.w(TAG, "Indra", it) }
         } catch (t: Throwable) {
             Log.e(TAG, "Error en la inicialización de arranque", t)
         } finally {
@@ -136,8 +138,8 @@ class ScannerApp : Application(), ImageLoaderFactory {
             Thread({ runCatching { SuperResolution.release() } }, "trim-sr").start()
         }
         if (level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL || level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND) {
-            // Lector rápido Indra (~60 MB entre modelos ONNX y tablas del LM): se recarga en <1 s al siguiente OCR.
-            container.ocrIfCreated()?.fastReader?.let { r -> Thread({ runCatching { r.close() } }, "trim-indra").start() }
+            // Indra (~60 MB entre modelos ONNX y tablas del LM): se recarga en <1 s al siguiente OCR.
+            container.ocrIfCreated()?.let { r -> Thread({ runCatching { r.close() } }, "trim-indra").start() }
         }
     }
 

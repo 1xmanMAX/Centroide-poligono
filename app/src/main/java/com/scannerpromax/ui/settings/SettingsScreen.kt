@@ -36,7 +36,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.scannerpromax.ai.RecognitionEngine
 import com.scannerpromax.data.AppSettings
 import com.scannerpromax.di.AppContainer
 import com.scannerpromax.domain.ExportQuality
@@ -196,7 +195,7 @@ internal fun SettingsContent(
                             "Reconocimiento",
                             icon = AppIcons.Text,
                             iconTint = SystemBlue,
-                            value = engineShortLabel(settings.recognitionEngine),
+                            value = "Indra",
                             onClick = onOpenAiModels,
                         )
                     }
@@ -205,7 +204,7 @@ internal fun SettingsContent(
                             "IA en la nube",
                             icon = AppIcons.Cloud,
                             iconTint = SystemTeal,
-                            value = if (settings.recognitionEngine.cloud != null) "Activa" else "Opcional",
+                            value = "Opcional",
                             onClick = onOpenCloudAi,
                         )
                     }
@@ -461,15 +460,6 @@ private fun themeLabel(dark: Boolean?): String = when (dark) {
     null -> "Sistema"
     false -> "Claro"
     true -> "Oscuro"
-}
-
-private fun engineShortLabel(e: RecognitionEngine): String = when (e) {
-    RecognitionEngine.DOCUMENT_READER -> "Lector de documentos"
-    RecognitionEngine.VISUAL_ASSISTANT -> "Asistente visual"
-    RecognitionEngine.NUBE_DEEPSEEK -> "Nube · DeepSeek"
-    RecognitionEngine.NUBE_CLAUDE_HAIKU -> "Nube · Haiku"
-    RecognitionEngine.BASIC -> "Básico rápido"
-    else -> e.label
 }
 
 private fun aboutInfo(container: AppContainer, context: Context): AboutInfo {

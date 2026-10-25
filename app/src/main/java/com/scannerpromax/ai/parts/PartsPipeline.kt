@@ -1,6 +1,5 @@
 package com.scannerpromax.ai.parts
 
-import com.scannerpromax.ai.parse.IaParse
 import com.scannerpromax.domain.BlockType
 import com.scannerpromax.domain.DocLayout
 import com.scannerpromax.domain.LayoutBlock
@@ -9,44 +8,24 @@ import com.scannerpromax.domain.LayoutFill
 import com.scannerpromax.domain.LayoutLine
 import com.scannerpromax.domain.TableCell
 import kotlin.math.abs
-import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * Lectores (modelo de IA) que usa la tubería por partes. Las cajas van en píxeles de la imagen analizada ([Rgb] de
- * [PartsPipeline.Input]); el lector recorta (y reduce) la imagen él mismo. null = herramienta no disponible (p. ej.
- * modo nube: solo hay líneas del OCR básico).
- */
-interface PartsReader {
-    /** "Spotting:" de la página ([crop] = null) o de un recorte. */
-    suspend fun spotting(crop: Box?, maxTokens: Int): PartsReader.Out?
-    /** "Table Recognition:" sobre una imagen compuesta por [pieces] puestas de izquierda a derecha (fondo blanco). */
-    suspend fun table(pieces: List<Piece>): Out?
-    suspend fun chart(crop: Box): Out?
-    suspend fun formula(crop: Box): Out?
-
-    /** Salida cruda del modelo y si hizo bucle (o agotó los tokens). */
-    class Out(val text: String, val looped: Boolean)
-
-    /** Trozo [src] de la imagen analizada colocado en x = [dstX] (px de esa misma escala) de la imagen compuesta. */
-    class Piece(val src: Box, val dstX: Float)
-}
-
-/**
- * Tubería de reconstrucción "POR PARTES" (puerto fiel de tools/recon2_new.py del banco recon2; en el banco: bloques
- * DocLayNet recall/precisión 0,34/0,35 → 0,72/0,72, página pintada como imagen 24 % → 10 %, formularios con rayas):
+ * Tubería de reconstrucción "POR PARTES" (puerto de tools/recon2_new.py del banco recon2) sobre las LÍNEAS DE INDRA
+ * (el único OCR de la app; antes las ponía el Spotting de PaddleOCR-VL):
  *
- *  regiones PP-DocLayoutV3 (ya detectadas) → líneas con posición: Spotting de la página o, si hace bucle, es manuscrito
- *  o hay pocas regiones, Spotting POR REGIÓN + zonas de tinta no cubiertas → líneas a regiones (> 50 %) → libres
- *  agrupadas → herramienta por región (tabla OTSL con bandas de ≤ 8 columnas repitiendo la primera, gráfico, fórmula;
- *  "fórmula" con frases → texto) → tinta residual = FIGURE role=dibujo (recorte solo-tinta) → rayas y fondos por
- *  morfología → estilo por bloque (alineación, tamaño, negrita, color) → orden de lectura.
+ *  regiones PP-DocLayoutV3 (si está la "Maquetación de páginas"; si no, lista vacía) + líneas de Indra con posición →
+ *  líneas a regiones (> 50 %) → libres agrupadas → bloque por región (tabla: rejilla geométrica de las líneas si hay
+ *  columnas claras, si no la región con sus líneas; gráfico/fórmula/figura: la región como imagen con el texto de
+ *  Indra; "fórmula" con frases → texto) → tinta residual = FIGURE role=dibujo (recorte solo-tinta) → rayas y fondos por
+ *  morfología → estilo por bloque (alineación, tamaño, negrita, color) → orden de lectura. La reconstrucción fina
+ *  (celdas difíciles, fórmulas, gráficos) la hace la IA en la nube a partir de esta maquetación.
  *
- * Lógica pura (JVM): el modelo va detrás de [PartsReader]. Coordenadas de salida = px de la imagen analizada.
+ * Lógica pura (JVM). Coordenadas de salida = px de la imagen analizada.
  */
-class PartsPipeline(private val reader: PartsReader) {
+class PartsPipeline {
 
     /** Línea de texto con su cuadrilátero (x0,y0,…,x3,y3) y caja, en px de la imagen analizada. */
     class Item(val text: String, val quad: FloatArray, val bx: Box)
@@ -59,69 +38,36 @@ class PartsPipeline(private val reader: PartsReader) {
         val docType: String? = null,
         val engine: String = "",
         val rotation: Int = 0,
-        /** Líneas ya conocidas (OCR básico en modo nube): sin Spotting; null = leer con [PartsReader.spotting]. */
-        val presetLines: List<Item>? = null,
+        /** Líneas del OCR (Indra) en px de [img]. */
+        val lines: List<Item> = emptyList(),
     )
 
     class Meta(
         val mode: String,
-        val pageLooped: Boolean,
         val regions: Int,
         val freeBlocks: Int,
         val rules: Int,
         val fills: Int,
         val drawings: Int,
-        val calls: Int,
+        val tables: Int,
     )
 
     class Output(val layout: DocLayout, val items: List<Item>, val meta: Meta)
-
-    private var calls = 0
 
     private class Reg(val r: PpLayout.Region, var type: BlockType, var label: String) {
         val lines = ArrayList<Item>()
         val box get() = r.box
     }
 
-    suspend fun run(input: Input, progress: (Float, String) -> Unit = { _, _ -> }): Output {
-        calls = 0
+    fun run(input: Input, progress: (Float, String) -> Unit = { _, _ -> }): Output {
         val img = input.img
         val w = img.w; val h = img.h
-        pageW = w; pageH = h
         val hand = input.docType == "manuscrito"
         val regs = input.regions.map { Reg(it, it.type, it.label) }
 
-        // ---- líneas
-        var mode = "pagina"
-        var pageLooped = false
-        var items: MutableList<Item>
-        if (input.presetLines != null) {
-            mode = "ocr"
-            items = input.presetLines.filter { it.text.isNotBlank() }.toMutableList()
-        } else {
-            var letters = 0
-            items = ArrayList()
-            val regional = wantsRegional(input.regions, hand)
-            if (!regional) {
-                progress(0.05f, "Leyendo texto")
-                val sp = spot(null, 3000)
-                pageLooped = sp == null || sp.second
-                items = sp?.first?.toMutableList() ?: ArrayList()
-                letters = items.sumOf { it.text.count { c -> c.isLetterOrDigit() } }
-            }
-            if (regional || pageLooped || items.isEmpty() || letters < 10) {
-                mode = "regiones"
-                items = ArrayList()
-                // (app) tablas altas en bandas horizontales: el Spotting de una tabla densa entera hace bucle (tabla1)
-                val zones = regs.filter { it.type in SPOT_TYPES }.flatMap { if (it.type == BlockType.TABLE) tableBandsZones(it.box, h) else listOf(it.box) }.toMutableList()
-                zones += PageInk.uncoveredZones(img, regs.map { it.box })
-                zones.forEachIndexed { i, z ->
-                    progress(0.05f + 0.55f * i / zones.size.coerceAtLeast(1), "Leyendo texto por partes")
-                    items += spotCrop(z)
-                }
-            }
-        }
-        items = dedupeItems(items.filter { it.bx[2] - it.bx[0] >= 2f && it.bx[3] - it.bx[1] >= 2f }).toMutableList()
+        // ---- líneas (Indra)
+        progress(0.05f, "Colocando el texto")
+        val items = dedupeItems(input.lines.filter { it.text.isNotBlank() && it.bx[2] - it.bx[0] >= 2f && it.bx[3] - it.bx[1] >= 2f })
 
         // ---- líneas a regiones
         val free = ArrayList<Item>()
@@ -135,13 +81,6 @@ class PartsPipeline(private val reader: PartsReader) {
             val words = r.lines.sumOf { it.text.split(Regex("\\s+")).count { wd -> wd.count { c -> c.isLetter() } >= 4 } }
             if (words >= 3 && r.lines.size >= 2) { r.type = BlockType.TEXT; r.label = "text" }
         }
-        // regiones de texto sin líneas (Spotting de página): Spotting del recorte
-        if (mode == "pagina") for (r in regs) {
-            if (r.type !in TEXT_TYPES || r.lines.isNotEmpty()) continue
-            val its = spotCrop(r.box).filter { n -> items.none { o -> IaParse.iou(n.bx, o.bx) > 0.3f } }
-            items += its
-            r.lines += its
-        }
         // líneas sueltas: fuera las de 1–2 caracteres mucho más altas que el texto (dibujos leídos como letras)
         val hsAll = items.map { it.bx[3] - it.bx[1] }.sorted().ifEmpty { listOf(1f) }
         val hmed = hsAll[hsAll.size / 2]
@@ -150,14 +89,14 @@ class PartsPipeline(private val reader: PartsReader) {
         fun drawingLetter(it: Item) = it.text.count { c -> c.isLetterOrDigit() } <= 2 &&
             ((it.bx[3] - it.bx[1]) > 2 * hmed || partOfDrawing(it.bx))
         val freeOk = free.filter { !drawingLetter(it) }
-        // (app) también dentro de regiones de texto: un trozo de dibujo que Paddle leyó como "2" (la impresora dibujada de
-        // cuaderno1: su tinta sigue mucho más allá de la caja) se queda como dibujo solo-tinta, no como un número gigante.
+        // también dentro de regiones de texto: un trozo de dibujo leído como "2" se queda como dibujo solo-tinta
         for (r in regs) if (r.type in TEXT_TYPES) r.lines.removeAll { drawingLetter(it) }
         val extra = groupFree(freeOk, w, h)
 
-        // ---- herramienta por región
-        progress(0.62f, "Leyendo tablas, gráficos y fórmulas")
+        // ---- bloque por región
+        progress(0.5f, "Tablas, gráficos y fórmulas")
         val blocks = ArrayList<B>()
+        var tables = 0
         for (r in regs) {
             val bx = r.box
             val lines = readingSort(r.lines) { it.bx }.map { line(it, img) }
@@ -171,28 +110,13 @@ class PartsPipeline(private val reader: PartsReader) {
                     )
                     blocks += B(styled(LayoutBlock(type = ty, box = lbox(env), text = lines.joinToString("\n") { it.text }, lines = lines, role = r.label), bx), r.r.order)
                 }
-                BlockType.TABLE -> blocks += B(table(r, lines, img), r.r.order)
-                BlockType.CHART -> {
-                    var b = LayoutBlock(type = BlockType.CHART, box = lbox(bx), lines = lines, role = r.label)
-                    val out = reader.chart(pad(bx, w, h, 4f))?.also { calls++ }
-                    if (out != null) {
-                        val ch = IaParse.parseChart(out.text)
-                        val data = ch.rows.flatMap { it.drop(1) }
-                        if (ch.header.size >= 2 && ch.rows.isNotEmpty() && ch.rows.size <= 60 && data.isNotEmpty() &&
-                            data.count { IaParse.toNumber(it) != null } >= 0.5f * data.size
-                        ) b = b.copy(chartData = listOf(ch.header) + ch.rows)
-                    }
-                    blocks += B(b, r.r.order)
+                BlockType.TABLE -> {
+                    val t = table(r, lines)
+                    if (t.cells.isNotEmpty()) tables++
+                    blocks += B(t, r.r.order)
                 }
-                BlockType.FORMULA -> {
-                    var latex: String? = null
-                    val out = reader.formula(pad(bx, w, h, 4f))?.also { calls++ }
-                    if (out != null && !out.looped) {
-                        val fm = IaParse.parseFormula(out.text)
-                        if (fm.latex.isNotBlank() && fm.latex.length <= 800) latex = fm.latex + (fm.tag?.let { " \\tag{$it}" } ?: "")
-                    }
-                    blocks += B(LayoutBlock(type = BlockType.FORMULA, box = lbox(bx), lines = lines, text = lines.joinToString(" ") { it.text }, latex = latex, role = r.label), r.r.order)
-                }
+                BlockType.CHART -> blocks += B(LayoutBlock(type = BlockType.CHART, box = lbox(bx), lines = lines, text = lines.joinToString("\n") { it.text }, role = r.label), r.r.order)
+                BlockType.FORMULA -> blocks += B(LayoutBlock(type = BlockType.FORMULA, box = lbox(bx), lines = lines, text = lines.joinToString(" ") { it.text }, role = r.label), r.r.order)
                 else -> blocks += B(LayoutBlock(type = BlockType.FIGURE, box = lbox(bx), lines = lines, text = lines.joinToString("\n") { it.text }, role = r.label), r.r.order)
             }
         }
@@ -202,7 +126,7 @@ class PartsPipeline(private val reader: PartsReader) {
         }
 
         // ---- dibujos/trazos sin texto → recortes solo-tinta
-        progress(0.9f, "Rayas, fondos y dibujos")
+        progress(0.8f, "Rayas, fondos y dibujos")
         val assigned = regs.flatMap { it.lines }.toHashSet()
         val lb = items.filter { it in assigned || it in freeOk }.map { it.bx }
         val taken = blocks.filter { it.b.type in PICTURE_TYPES || it.b.type == BlockType.TABLE }.map { box(it.b.box) }
@@ -226,110 +150,27 @@ class PartsPipeline(private val reader: PartsReader) {
             rotation = input.rotation, rules = rules.map { it.toList() }, fills = fills.map { LayoutFill(lbox(it.box), it.argb) },
         )
         progress(1f, "Listo")
-        return Output(layout, items, Meta(mode, pageLooped, regs.size, extra.size, rules.size, fills.size, drw.size, calls))
+        return Output(layout, items, Meta("ocr", regs.size, extra.size, rules.size, fills.size, drw.size, tables))
     }
 
     /** Bloque con el orden del detector (null = bloque libre / dibujo). */
     private class B(val b: LayoutBlock, val ppOrder: Int?)
 
-    // ------------------------------------------------------------------------------------------ Spotting
-
-    /** Spotting de la página o recorte → líneas en px de la imagen analizada (+ bucle). null = no disponible. */
-    private suspend fun spot(crop: IntArray?, maxTokens: Int): Pair<List<Item>, Boolean>? {
-        val out = reader.spotting(crop?.let { floatArrayOf(it[0].toFloat(), it[1].toFloat(), it[2].toFloat(), it[3].toFloat()) }, maxTokens) ?: return null
-        calls++
-        val x0 = crop?.get(0) ?: 0; val y0 = crop?.get(1) ?: 0
-        val cw = crop?.let { it[2] - it[0] } ?: pageW
-        val ch = crop?.let { it[3] - it[1] } ?: pageH
-        val parsed = IaParse.filterSpotLoops(IaParse.parseSpotting(out.text))
-        val items = parsed.mapNotNull { it0 ->
-            val q = it0.quadPx(cw, ch)?.takeIf { it.size == 4 } ?: return@mapNotNull null
-            val text = it0.text.replace('\n', ' ').trim()
-            if (text.isEmpty()) return@mapNotNull null
-            val quad = FloatArray(8) { i -> if (i % 2 == 0) q[i / 2][0] + x0 else q[i / 2][1] + y0 }
-            Item(text, quad, quadBox(quad))
-        }
-        return items to (out.looped || looped(out.text))
-    }
-
-    private var pageW = 0
-    private var pageH = 0
-
-    private suspend fun spotCrop(r: Box, padPx: Int = 6): List<Item> {
-        val x0 = max(0, (r[0] - padPx).toInt()); val y0 = max(0, (r[1] - padPx).toInt())
-        val x1 = min(pageW, (r[2] + padPx).toInt()); val y1 = min(pageH, (r[3] + padPx).toInt())
-        if (x1 - x0 < 8 || y1 - y0 < 8) return emptyList()
-        val n = min(3000, (200 + (x1 - x0).toLong() * (y1 - y0) / 400).toInt())
-        return spot(intArrayOf(x0, y0, x1, y1), n)?.first.orEmpty()
-    }
-
-    /**
-     * ¿Leer por regiones desde el principio? (evita el Spotting de página que en manuscrito/cuaderno hace bucle: 3/7
-     * fotos del usuario en el banco, ~4 min tirados): manuscrito, pocas regiones de texto o confianza media baja.
-     */
-    private fun wantsRegional(regions: List<PpLayout.Region>, hand: Boolean): Boolean {
-        if (hand) return true
-        if (regions.isEmpty()) return false  // sin maquetación: no hay regiones que leer (Spotting de página)
-        val text = regions.filter { it.type in TEXT_TYPES }
-        if (text.size < MIN_TEXT_REGIONS) return true
-        return text.map { it.score }.average() < MIN_MEAN_SCORE
-    }
-
     // ------------------------------------------------------------------------------------------ tablas
 
-    private suspend fun table(r: Reg, lines: List<LayoutLine>, img: Rgb): LayoutBlock {
-        val bx = r.box
-        var b = LayoutBlock(type = BlockType.TABLE, box = lbox(bx), lines = lines, role = r.label)
-        var cells: IaParse.OtslTable? = null
-        val out = reader.table(listOf(PartsReader.Piece(pad(bx, img.w, img.h, 4f), 0f)))?.also { calls++ }
-        val available = out != null
-        if (out != null && !out.looped && !IaParse.otslLoop(out.text)) {
-            val t = IaParse.parseOtsl(out.text)
-            if (t.nRows >= 1 && t.nCols >= 1) cells = t
-        }
-        if (cells == null && available) {
-            // columnas por huecos del Spotting (o de la tinta si la tabla casi no tiene líneas leídas)
-            cells = tableBands(bx, r.lines, PER_BAND, img) ?: tableBands(bx, r.lines, PER_BAND_RETRY, img)
-        }
-        if (cells != null) {
-            b = b.copy(
-                tableRows = cells.nRows, tableCols = cells.nCols,
-                text = cells.rows.joinToString("\n") { it.joinToString("\t") },
-                cells = cells.cells.map { TableCell(it.r, it.c, it.rowSpan, it.colSpan, it.text) },
-            )
-        } else if (available) {
-            // sin estructura: se dibuja como imagen + texto de sus líneas
-            b = b.copy(type = BlockType.FIGURE, text = lines.joinToString("\n") { it.text })
-        } else {
-            // sin lector de tablas (modo nube): tabla con sus líneas (la nube pondrá las celdas)
-            b = b.copy(text = lines.joinToString("\n") { it.text })
-        }
-        return b
-    }
-
     /**
-     * Columnas por huecos verticales de las líneas del Spotting dentro de la tabla ([separators]) y lectura por bandas
-     * de ≤ [per] columnas repitiendo la primera (clave). null si hay < 3 columnas o alguna banda hace bucle.
+     * Tabla a partir de las líneas de Indra que caen en la región: rejilla GEOMÉTRICA ([gridCells]: filas por centros,
+     * columnas por huecos verticales) si salen ≥ 2 filas y ≥ 2 columnas bien pobladas; si no, la región con sus líneas
+     * (el renderizador la dibuja como tabla sin celdas; la IA en la nube puede rehacer las celdas).
      */
-    private suspend fun tableBands(bx: Box, items: List<Item>, per: Int, img: Rgb): IaParse.OtslTable? {
-        val seps = (if (items.size >= 6) separators(bx, items) else null)?.takeIf { it.size >= 4 } ?: inkSeparators(bx, img) ?: return null
-        val ncol = seps.size - 1
-        if (ncol < 3) return null
-        val bands = bands(ncol, per)
-        if (bands.size == 1 && per != PER_BAND) return null  // el reintento solo tiene sentido si trocea más
-        val x0 = bx[0].toInt(); val y0 = bx[1].toInt(); val y1 = bx[3].toInt()
-        val parts = ArrayList<IaParse.OtslTable>()
-        for ((i, band) in bands.withIndex()) {
-            val xa = x0 + seps[band.first]; val xb = x0 + seps[band.last + 1]
-            val kw = if (i > 0) seps[1] - seps[0] else 0
-            val pieces = ArrayList<PartsReader.Piece>()
-            if (kw > 0) pieces += PartsReader.Piece(floatArrayOf((x0 + seps[0]).toFloat(), y0.toFloat(), (x0 + seps[1]).toFloat(), y1.toFloat()), 0f)
-            pieces += PartsReader.Piece(floatArrayOf(xa.toFloat(), y0.toFloat(), xb.toFloat(), y1.toFloat()), kw.toFloat())
-            val out = reader.table(pieces)?.also { calls++ } ?: return null
-            if (out.looped || IaParse.otslLoop(out.text)) return null
-            parts += IaParse.parseOtsl(out.text)
-        }
-        return mergeBands(parts)
+    private fun table(r: Reg, lines: List<LayoutLine>): LayoutBlock {
+        val b = LayoutBlock(type = BlockType.TABLE, box = lbox(r.box), lines = lines, role = r.label, text = lines.joinToString("\n") { it.text })
+        val g = gridCells(r.box, r.lines) ?: return b
+        return b.copy(
+            tableRows = g.rows, tableCols = g.cols,
+            text = (0 until g.rows).joinToString("\n") { row -> (0 until g.cols).joinToString("\t") { c -> g.cells.firstOrNull { it.row == row && it.col == c }?.text.orEmpty() } },
+            cells = g.cells,
+        )
     }
 
     // ------------------------------------------------------------------------------------------ líneas → bloques
@@ -357,21 +198,8 @@ class PartsPipeline(private val reader: PartsReader) {
     }
 
     companion object {
-        /** Lector vacío: solo líneas dadas (modo nube con OCR básico), sin herramientas de tabla/gráfico/fórmula. */
-        val NoReader: PartsReader = object : PartsReader {
-            override suspend fun spotting(crop: Box?, maxTokens: Int): PartsReader.Out? = null
-            override suspend fun table(pieces: List<PartsReader.Piece>): PartsReader.Out? = null
-            override suspend fun chart(crop: Box): PartsReader.Out? = null
-            override suspend fun formula(crop: Box): PartsReader.Out? = null
-        }
-
         const val ROLE_DRAWING = "dibujo"
-        const val PER_BAND = 8
-        const val PER_BAND_RETRY = 5
-        const val MIN_TEXT_REGIONS = 3
-        const val MIN_MEAN_SCORE = 0.6
         private val TEXT_TYPES = setOf(BlockType.TEXT, BlockType.TITLE, BlockType.HEADER, BlockType.FOOTER)
-        private val SPOT_TYPES = TEXT_TYPES + BlockType.TABLE
         private val PICTURE_TYPES = setOf(BlockType.FIGURE, BlockType.CHART, BlockType.FORMULA)
 
         fun lbox(b: Box) = LayoutBox((b[0] * 10f).roundToInt() / 10f, (b[1] * 10f).roundToInt() / 10f, (b[2] * 10f).roundToInt() / 10f, (b[3] * 10f).roundToInt() / 10f)
@@ -382,14 +210,7 @@ class PartsPipeline(private val reader: PartsReader) {
             max(max(q[0], q[2]), max(q[4], q[6])), max(max(q[1], q[3]), max(q[5], q[7])),
         )
 
-        /** Bucle del Spotting: lo que quitaría la limpieza de repeticiones es > 40 % del texto. */
-        fun looped(t0: String): Boolean {
-            val t = t0.replace("</s>", "")
-            if (t.isEmpty()) return false
-            return com.scannerpromax.ai.parse.IaText.stripRepetition(t).length < 0.6 * t.length
-        }
-
-        /** Líneas duplicadas (Spotting de recortes solapados): la menor contenida (> 70 %) con texto incluido fuera. */
+        /** Líneas duplicadas (cajas solapadas): la menor contenida (> 70 %) con texto incluido fuera. */
         fun dedupeItems(items: List<Item>): List<Item> {
             val out = ArrayList<Item>()
             for (it in items.sortedByDescending { (it.bx[2] - it.bx[0]) * (it.bx[3] - it.bx[1]) }) {
@@ -481,48 +302,43 @@ class PartsPipeline(private val reader: PartsReader) {
             }
         }
 
-        /** Zonas de Spotting de una tabla: bandas horizontales de ≤ 10 % del alto de la página. */
-        fun tableBandsZones(b: Box, pageH: Int): List<Box> {
-            val n = max(1, ceil((b[3] - b[1]) / (0.1f * pageH)).toInt())
-            return (0 until n).map { k -> floatArrayOf(b[0], b[1] + k * (b[3] - b[1]) / n, b[2], b[1] + (k + 1) * (b[3] - b[1]) / n) }
-        }
+        class Grid(val rows: Int, val cols: Int, val cells: List<TableCell>)
 
         /**
-         * Separadores de columna por huecos verticales de la TINTA de la tabla (sin rayas largas) cuando el Spotting no
-         * dio líneas: columnas de píxeles casi sin tinta de ancho ≥ 0,4 % de la página. null si salen < 3 columnas.
+         * Rejilla geométrica de una tabla a partir de sus líneas de texto: filas = líneas con el centro a menos de media
+         * altura mediana (como [readingSort]); columnas = huecos verticales sin texto ([separators]). Cada línea va a la
+         * celda (fila, columna de su centro); varias líneas en la misma celda se unen con espacio. null si salen < 2
+         * filas o < 2 columnas, o si menos de la mitad de las filas tienen ≥ 2 celdas (párrafo dentro de "tabla").
          */
-        fun inkSeparators(bx: Box, img: Rgb): List<Int>? {
-            val x0 = max(0, bx[0].toInt()); val x1 = min(img.w, bx[2].toInt())
-            val y0 = max(0, bx[1].toInt()); val y1 = min(img.h, bx[3].toInt())
-            if (x1 - x0 < 30 || y1 - y0 < 10) return null
-            val crop = img.crop(x0, y0, x1, y1)
-            val paper = PageInk.percentile(img.gray(), 90.0)
-            val ink = PageInk.inkMask(crop, max(25, img.w / 25), paper)
-            // franjas de ~1 renglón: una columna de píxeles es hueco si está libre en ≥ 85 % de las franjas (los
-            // títulos que cruzan varias columnas no tapan los huecos)
-            val strip = max(8, img.h / 100)
-            val nStrips = max(1, crop.h / strip)
-            val busy = IntArray(crop.w)
-            for (k in 0 until nStrips) {
-                val ya = k * strip; val yb = if (k == nStrips - 1) crop.h else ya + strip
-                for (x in 0 until crop.w) {
-                    var any = false
-                    for (y in ya until yb) if (ink[y * crop.w + x]) { any = true; break }
-                    if (any) busy[x]++
-                }
+        fun gridCells(bx: Box, items: List<Item>): Grid? {
+            if (items.size < 4) return null
+            val seps = separators(bx, items) ?: return null
+            val ncol = seps.size - 1
+            if (ncol < 2 || ncol > 40) return null
+            val hs = items.map { max(1f, it.bx[3] - it.bx[1]) }.sorted()
+            val hmedT = hs[hs.size / 2]
+            val rows = ArrayList<MutableList<Item>>()
+            var rowCy = Float.NEGATIVE_INFINITY
+            for (it in items.sortedBy { (it.bx[1] + it.bx[3]) / 2 }) {
+                val cy = (it.bx[1] + it.bx[3]) / 2
+                if (rows.isEmpty() || cy - rowCy > 0.5f * hmedT) { rows += mutableListOf(it); rowCy = cy } else rows.last() += it
             }
-            val tol = (0.15f * nStrips).toInt()
-            val minGap = max(4, (0.004f * img.w).toInt())
-            val seps = arrayListOf(0)
-            var run = 0
-            for ((i, v) in busy.withIndex()) {
-                if (v <= tol) run++ else {
-                    if (run >= minGap && i - run > 0) seps += i - run / 2
-                    run = 0
-                }
+            if (rows.size < 2) return null
+            val x0 = bx[0]
+            fun colOf(it: Item): Int {
+                val cx = (it.bx[0] + it.bx[2]) / 2 - x0
+                for (c in 0 until ncol) if (cx < seps[c + 1]) return c
+                return ncol - 1
             }
-            seps += busy.size
-            return seps.takeIf { it.size >= 4 }
+            val cells = ArrayList<TableCell>()
+            var multi = 0
+            for ((ri, row) in rows.withIndex()) {
+                val byCol = row.groupBy { colOf(it) }
+                if (byCol.size >= 2) multi++
+                for ((c, its) in byCol) cells += TableCell(row = ri, col = c, text = its.sortedBy { it.bx[0] }.joinToString(" ") { it.text.trim() })
+            }
+            if (multi * 2 < rows.size) return null
+            return Grid(rows.size, ncol, cells.sortedWith(compareBy({ it.row }, { it.col })))
         }
 
         /** Separadores de columna (px relativos al borde izquierdo de [bx]) por huecos verticales de las líneas. */
@@ -595,7 +411,7 @@ class PartsPipeline(private val reader: PartsReader) {
                 val lines = bl.lines.filter { it.text.isNotBlank() }.map { ln ->
                     val r = com.scannerpromax.domain.OcrRect(ln.box.left, ln.box.top, ln.box.right, ln.box.bottom)
                     val q = ln.quad.takeIf { it.size >= 8 }?.let { v -> List(4) { floatArrayOf(v[2 * it], v[2 * it + 1]) } }
-                    val ang = q?.let { IaParse.quadAngle(it) }?.takeIf { abs(it) < 45f } ?: 0f
+                    val ang = q?.let { quadAngle(it) }?.takeIf { abs(it) < 45f } ?: 0f
                     com.scannerpromax.domain.OcrLine(ln.text, r, com.scannerpromax.ai.AiLayout.wordsAlong(ln.text, q, r), ang)
                 }
                 com.scannerpromax.domain.OcrBlock(lines.joinToString("\n") { it.text }, com.scannerpromax.domain.OcrRect(bl.box.left, bl.box.top, bl.box.right, bl.box.bottom), lines)
@@ -610,33 +426,13 @@ class PartsPipeline(private val reader: PartsReader) {
             return com.scannerpromax.domain.OcrResult(text = text, imageWidth = l.imageWidth, imageHeight = l.imageHeight, blocks = blocks)
         }
 
-        /** Bandas de ≤ [per] columnas: la primera entera; las siguientes de per−1 (la clave se repite delante). */
-        fun bands(ncol: Int, per: Int): List<IntRange> {
-            val out = arrayListOf(0 until min(ncol, per))
-            var c = per
-            while (c < ncol) { out += c until min(ncol, c + per - 1); c += per - 1 }
-            return out
-        }
-
-        /** Une las tablas de las bandas (sin la columna clave repetida), filas por índice. */
-        fun mergeBands(parts: List<IaParse.OtslTable>): IaParse.OtslTable? {
-            if (parts.isEmpty()) return null
-            if (parts.size == 1) return parts[0]
-            val nr = parts.maxOf { it.nRows }
-            val cells = ArrayList<IaParse.OtslCell>()
-            var off = 0
-            for ((bi, t) in parts.withIndex()) {
-                val skip = if (bi == 0) 0 else 1
-                val nc = max(0, t.nCols - skip)
-                for (cl in t.cells) {
-                    if (cl.c < skip) continue
-                    cells += IaParse.OtslCell(cl.r, cl.c - skip + off, cl.rowSpan, min(cl.colSpan, nc - (cl.c - skip)), cl.text)
-                }
-                off += nc
-            }
-            val rows = List(nr) { MutableList(off) { "" } }
-            for (cl in cells) if (cl.r in 0 until nr && cl.c in 0 until off) rows[cl.r][cl.c] = cl.text
-            return IaParse.OtslTable(rows, cells, "", nr, off)
+        /** Ángulo (grados) del lado superior de un cuadrilátero (tl → tr). */
+        fun quadAngle(q: List<FloatArray>): Float {
+            if (q.size < 2) return 0f
+            val dx = q[1][0] - q[0][0]
+            val dy = q[1][1] - q[0][1]
+            if (dx * dx + dy * dy < 1e-6f) return 0f
+            return Math.toDegrees(kotlin.math.atan2(dy.toDouble(), dx.toDouble())).toFloat()
         }
     }
 }

@@ -1,1 +1,0 @@
-\[\begin{aligned}&specific\ endurance=\frac{flight\ hrs.}{lb.\ of\ fuel}\\ &specific\ endurance=\frac{1}{fuel\ flow,\ lbs.\ per\ hr.}\\ \end{aligned}\]</s>
