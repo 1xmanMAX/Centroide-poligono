@@ -53,12 +53,12 @@ internal object NaturalMath {
 
     /**
      * ¿Componente sin tinta en el B/N lo bastante clara como escritura? Color vivo (croma medio >= VIVID_K·cLo), oscura
-     * (>= VIVID_KD·tF), o -si tiene tamaño de palabra y no está junto al borde (6 %)- tenue con algo de color propio
+     * (>= VIVID_KD·tF), o -si tiene tamaño de palabra y no está junto al borde (3 %)- tenue con algo de color propio
      * (resaltador, tinta pálida en sombra).
      */
     fun vivid(meanC: Double, meanD: Double, cLo: Double, tF: Double, paperC: Double, wordSized: Boolean): Boolean =
         meanC >= NaturalColor.VIVID_K * cLo || meanD >= NaturalColor.VIVID_KD * tF ||
-            (wordSized && ((meanD >= 1.25 * tF && meanC >= max(3.0, paperC)) || meanC >= 1.1 * cLo))
+            (wordSized && ((meanD >= 1.25 * tF && meanC >= max(3.0, 0.85 * paperC)) || meanC >= 1.1 * cLo))
 
     /**
      * ¿Relleno liso (banda de tabla, celda o recuadro sombreado)? A la escala de análisis: área >= 25 letras², caja llena
@@ -86,6 +86,13 @@ internal object NaturalMath {
 
     /** ¿Fondo ajeno que se quita entero (madera, mesa: vetas densas en el B/N o nada) y no sólo lo añadido (hay escritura)? */
     fun foreignIsHard(inkFrac: Double): Boolean = inkFrac < 0.005 || inkFrac >= 0.15
+
+    /**
+     * PUREZA media de la tinta (croma / (100 - L*), zona de ~1 letra) por debajo de la cual es NEUTRA (-> negro):
+     * gris de lápiz o tinta negra ~0.03-0.06; color, aun claro o oscuro, >= ~0.2. Sube con el ruido de color del papel
+     * ([cPaper] = p95 del croma del papel balanceado).
+     */
+    fun neutralLo(cPaper: Double): Double = max(0.07, 0.02 * cPaper)
 
     /** ¿La caja toca el borde de la imagen (1 px de margen)? */
     fun touchesBorder(x: Int, y: Int, w: Int, h: Int, imgW: Int, imgH: Int): Boolean =
@@ -149,6 +156,8 @@ internal object NaturalColor {
     internal var debug: ((String, Mat) -> Unit)? = null
     private var dbgA: Mat? = null
     internal var logComps = false
+    /** Depuración: croma local de la tinta de cada píxel activo (sólo escritorio). */
+    internal var chromaStats: MutableList<Float>? = null
 
     /** "Blanco y negro" también une los trazos rotos ([bridge]) con la foto normalizada. */
     @JvmField internal var BRIDGE_BW = false
@@ -177,6 +186,12 @@ internal object NaturalColor {
     /** Cobertura del alfa (ventana de ~1 letra) desde la que una zona es color macizo (resaltador, banda): sin refuerzo. */
     const val FILL_LO = 0.55
     const val FILL_HI = 0.8
+    /** Tope del croma del realce respecto al croma propio del núcleo del trazo (x CHROMA_CAP + CHROMA_ADD). */
+    const val CHROMA_CAP = 1.1
+    const val CHROMA_ADD = 3.0
+    /** Tinta neutra -> negro: factor de L* y ancho de la rampa de pureza (desde [NaturalMath.neutralLo]). */
+    const val NEUTRAL_K = 0.4
+    const val NEUTRAL_SPAN = 0.07
     const val NEUTRAL_LO = 4.0
     const val NEUTRAL_HI = 11.0
     const val MAX_BLACK = 70.0
@@ -200,6 +215,12 @@ internal object NaturalColor {
     @JvmField var REL_HI_SUP = 0.6
     /** Alfa por debajo del cual el píxel es papel (blanco puro). */
     const val ALPHA_MIN = 0.05
+    /** Zonas de imagen: saturación y nitidez (máscara de enfoque) del tratamiento de foto ([photoZone]). */
+    const val PHOTO_SAT = 1.08
+    const val PHOTO_SHARP = 0.5
+    /** Re-afilado del alfa (cantidad y sigma de la máscara de enfoque). */
+    const val ALPHA_SHARP = 0.6
+    const val ALPHA_SHARP_SIGMA = 1.2
 
     class Inputs(
         val bw: Mat,                 // 8UC1 resultado B/N (255 papel), tamaño de salida
@@ -222,6 +243,7 @@ internal object NaturalColor {
         val support: Mat, val figures: Mat, val scale: Double, val cLo: Double, val tF: Double,
         /** Rellenos lisos (8U, 255 = relleno) y su color (8UC3) a la escala de análisis, o null. */
         val fills: Mat? = null, val fillCol: Mat? = null, val fillT: Double = FILL_DE,
+        val cPaper: Double = 3.0,
         /** Fondo ajeno (8U, 255) a la escala de análisis, o null. */
         val foreign: Mat? = null,
         /** Zona ajena con escritura (banda impresa, sombra de color): sin lo añadido, con la tinta del B/N; o null. */
@@ -424,10 +446,13 @@ internal object NaturalColor {
                     if (it == 0 || foreign[it] || NaturalMath.touchesBorder(x, y, w, h, sw, shh)) 0
                     else {
                         val c = NaturalMath.colorComponentClass(w, h, ar, lhS, inkF, thk[it],
-                            vivid = NaturalMath.vivid(sC[it] / max(1, ar), sD[it] / max(1, ar), cLo, tF, cPaper, max(w, h) < 8 * lhS && !NaturalMath.nearBorder(x, y, w, h, sw, shh, 0.06)),
+                            vivid = NaturalMath.vivid(sC[it] / max(1, ar), sD[it] / max(1, ar), cLo, tF, cPaper, max(w, h) < 8 * lhS && !NaturalMath.nearBorder(x, y, w, h, sw, shh, 0.03)),
                             colorful = sC[it] / max(1, ar) >= 2.0 * cLo)
                         // Junto al borde (restos del canto, agujeros, mesa, madera): sólo trazos finos con tinta en el B/N
-                        if (NaturalMath.nearBorder(x, y, w, h, sw, shh) && (inkF < 0.01 || ((c == 2 || thk[it] > 1.2 * lhS) && inkF < 0.05))) 0
+                        // (salvo tinta de color clara de tamaño de palabra -un título en naranja tenue arriba-: la madera, la
+                        // mesa y los cantos ya los quita el fondo ajeno)
+                        if (NaturalMath.nearBorder(x, y, w, h, sw, shh) && ((inkF < 0.01 && !(sC[it] / max(1, ar) >= NaturalColor.VIVID_K * cLo && max(w, h) < 8 * lhS)) ||
+                                ((c == 2 || thk[it] > 1.2 * lhS) && inkF < 0.05))) 0
                         // (B/N: sólo lo que continúa tinta que el B/N ya tiene; ni color suelto ni figuras)
                         else if (inp.bridge == 2 && (c == 2 || inkF < 0.1)) 0
                         else if (c == 1 && inkF < 0.5 && !NaturalMath.strongEnough(sD[it] / max(1, ar), inkD, sC[it] / max(1, ar), cPaper)) 0
@@ -465,7 +490,7 @@ internal object NaturalColor {
         fl?.let { (f, _) -> val nf = bag.mat(); Core.bitwise_not(figures, nf); Core.bitwise_and(f, nf, f) }
         NcProf.mark("g.fills")
         debug?.let { d -> fl?.let { d("fills", it.first) }; foreignAll2?.let { d("foreign", it) }; softF[0]?.let { d("foreign_soft", it) } }
-        return Global(gain, black, white, t0, support, figures, s, cLo, tF, fl?.first, fl?.second, max(FILL_DE, 2.5 * noise), foreignAll2,
+        return Global(gain, black, white, t0, support, figures, s, cLo, tF, fl?.first, fl?.second, max(FILL_DE, 2.5 * noise), cPaper, foreignAll2,
             softF[0]?.clone())
     }
 
@@ -953,6 +978,12 @@ internal object NaturalColor {
             Core.multiply(a, f, a, 1.0 / 255); Core.max(a, aBW, a)
             fm?.let { m -> Core.multiply(m, f, m, 1.0 / 255) }
         }
+        if (!inp.bridgeOnly) {
+            // Borde nítido: re-afilado suave del alfa (máscara de enfoque; la evidencia relativa sigue el desenfoque de la
+            // foto y dejaba el contorno de logos y trazos de color blando)
+            val bl = bag.mat(); Imgproc.GaussianBlur(a, bl, Size(0.0, 0.0), ALPHA_SHARP_SIGMA)
+            Core.addWeighted(a, 1.0 + ALPHA_SHARP, bl, -ALPHA_SHARP, 0.0, a)
+        }
         Imgproc.threshold(a, a, ALPHA_MIN * 255.0, 255.0, Imgproc.THRESH_TOZERO)
         NcProf.mark("alpha")
 
@@ -998,7 +1029,7 @@ internal object NaturalColor {
         val denA = FloatArray(hn); wH.get(0, 0, denA)
         val fillA = FloatArray(hn); fill.get(0, 0, fillA)
         val figA = figH?.let { ByteArray(hn).also { b -> it.get(0, 0, b) } }
-        val idx = IntArray(n); val colC = FloatArray(n * 3); val noKC = FloatArray(n)
+        val idx = IntArray(n); val colC = FloatArray(n * 3); val noKC = FloatArray(n); val figC = FloatArray(n)
         val eps = 1e-4f   // (ventana sin peso: el color propio)
         val nbAll = ByteArray(hn * 3).also { nbH.get(0, 0, it) }
         var j = 0
@@ -1015,13 +1046,49 @@ internal object NaturalColor {
             }
             // (sin refuerzo de densidad en figuras ni en zonas de color gruesas: un resaltador o una banda no son tinta tenue)
             val fl = ((fillA[i] / 255f - FILL_LO.toFloat()) / (FILL_HI - FILL_LO).toFloat()).coerceIn(0f, 1f)
-            noKC[j] = max(f, fl)
+            noKC[j] = max(f, fl); figC[j] = f
             j++
+        }
+        // Tinta NEUTRA o DE COLOR, por zonas de ~1 letra (no por píxel: el borde de un trazo negro tiene franjas de
+        // color de la lente y el desenfoque): croma medio del color del núcleo de los trazos, ponderado por el alfa
+        val tC = FloatArray(n)
+        run {
+            val colM0 = bag.add(Mat(n, 1, CvType.CV_32FC3)); colM0.put(0, 0, colC)
+            Core.multiply(colM0, Scalar.all(1.0 / 255), colM0); Core.min(colM0, Scalar.all(1.0), colM0)
+            val lab0 = bag.mat(); Imgproc.cvtColor(colM0, lab0, Imgproc.COLOR_RGB2Lab)
+            val lb0 = FloatArray(n * 3); lab0.get(0, 0, lb0)
+            val aHA = ByteArray(hn); aH.get(0, 0, aHA)
+            val cS = FloatArray(hn); val wS = FloatArray(hn)
+            for (k in 0 until n) {
+                // pureza: croma relativo a la oscuridad (un color claro tiene poco croma absoluto pero mucho relativo)
+                val c0 = kotlin.math.sqrt(lb0[k * 3 + 1] * lb0[k * 3 + 1] + lb0[k * 3 + 2] * lb0[k * 3 + 2]) / max(8f, 100f - lb0[k * 3])
+                tC[k] = c0
+                val wa = (aHA[idx[k]].toInt() and 0xFF) / 255f
+                cS[idx[k]] = c0 * wa; wS[idx[k]] = wa
+            }
+            val cM = bag.add(Mat(hh, hw, CvType.CV_32F)); cM.put(0, 0, cS)
+            val wM = bag.add(Mat(hh, hw, CvType.CV_32F)); wM.put(0, 0, wS)
+            val kw = Cv.odd((lhT / 2.0).roundToInt().coerceIn(3, 41)).toDouble()
+            Imgproc.boxFilter(cM, cM, -1, Size(kw, kw), org.opencv.core.Point(-1.0, -1.0), false)
+            Imgproc.boxFilter(wM, wM, -1, Size(kw, kw), org.opencv.core.Point(-1.0, -1.0), false)
+            cM.get(0, 0, cS); wM.get(0, 0, wS)
+            val n0 = NaturalMath.neutralLo(g.cPaper)   // (pureza)
+            for (k in 0 until n) {
+                val i = idx[k]
+                val cl = if (wS[i] > 1e-3f) cS[i] / wS[i] else tC[k]
+                // t = 1 color, 0 neutra; las figuras conservan su color
+                tC[k] = max(figC[k], NaturalMath.ramp(cl.toDouble(), n0, n0 + NEUTRAL_SPAN).toFloat())
+                if (chromaStats != null && aHA[i].toInt() and 0xFF > 200) chromaStats!!.add(cl)
+            }
+            // (croma propio del núcleo, para el tope del realce)
+            for (k in 0 until n) figC[k] = kotlin.math.sqrt(lb0[k * 3 + 1] * lb0[k * 3 + 1] + lb0[k * 3 + 2] * lb0[k * 3 + 2])
         }
         NcProf.mark("c.gather"); NcProf.add("c.n", n.toDouble() / hn * 100)
         val colM = bag.add(Mat(n, 1, CvType.CV_32FC3)); colM.put(0, 0, colC)
         val noKM = bag.add(Mat(n, 1, CvType.CV_32F)); noKM.put(0, 0, noKC)
-        enhance(colM, noKM, g, bag)
+        val tM = bag.add(Mat(n, 1, CvType.CV_32F)); tM.put(0, 0, tC)
+        val c0M = bag.add(Mat(n, 1, CvType.CV_32F)); c0M.put(0, 0, figC)
+        enhance(colM, noKM, tM, c0M, g, bag)
         NcProf.mark("c.enh")
         colM.get(0, 0, colC)
         val c8A = ByteArray(hn * 3) { -1 }
@@ -1029,6 +1096,7 @@ internal object NaturalColor {
         val c8 = bag.add(Mat(hh, hw, CvType.CV_8UC3)); c8.put(0, 0, c8A)
         NcProf.mark("color")
         writeOut(c8, a, fm, fillUp, outer, inner, crop, out, bag)
+        if (fig != null) photoZone(fig, nrmT, g, outer, inner, crop, out, bag)
         NcProf.mark("compose")
     }
 
@@ -1059,6 +1127,50 @@ internal object NaturalColor {
         val nok = bag.mat(); Core.bitwise_not(ok, nok); loH.copyTo(c8, nok)
         val up = bag.mat(); Imgproc.resize(c8, up, outer.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
         return up
+    }
+
+    /**
+     * Zonas de IMAGEN (foto, logo, gráfico, ilustración): tratamiento de foto a resolución completa en vez del de la
+     * tinta -sin binarizar ni blanquear su interior-: el color normalizado (balance de blancos de la página), niveles
+     * suaves, saturación x[PHOTO_SAT], des-ruido leve (bilateral) y nitidez moderada (máscara de enfoque). Se mezcla
+     * con lo ya compuesto según la máscara de la figura (borde suave, sin costura).
+     */
+    private fun photoZone(fig: Mat, nrmT: Mat, g: Global, outer: Rect, inner: Rect, crop: Rect, out: Mat, bag: MatBag) {
+        // sólo el rectángulo de la figura dentro de la parte útil de la tesela
+        val fc = bag.add(fig.submat(crop))
+        val pts = bag.mat(); Core.findNonZero(fc, pts)
+        if (pts.empty()) return
+        val bb = Imgproc.boundingRect(pts)
+        val pad = 4
+        val ox = crop.x + bb.x; val oy = crop.y + bb.y
+        val x0 = max(0, ox - pad); val y0 = max(0, oy - pad)
+        val x1 = min(outer.width, ox + bb.width + pad); val y1 = min(outer.height, oy + bb.height + pad)
+        val src = bag.add(nrmT.submat(y0, y1, x0, x1))
+        val p = bag.mat(); Core.multiply(src, Scalar(g.gain[0] * 255.0 / g.white, g.gain[1] * 255.0 / g.white, g.gain[2] * 255.0 / g.white), p)
+        val dn = bag.mat(); Imgproc.bilateralFilter(p, dn, 5, 18.0, 3.0)
+        // niveles suaves: el negro de la página a la mitad (una foto no es tinta: sus sombras no se aplastan)
+        val b = 0.5 * g.black
+        dn.convertTo(dn, -1, 255.0 / (255.0 - b), -b * 255.0 / (255.0 - b))
+        // saturación suave en HSV
+        val hsv = bag.mat(); Imgproc.cvtColor(dn, hsv, Imgproc.COLOR_RGB2HSV)
+        val sCh = bag.mat(); Core.extractChannel(hsv, sCh, 1); sCh.convertTo(sCh, -1, PHOTO_SAT); Core.insertChannel(sCh, hsv, 1)
+        Imgproc.cvtColor(hsv, dn, Imgproc.COLOR_HSV2RGB)
+        // nitidez moderada
+        val bl = bag.mat(); Imgproc.GaussianBlur(dn, bl, Size(0.0, 0.0), 1.2)
+        Core.addWeighted(dn, 1.0 + PHOTO_SHARP, bl, -PHOTO_SHARP, 0.0, dn)
+        // mezcla con lo compuesto (máscara de la figura, suavizada)
+        val f = bag.mat(); Imgproc.GaussianBlur(fig.submat(y0, y1, x0, x1).also { bag.add(it) }, f, Size(0.0, 0.0), 1.0)
+        // zona de salida = intersección con [inner]
+        val ix0 = max(x0, crop.x); val iy0 = max(y0, crop.y); val ix1 = min(x1, crop.x + crop.width); val iy1 = min(y1, crop.y + crop.height)
+        if (ix1 <= ix0 || iy1 <= iy0) return
+        val dst = bag.add(out.submat(inner.y + (iy0 - crop.y), inner.y + (iy1 - crop.y), inner.x + (ix0 - crop.x), inner.x + (ix1 - crop.x)))
+        val ph = bag.add(dn.submat(iy0 - y0, iy1 - y0, ix0 - x0, ix1 - x0))
+        val fm = bag.add(f.submat(iy0 - y0, iy1 - y0, ix0 - x0, ix1 - x0))
+        val f3 = bag.mat(); Core.merge(listOf(fm, fm, fm), f3)
+        val t1 = bag.mat(); Core.multiply(ph, f3, t1, 1.0 / 255)
+        val inv = bag.mat(); Core.bitwise_not(f3, inv)
+        val t2 = bag.mat(); Core.multiply(dst, inv, t2, 1.0 / 255)
+        Core.add(t1, t2, dst)
     }
 
     /**
@@ -1095,7 +1207,7 @@ internal object NaturalColor {
      * densidad Beer-Lambert de la tinta tenue (salvo donde [noK] = 1: figuras, zonas macizas), niveles negro/blanco y
      * saturación en Lab (lo casi neutro sin dominante).
      */
-    private fun enhance(col: Mat, noK: Mat, g: Global, bag: MatBag) {
+    private fun enhance(col: Mat, noK: Mat, t: Mat, c0: Mat, g: Global, bag: MatBag) {
         run {
             val lc = bag.mat(); Core.transform(col, lc, Mat(1, 3, CvType.CV_32F).also { bag.add(it); it.put(0, 0, 0.299 / 255, 0.587 / 255, 0.114 / 255) })
             Core.max(lc, Scalar(1e-3), lc); Core.min(lc, Scalar(1.0), lc)
@@ -1116,8 +1228,22 @@ internal object NaturalColor {
         val L = bag.mat(); val A = bag.mat(); val B = bag.mat()
         Core.extractChannel(lab, L, 0); Core.extractChannel(lab, A, 1); Core.extractChannel(lab, B, 2)
         val c = bag.mat(); Core.magnitude(A, B, c)
-        rampF(c, NEUTRAL_LO, NEUTRAL_HI); Core.multiply(c, Scalar(SATURATION), c)
-        Core.multiply(A, c, A); Core.multiply(B, c, B)
+        // Color: realce moderado del croma, con tope respecto al propio (CHROMA_CAP·C0 + CHROMA_ADD): la densidad y los
+        // niveles oscurecen la tinta tenue pero no la saturan de más; mismo tono (a y b escalan igual)
+        run {
+            val cap = bag.mat(); c0.convertTo(cap, -1, CHROMA_CAP, CHROMA_ADD)
+            val cc = bag.mat(); Core.max(c, Scalar(1e-3), cc)
+            val k = bag.mat(); Core.divide(cap, cc, k); Imgproc.threshold(k, k, 1.0, 1.0, Imgproc.THRESH_TRUNC)
+            Core.multiply(A, k, A); Core.multiply(B, k, B)
+        }
+        // Neutra (gris plomo de la cámara, desenfoque, lente sucia): NEGRO profundo y sin dominante
+        //   L = t·L + (1 - t)·NEUTRAL_K·L, a,b = t·(a,b)  (proporcional: un trazo gris oscuro queda casi negro y una mota
+        //   tenue no se vuelve un punto negro)
+        run {
+            val lN = bag.mat(); L.convertTo(lN, -1, NEUTRAL_K)
+            val d = bag.mat(); Core.subtract(L, lN, d); Core.multiply(d, t, d); Core.add(lN, d, L)
+            Core.multiply(A, t, A); Core.multiply(B, t, B)
+        }
         Core.merge(listOf(L, A, B), lab)
         Imgproc.cvtColor(lab, col, Imgproc.COLOR_Lab2RGB)
     }
