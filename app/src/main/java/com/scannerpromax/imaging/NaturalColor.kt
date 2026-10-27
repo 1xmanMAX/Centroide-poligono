@@ -110,6 +110,14 @@ internal object NaturalMath {
         return if (y > 0.008856) 116.0 * Math.cbrt(y) - 16.0 else 903.3 * y
     }
 
+    /**
+     * ¿Es el canto de la hoja principal? Escalón de color mediano >= [NaturalColor.SHEET_STEP] (ΔE) entre los dos lados
+     * y de al menos la mitad en >= 75 % del lado ([stepFrac]),
+     * papel del lado de dentro en >= 70 % del tramo y como mucho [NaturalColor.SHEET_LETTERS] letras del otro lado.
+     */
+    fun sheetEdgeOk(step: Double, stepFrac: Double, paperInFrac: Double, lettersBeyond: Int): Boolean =
+        step >= NaturalColor.SHEET_STEP && stepFrac >= 0.75 && paperInFrac >= 0.7 && lettersBeyond <= NaturalColor.SHEET_LETTERS
+
     fun neutralLo(cPaper: Double): Double = max(0.07, 0.02 * cPaper)
 
     /** ¿La caja toca el borde de la imagen (1 px de margen)? */
@@ -179,7 +187,7 @@ internal object NaturalColor {
     internal var debug: ((String, Mat) -> Unit)? = null
     private var dbgA: Mat? = null
     internal var logComps = false
-    /** Banco (escritorio): desactivar partes para medirlas (bits: 1 neutra->negro, 2 re-afilado, 4 rellenos, 8 ajeno, 16 foto, 32 tope de croma). */
+    /** Banco (escritorio): desactivar partes para medirlas (bits: 1 neutra->negro, 2 re-afilado, 4 rellenos, 8 ajeno, 16 foto, 32 tope de croma, 128 luz local, 256 canto de la hoja). */
     @JvmField internal var OFF = 0
     /** Depuración: croma local de la tinta de cada píxel activo (sólo escritorio). */
     internal var chromaStats: MutableList<Float>? = null
@@ -225,6 +233,9 @@ internal object NaturalColor {
     const val LWB_T0 = 5.0
     const val LWB_KMAX = 2.5
     const val LWB_MIN_CELLS = 8
+    /** Canto de la hoja ([sheetOutside]): escalón mínimo (ΔE) y letras máximas del otro lado. */
+    const val SHEET_STEP = 6.0
+    const val SHEET_LETTERS = 3
     /** Tinta neutra más clara que la típica (L* de la mediana + LO..HI): conserva su gris (rampa). */
     @JvmField var NEUTRAL_KEEP_LO = 15.0
     @JvmField var NEUTRAL_KEEP_HI = 30.0
@@ -271,6 +282,9 @@ internal object NaturalColor {
         val bridge: Int = 0,
         val gridColor: DoubleArray? = null,        // RGB normalizado de la cuadrícula clara (su tono no es tinta), o null
         val orig: Mat? = null,       // RGB 8UC3 de la foto SIN normalizar (cualquier tamaño, misma geometría): fondo ajeno ([foreignMask])
+        /** Zona de escritura del cuaderno (8UC1, 255 = dentro; cualquier tamaño, misma geometría) o null: fuera de ella (marco,
+         * margen y bandas impresas, tapa) no se añade color ni figuras, sólo queda la tinta del B/N. */
+        val writing: Mat? = null,
     ) { val bridgeOnly: Boolean get() = bridge > 0 }
 
     private class Global(
@@ -434,6 +448,8 @@ internal object NaturalColor {
         var own: Mat? = if (inp.bridge == 0 && inp.orig != null && OFF and 8 == 0) foreignMask(inp.orig, sm.size(), bws, lhS, bag, softF,
             inp.images.map { Rect((it.x * s).toInt(), (it.y * s).toInt(), max(1, (it.width * s).roundToInt()), max(1, (it.height * s).roundToInt())) }) else null
         edgeLines(bws, cEr0, lhS, cLo, bag)?.let { el -> own = own?.also { Core.bitwise_or(it, el, it); el.release() } ?: el }
+        // Fuera del canto de la hoja principal (hojas de debajo, funda del móvil, mesa): blanco
+        if (inp.bridge == 0 && inp.orig != null && OFF and 256 == 0) sheetOutside(inp.orig, bws, sm.size(), lhS, bag)?.let { so -> own = own?.also { Core.bitwise_or(it, so, it); so.release() } ?: so }
         val foreignAll2 = own
         val softAll: Mat? = softF[0]?.let { sf -> bag.add(sf); if (foreignAll2 != null) bag.mat().also { Core.bitwise_or(foreignAll2, sf, it) } else sf } ?: foreignAll2
         val exF = if (inp.excludeForeign) excludeMask(inp.exclude, sm.size(), bag) else null
@@ -498,6 +514,13 @@ internal object NaturalColor {
                 val thk = DoubleArray(n); for (i in lb.indices) { val v = 2.0 * dtA[i]; if (v > thk[lb[i]]) thk[lb[i]] = v }
                 // Pegado al fondo ajeno (mesa, madera que el recorte dejó dentro): como si tocara el borde
                 val foreign = BooleanArray(n)
+                // Fracción de cada componente dentro de la zona de escritura del cuaderno
+                val inZone = inp.writing?.takeIf { !it.empty() }?.let { wz ->
+                    val zm = bag.mat(); Imgproc.resize(wz, zm, sm.size(), 0.0, 0.0, Imgproc.INTER_NEAREST)
+                    val zb = ByteArray(sw * shh); zm.get(0, 0, zb)
+                    val cnt = IntArray(n); for (i in lb.indices) if (zb[i].toInt() != 0) cnt[lb[i]]++
+                    DoubleArray(n) { cnt[it].toDouble() / max(1, st[it * 5 + 4]) }
+                }
                 noExtras?.let { fa ->
                     val fm = bag.mat(); Imgproc.dilate(fa, fm, Cv.kernel(Imgproc.MORPH_RECT, 5))
                     val fb = ByteArray(sw * shh); fm.get(0, 0, fb)
@@ -527,6 +550,8 @@ internal object NaturalColor {
                                 ((c == 2 || thk[it] > 1.2 * lhS) && inkF < 0.05))) 0
                         // (B/N: sólo lo que continúa tinta que el B/N ya tiene; ni color suelto ni figuras)
                         else if (inp.bridge == 2 && (c == 2 || inkF < 0.1)) 0
+                        // (cuaderno: fuera de la zona de escritura -margen, marco, bandas impresas, tapa- sólo la tinta del B/N)
+                        else if (inZone != null && inZone[it] < 0.5 && inkF < 0.5) 0
                         else if (c == 1 && inkF < 0.5 && !NaturalMath.strongEnough(sD[it] / max(1, ar), inkD, sC[it] / max(1, ar), cPaper)) 0
                         else c
                     }
@@ -551,6 +576,8 @@ internal object NaturalColor {
                 Imgproc.rectangle(figures, org.opencv.core.Point(r.x * s, r.y * s), org.opencv.core.Point((r.x + r.width) * s - 1, (r.y + r.height) * s - 1), Scalar(255.0), -1)
                 Imgproc.rectangle(photos, org.opencv.core.Point(r.x * s, r.y * s), org.opencv.core.Point((r.x + r.width) * s - 1, (r.y + r.height) * s - 1), Scalar(255.0), -1)
             }
+            // (la foto se pinta desde el original: nunca sobre el fondo ajeno -fuera de la hoja, mesa-)
+            foreignAll2?.let { f -> val nf = bag.mat(); Core.bitwise_not(f, nf); Core.bitwise_and(photos, nf, photos); Core.bitwise_and(figures, nf, figures) }
         }
         NcProf.mark("g.masks")
         log?.invoke("global cPaper=%.1f cLo=%.1f tF=%.3f paper=%.0f,%.0f,%.0f noise=%.1f ink=$nInk inkFrac=%.3f color=%.4f fig=%.4f".format(cPaper, cLo, tF, pc[0], pc[1], pc[2], noise,
@@ -944,6 +971,182 @@ internal object NaturalColor {
         return f
     }
 
+    /** Recta del canto de la hoja: x = a + b·y (lado vertical) o y = a + b·x (horizontal) en px de análisis. */
+    internal data class SheetEdge(val side: Int, val a: Double, val b: Double)
+
+    /**
+     * Zona FUERA de la hoja principal (8U, 255) a la escala de análisis, o null: el recorte dejó dentro cantos de las hojas de
+     * debajo, la funda del móvil o la mesa, que el B/N y el color conservaban como franjas beis o marrones. Por cada lado,
+     * rectas largas (>= 30 % del lado) casi paralelas a él (<= 12°) en la banda exterior (20 %) de los bordes de la foto
+     * ORIGINAL; vale la más interior que es el CANTO de una hoja ([NaturalMath.sheetEdgeOk]): un escalón de color (ΔE
+     * mediano >= [SHEET_STEP] entre los dos lados a ~0.6 letras; una raya impresa tiene papel a ambos lados), papel del lado
+     * de dentro y sin escritura del otro lado (<= [SHEET_LETTERS] componentes de tamaño de letra del B/N: el texto cerca del
+     * margen no se come). Lo que queda entre esa recta y el borde de la imagen sale blanco.
+     */
+    private fun sheetOutside(orig: Mat, bws: Mat, size: Size, lhS: Double, bag: MatBag): Mat? {
+        val w = size.width.toInt(); val h = size.height.toInt(); val n = w * h
+        val o = bag.mat(); areaDown(orig, o, size, bag)
+        Imgproc.GaussianBlur(o, o, Size(0.0, 0.0), 1.2)
+        val g = bag.add(Cv.gray(o))
+        val ga = ByteArray(n); g.get(0, 0, ga)
+        val ed = bag.mat(); Imgproc.Canny(g, ed, 12.0, 36.0)
+        val lines = bag.mat()
+        val minLen = 0.3 * min(w, h)
+        Imgproc.HoughLinesP(ed, lines, 1.0, Math.PI / 180, max(40, (0.15 * min(w, h)).roundToInt()), minLen, 0.02 * max(w, h))
+        if (lines.rows() == 0) return null
+        val lab = bag.mat(); Imgproc.cvtColor(o, lab, Imgproc.COLOR_RGB2Lab)
+        val lb = ByteArray(n * 3); lab.get(0, 0, lb)
+        val bb = ByteArray(n); bws.get(0, 0, bb)
+        // letras del B/N (centros) para "sin escritura del otro lado"
+        val ink = bag.mat(); Imgproc.threshold(bws, ink, 128.0, 255.0, Imgproc.THRESH_BINARY_INV)
+        val cl = bag.mat(); val cs = bag.mat(); val cc = bag.mat()
+        val nc = Imgproc.connectedComponentsWithStats(ink, cl, cs, cc, 8, CvType.CV_32S)
+        val st = IntArray(max(1, nc) * 5); if (nc > 0) cs.get(0, 0, st)
+        val letters = ArrayList<DoubleArray>()
+        for (c in 1 until nc) {
+            val bw0 = st[c * 5 + 2]; val bh0 = st[c * 5 + 3]; val ar = st[c * 5 + 4]
+            val mx = max(bw0, bh0)
+            // (letras y palabras: también la palabra manuscrita enlazada, larga pero de una línea de alto)
+            if (mx < 0.3 * lhS || mx > 12.0 * lhS || min(bw0, bh0) > 3.0 * lhS || ar < 4 || ar > 0.7 * bw0 * bh0) continue
+            if (mx > 3.0 * lhS && min(bw0, bh0) < 0.4 * lhS) continue   // (raya larga y fina: canto, no palabra)
+            letters.add(doubleArrayOf(st[c * 5] + bw0 / 2.0, st[c * 5 + 1] + bh0 / 2.0))
+        }
+        val seg = IntArray(lines.rows() * 4); lines.get(0, 0, seg)
+        val best = arrayOfNulls<SheetEdge>(4); val bestD = DoubleArray(4) { -1.0 }
+        val d = max(3.0, 0.6 * lhS)
+        for (q in 0 until lines.rows()) {
+            val x1 = seg[q * 4].toDouble(); val y1 = seg[q * 4 + 1].toDouble(); val x2 = seg[q * 4 + 2].toDouble(); val y2 = seg[q * 4 + 3].toDouble()
+            val vert = kotlin.math.abs(x2 - x1) <= 0.21 * kotlin.math.abs(y2 - y1)
+            val hor = kotlin.math.abs(y2 - y1) <= 0.21 * kotlin.math.abs(x2 - x1)
+            if (!vert && !hor) continue
+            // lado: 0 arriba, 1 derecha, 2 abajo, 3 izquierda (como [ImageEnhancer.Options.sheetSides])
+            val side = when {
+                vert && max(x1, x2) < 0.2 * w -> 3
+                vert && min(x1, x2) > 0.8 * w -> 1
+                hor && max(y1, y2) < 0.2 * h -> 0
+                hor && min(y1, y2) > 0.8 * h -> 2
+                else -> continue
+            }
+            val e0 = if (vert) SheetEdge(side, x1 - y1 * (x2 - x1) / (y2 - y1), (x2 - x1) / (y2 - y1))
+                else SheetEdge(side, y1 - x1 * (y2 - y1) / (x2 - x1), (y2 - y1) / (x2 - x1))
+            // (el tramo de Hough puede unir trozos de cantos distintos: recta reajustada al máximo del gradiente a lo largo del lado)
+            val e = refineEdge(e0, vert, ga, w, h, if (vert) kotlin.math.abs(y2 - y1) else kotlin.math.abs(x2 - x1)) ?: continue
+            // profundidad (distancia media al borde de la imagen): la más interior que valga
+            val depth = when (side) { 0 -> (y1 + y2) / 2; 1 -> w - (x1 + x2) / 2; 2 -> h - (y1 + y2) / 2; else -> (x1 + x2) / 2 }
+            if (depth <= bestD[side]) continue
+            // escalón y papel dentro a lo largo de TODA la recta (una recta que sólo en parte es un canto -el borde de la funda- y
+            // luego cruza la hoja no vale)
+            val t0 = 0.0; val t1 = (if (vert) h else w) - 1.0
+            val inw = if (side == 0 || side == 3) 1.0 else -1.0   // sentido hacia dentro de la hoja
+            val des = ArrayList<Double>(); var paperIn = 0; var tot = 0
+            val pin = DoubleArray(3); var nPin = 0
+            var t = t0
+            while (t <= t1) {
+                val c = e.a + e.b * t
+                val pi = if (vert) intArrayOf((c + inw * d).roundToInt(), t.roundToInt()) else intArrayOf(t.roundToInt(), (c + inw * d).roundToInt())
+                val po = if (vert) intArrayOf((c - inw * d).roundToInt(), t.roundToInt()) else intArrayOf(t.roundToInt(), (c - inw * d).roundToInt())
+                t += 3.0
+                if (pi[0] !in 0 until w || pi[1] !in 0 until h || po[0] !in 0 until w || po[1] !in 0 until h) continue
+                val ii = pi[1] * w + pi[0]; val io = po[1] * w + po[0]
+                var s2 = 0.0
+                for (k in 0 until 3) { val dv = ((lb[ii * 3 + k].toInt() and 0xFF) - (lb[io * 3 + k].toInt() and 0xFF)) * (if (k == 0) 100.0 / 255 else 1.0); s2 += dv * dv }
+                des.add(kotlin.math.sqrt(s2)); tot++
+                if ((bb[ii].toInt() and 0xFF) >= 200) { paperIn++; for (k in 0 until 3) pin[k] += lb[ii * 3 + k].toInt() and 0xFF; nPin++ }
+            }
+            if (tot < max(10.0, 0.5 * (t1 - t0) / 3.0)) continue
+            des.sort()
+            val step = des[des.size / 2]
+            // (y escalón en casi todo el lado: una recta que cruza la hoja tiene papel a los dos lados en ese tramo)
+            val stepFrac = des.count { it >= 0.5 * SHEET_STEP }.toDouble() / des.size
+            // escritura del otro lado (entre la recta y el borde de la imagen) SOBRE PAPEL como el de dentro (las astillas de la
+            // madera o los restos de la funda tienen otro fondo)
+            for (k in 0 until 3) pin[k] /= max(1, nPin)
+            var beyond = 0
+            for (p in letters) {
+                val c = e.a + e.b * (if (vert) p[1] else p[0])
+                val v = if (vert) p[0] else p[1]
+                if ((v - c) * inw >= -0.3 * lhS) continue
+                // fondo de la letra: píxeles blancos del B/N a ~0.8 letras alrededor
+                var near = 0; var fr = 0
+                for ((dx, dy) in listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1, 1 to 1, -1 to -1, 1 to -1, -1 to 1)) {
+                    val x = (p[0] + dx * 0.8 * lhS).roundToInt(); val y = (p[1] + dy * 0.8 * lhS).roundToInt()
+                    if (x !in 0 until w || y !in 0 until h) continue
+                    val i = y * w + x
+                    if ((bb[i].toInt() and 0xFF) < 200) continue
+                    var s2 = 0.0
+                    for (k in 0 until 3) { val dv = ((lb[i * 3 + k].toInt() and 0xFF) - pin[k]) * (if (k == 0) 100.0 / 255 else 1.0); s2 += dv * dv }
+                    fr++; if (kotlin.math.sqrt(s2) < max(4.0, 0.5 * step)) near++
+                }
+                if (fr > 0 && near * 2 >= fr) beyond++
+            }
+            val ok = NaturalMath.sheetEdgeOk(step, stepFrac, paperIn.toDouble() / tot, beyond)
+            if (logComps) log?.invoke("canto lado $side prof=%.0f escalón=%.1f (%.2f) papel=%.2f letras fuera=$beyond -> $ok".format(depth, step, stepFrac, paperIn.toDouble() / tot))
+            if (ok) { best[side] = e; bestD[side] = depth }
+        }
+        if (best.all { it == null }) return null
+        val m = Mat.zeros(h, w, CvType.CV_8U)
+        val mg = 1.0   // (1 px hacia dentro: la propia línea del canto)
+        for (side in 0..3) {
+            val e = best[side] ?: continue
+            val pts = when (side) {
+                3 -> listOf(0.0 to 0.0, e.a + mg to 0.0, e.a + e.b * h + mg to h.toDouble(), 0.0 to h.toDouble())
+                1 -> listOf(w.toDouble() to 0.0, e.a - mg to 0.0, e.a + e.b * h - mg to h.toDouble(), w.toDouble() to h.toDouble())
+                0 -> listOf(0.0 to 0.0, 0.0 to e.a + mg, w.toDouble() to e.a + e.b * w + mg, w.toDouble() to 0.0)
+                else -> listOf(0.0 to h.toDouble(), 0.0 to e.a - mg, w.toDouble() to e.a + e.b * w - mg, w.toDouble() to h.toDouble())
+            }
+            val mp = MatOfPoint(*pts.map { org.opencv.core.Point(it.first, it.second) }.toTypedArray())
+            Imgproc.fillPoly(m, listOf(mp), Scalar(255.0)); mp.release()
+        }
+        log?.invoke("canto de la hoja: lados " + (0..3).filter { best[it] != null } + " fuera %.3f".format(Core.countNonZero(m).toDouble() / n))
+        debug?.let { d -> val v = bag.mat(); Imgproc.cvtColor(o, v, Imgproc.COLOR_RGB2BGR); v.setTo(Scalar(0.0, 0.0, 255.0), m); d("sheet", v) }
+        return m
+    }
+
+    /**
+     * Reajusta la recta [e] del canto: a lo largo de todo el lado, el máximo del gradiente perpendicular (gris [g]) a +-6 px
+     * de la recta; mínimos cuadrados sobre esos puntos y otra vez sólo con los que quedan a <= 2 px. null si el canto no
+     * sigue la recta en al menos el 80 % de la longitud del tramo detectado (una recta que une trozos de cantos distintos y cruza la hoja).
+     */
+    private fun refineEdge(e: SheetEdge, vert: Boolean, g: ByteArray, w: Int, h: Int, segLen: Double): SheetEdge? {
+        val len = if (vert) h else w
+        val ts = ArrayList<Double>(); val cs = ArrayList<Double>()
+        var t = 0
+        fun gv(x: Int, y: Int) = g[y * w + x].toInt() and 0xFF
+        while (t < len) {
+            val c0 = e.a + e.b * t
+            var best = 0; var bu = 0
+            for (u in -6..6) {
+                val c = (c0 + u).roundToInt()
+                val gr = if (vert) { if (c - 1 < 0 || c + 1 >= w) continue; kotlin.math.abs(gv(c + 1, t) - gv(c - 1, t)) }
+                    else { if (c - 1 < 0 || c + 1 >= h) continue; kotlin.math.abs(gv(t, c + 1) - gv(t, c - 1)) }
+                if (gr > best) { best = gr; bu = u }
+            }
+            if (best >= 6) { ts.add(t.toDouble()); cs.add((c0 + bu).roundToInt().toDouble()) }
+            t += 2
+        }
+        val need = 0.8 * segLen / 2   // (puntos cada 2 px)
+        if (ts.size < need) return null
+        fun fit(idx: List<Int>): Pair<Double, Double>? {
+            if (idx.size < 10) return null
+            var st = 0.0; var sc = 0.0; var stt = 0.0; var stc = 0.0
+            for (i in idx) { st += ts[i]; sc += cs[i]; stt += ts[i] * ts[i]; stc += ts[i] * cs[i] }
+            val m = idx.size.toDouble(); val den = m * stt - st * st
+            if (kotlin.math.abs(den) < 1e-9) return null
+            val b = (m * stc - st * sc) / den
+            return (sc - b * st) / m to b
+        }
+        var ab = fit(ts.indices.toList()) ?: return null
+        var nIn = 0
+        repeat(2) {
+            val inl = ts.indices.filter { kotlin.math.abs(cs[it] - (ab.first + ab.second * ts[it])) <= 2.0 }
+            nIn = inl.size
+            ab = fit(inl) ?: return null
+        }
+        if (logComps) log?.invoke("canto reajuste lado ${e.side} a=%.0f b=%.3f -> a=%.0f b=%.3f puntos=${ts.size} dentro=$nIn de ${len / 2}".format(e.a, e.b, ab.first, ab.second))
+        if (kotlin.math.abs(ab.second) > 0.21 || nIn < need) return null
+        return SheetEdge(e.side, ab.first, ab.second)
+    }
+
     /** Mitad exacta (media 2x2): el bilineal a escala 1/2 da la misma media y es varias veces más rápido que INTER_AREA. */
     private fun halve(src: Mat, dst: Mat) =
         Imgproc.resize(src, dst, Size(max(1, src.cols() / 2).toDouble(), max(1, src.rows() / 2).toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR)
@@ -1236,15 +1439,16 @@ internal object NaturalColor {
         }
         val fig = if (inp.bridgeOnly) null else upMask8(g.figures, g.scale, outer, bag)
         if (fig != null) Core.max(a, fig, a)
-        // Fondo ajeno: fuera (también lo que el B/N dejó: madera, cantos)
-        if (!inp.bridgeOnly && g.foreign != null) upMask8(g.foreign, g.scale, outer, bag)?.let { f ->
-            Core.bitwise_not(f, f)
-            Core.multiply(a, f, a, 1.0 / 255)
-            fm?.let { m -> Core.multiply(m, f, m, 1.0 / 255) }
-        }
         if (!inp.bridgeOnly && g.foreignSoft != null) upMask8(g.foreignSoft, g.scale, outer, bag)?.let { f ->
             Core.bitwise_not(f, f)
             Core.multiply(a, f, a, 1.0 / 255); Core.max(a, aBW, a)
+            fm?.let { m -> Core.multiply(m, f, m, 1.0 / 255) }
+        }
+        // Fondo ajeno: fuera (también lo que el B/N dejó: madera, cantos, lo de fuera de la hoja; después de la zona ajena
+        // "blanda", que devuelve la tinta del B/N)
+        if (!inp.bridgeOnly && g.foreign != null) upMask8(g.foreign, g.scale, outer, bag)?.let { f ->
+            Core.bitwise_not(f, f)
+            Core.multiply(a, f, a, 1.0 / 255)
             fm?.let { m -> Core.multiply(m, f, m, 1.0 / 255) }
         }
         if (!inp.bridgeOnly && OFF and 2 == 0) {
