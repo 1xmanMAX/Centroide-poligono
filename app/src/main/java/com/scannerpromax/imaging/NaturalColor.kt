@@ -80,7 +80,7 @@ internal object NaturalMath {
      * Clase de una componente de croma (a la escala de análisis, [lh] = altura de letra a esa escala).
      * 0 = descartar (mota, rejilla/renglón largo y fino), 1 = trazo de color, 2 = figura/foto/logo (pasa entera).
      */
-    fun colorComponentClass(w: Int, h: Int, area: Int, lh: Double, inkFrac: Double = 1.0, thickness: Double = 0.0, vivid: Boolean = true): Int {
+    fun colorComponentClass(w: Int, h: Int, area: Int, lh: Double, inkFrac: Double = 1.0, thickness: Double = 0.0, vivid: Boolean = true, colorful: Boolean = true): Int {
         val l = max(2.0, lh)
         if (area < max(3.0, 0.02 * l * l)) return 0
         val long = max(w, h).toDouble(); val short = min(w, h).toDouble()
@@ -93,7 +93,9 @@ internal object NaturalMath {
         // resaltado, foto o logo en gris); una banda de color vacía (margen, cabecera del cuaderno) no es escritura
         // Grosor = 2 x máxima distancia al borde (una palabra con las letras fundidas sigue siendo fina; una banda no)
         val thick = thickness > 1.2 * l
-        if (thickness >= 2.5 * l && area >= 25 * l * l && fill >= 0.35 && short >= 3 * l) return if (inkFrac >= 0.04) 2 else 0
+        // Figura (foto, logo): gruesa, compacta y de color en conjunto (una tabla con bandas de color no lo es: sus letras
+        // siguen el tratamiento de la tinta)
+        if (colorful && thickness >= 2.5 * l && area >= 25 * l * l && fill >= 0.35 && short >= 3 * l) return if (inkFrac >= 0.04) 2 else 0
         if (thick && inkFrac < 0.02 && ((long > 8 * l && fill > 0.5) || !vivid)) return 0
         // Sin nada de tinta en el B/N, sólo si su color u oscuridad media es clara (resaltador, tinta de color): las motas
         // del papel, de una banda impresa o los agujeros de la espiral, débiles, no
@@ -130,8 +132,11 @@ internal object NaturalColor {
     const val TILE = 1024
     const val SATURATION = 1.0
     /** Densidad óptica (luminancia) objetivo de la tinta tenue y refuerzo máximo ([NaturalMath.densityGain]). */
-    const val OD_TARGET = 0.75
+    const val OD_TARGET = 0.9
     const val K_MAX = 2.8
+    /** Cobertura del alfa (ventana de ~1 letra) desde la que una zona es color macizo (resaltador, banda): sin refuerzo. */
+    const val FILL_LO = 0.55
+    const val FILL_HI = 0.8
     const val NEUTRAL_LO = 4.0
     const val NEUTRAL_HI = 11.0
     const val MAX_BLACK = 70.0
@@ -204,7 +209,7 @@ internal object NaturalColor {
                     val bwT = inp.bw.submat(y, y1, x, x1)
                     val mn = Core.minMaxLoc(bwT).minVal; bwT.release()
                     val any = mn < 250 || anyIn(supB, sw, shh, g.scale, x, y, x1, y1) || anyIn(figB, sw, shh, g.scale, x, y, x1, y1)
-                    if (any) tile(inp, g, out, Rect(x, y, x1 - x, y1 - y), pad, r, kc, kn, kl)
+                    if (any) tile(inp, g, out, Rect(x, y, x1 - x, y1 - y), pad, r, kc, kn, kl, lh)
                     else skipped++
                     x = x1
                 }
@@ -325,7 +330,8 @@ internal object NaturalColor {
                     if (it == 0 || foreign[it] || NaturalMath.touchesBorder(x, y, w, h, sw, shh)) 0
                     else {
                         val c = NaturalMath.colorComponentClass(w, h, ar, lhS, inkF, thk[it],
-                            vivid = NaturalMath.vivid(sC[it] / max(1, ar), sD[it] / max(1, ar), cLo, tF, cPaper, max(w, h) < 8 * lhS && !NaturalMath.nearBorder(x, y, w, h, sw, shh, 0.06)))
+                            vivid = NaturalMath.vivid(sC[it] / max(1, ar), sD[it] / max(1, ar), cLo, tF, cPaper, max(w, h) < 8 * lhS && !NaturalMath.nearBorder(x, y, w, h, sw, shh, 0.06)),
+                            colorful = sC[it] / max(1, ar) >= 2.0 * cLo)
                         // Junto al borde (restos del canto, agujeros, mesa, madera): sólo trazos finos con tinta en el B/N
                         if (NaturalMath.nearBorder(x, y, w, h, sw, shh) && (inkF < 0.01 || ((c == 2 || thk[it] > 1.2 * lhS) && inkF < 0.05))) 0
                         // (B/N: sólo lo que continúa tinta que el B/N ya tiene; ni color suelto ni figuras)
@@ -434,7 +440,7 @@ internal object NaturalColor {
     }
 
     /** Una tesela [inner] (con [pad] de contexto) -> escribe en [out]. */
-    private fun tile(inp: Inputs, g: Global, out: Mat, inner: Rect, pad: Int, r: Int, kc: Int, kn: Int, kl: Int) = MatBag().use { bag ->
+    private fun tile(inp: Inputs, g: Global, out: Mat, inner: Rect, pad: Int, r: Int, kc: Int, kn: Int, kl: Int, lhT: Double) = MatBag().use { bag ->
         val W = inp.bw.cols(); val H = inp.bw.rows()
         val ox0 = max(0, inner.x - pad); val oy0 = max(0, inner.y - pad)
         val ox1 = min(W, inner.x + inner.width + pad); val oy1 = min(H, inner.y + inner.height + pad)
@@ -508,15 +514,18 @@ internal object NaturalColor {
         if (Core.countNonZero(a) == 0) return@use   // (tesela sin tinta: queda blanca)
         // El COLOR se calcula a media resolución (varía despacio dentro del trazo; el borde nítido lo da el alfa a
         // resolución completa): ~4 veces menos trabajo en la parte más cara
-        val dkH = bag.mat(); Imgproc.resize(dk, dkH, hs, 0.0, 0.0, Imgproc.INTER_AREA)
         val figH = if (fig != null && Core.countNonZero(fig) > 0) bag.mat().also { Imgproc.resize(fig, it, hs, 0.0, 0.0, Imgproc.INTER_AREA) } else null
         // Color del centro del trazo: media ponderada por oscuridad^3 en una ventana pequeña (el borde, mezcla de tinta
-        // y papel, toma el color del núcleo: sin aura clara ni bordes lavados)
-        val wgt = bag.mat(); val cw = bag.mat(); chH.convertTo(cw, -1, 1.0 / 120.0)
-        Core.max(dkH, cw, wgt); Imgproc.threshold(wgt, wgt, 0.0, 0.0, Imgproc.THRESH_TOZERO)
+        // y papel, toma el color del núcleo: sin aura clara ni bordes lavados). Los pesos y productos se forman a
+        // resolución completa y se REDUCEN (suma por áreas): el trazo fino no se diluye con el papel al bajar a media resolución
+        val wgt = bag.mat(); val cw = bag.mat(); chroma.convertTo(cw, -1, 1.0 / 120.0)
+        Core.max(dk, cw, wgt); Imgproc.threshold(wgt, wgt, 0.0, 0.0, Imgproc.THRESH_TOZERO)
         Core.pow(wgt, 3.0, wgt); Core.add(wgt, Scalar(1e-5), wgt)
-        val w3 = bag.mat(); Core.merge(listOf(wgt, wgt, wgt), w3)
-        val num = bag.mat(); Core.multiply(nwH, w3, num)
+        val w3f = bag.mat(); Core.merge(listOf(wgt, wgt, wgt), w3f)
+        val numF = bag.mat(); Core.multiply(nw, w3f, numF)
+        val num = bag.mat(); Imgproc.resize(numF, num, hs, 0.0, 0.0, Imgproc.INTER_AREA)
+        val w3 = bag.mat(); Imgproc.resize(w3f, w3, hs, 0.0, 0.0, Imgproc.INTER_AREA)
+        numF.release(); w3f.release()
         val rh = max(1, (r + 1) / 2)
         val ks = Size((2 * rh + 1).toDouble(), (2 * rh + 1).toDouble())
         Imgproc.boxFilter(num, num, -1, ks); val den = bag.mat(); Imgproc.boxFilter(w3, den, -1, ks)
@@ -534,7 +543,17 @@ internal object NaturalColor {
             Core.max(lc, Scalar(1e-3), lc)
             val k = bag.mat(); Core.divide(OD_TARGET, lc, k)
             Imgproc.threshold(k, k, K_MAX, K_MAX, Imgproc.THRESH_TRUNC); Core.max(k, Scalar(1.0), k)
-            if (figH != null) { val nf = bag.mat(); figH.convertTo(nf, -1, -1.0, 1.0); Core.subtract(k, Scalar(1.0), k); Core.multiply(k, nf, k); Core.add(k, Scalar(1.0), k) }
+            // (sin refuerzo en figuras ni en zonas de color gruesas: un resaltador o una banda de tabla no son tinta tenue)
+            val noK = figH ?: Mat.zeros(hs, CvType.CV_32F).also { bag.add(it) }
+            // Zona de color maciza = el alfa cubre casi toda una ventana de ~1 altura de letra (un trazo, aunque sea
+            // grueso o esté en un párrafo denso, cubre < ~50 %)
+            run {
+                val aH = bag.mat(); Imgproc.resize(a, aH, hs, 0.0, 0.0, Imgproc.INTER_AREA)
+                val kw = Cv.odd((lhT / 2.0).roundToInt().coerceIn(3, 41))
+                Imgproc.boxFilter(aH, aH, -1, Size(kw.toDouble(), kw.toDouble()))
+                rampF(aH, FILL_LO, FILL_HI); Core.max(noK, aH, noK)
+            }
+            run { val nf = bag.mat(); noK.convertTo(nf, -1, -1.0, 1.0); Core.subtract(k, Scalar(1.0), k); Core.multiply(k, nf, k); Core.add(k, Scalar(1.0), k) }
             val k3 = bag.mat(); Core.merge(listOf(k, k, k), k3)
             Core.max(col, Scalar.all(0.255), col); Core.multiply(col, Scalar.all(1.0 / 255), col); Core.min(col, Scalar.all(1.0), col)
             Core.log(col, col); Core.multiply(col, k3, col); Core.exp(col, col); Core.multiply(col, Scalar.all(255.0), col)
