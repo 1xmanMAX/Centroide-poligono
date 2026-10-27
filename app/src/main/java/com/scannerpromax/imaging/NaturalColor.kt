@@ -238,6 +238,8 @@ internal object NaturalColor {
     const val SHEET_LETTERS = 3
     /** Croma (mediana) de lo de fuera del canto a partir del cual, si además es liso, es una banda impresa de color. */
     const val SHEET_OUT_CHROMA = 25.0
+    /** Desviación típica mínima de L* fuera del canto (textura del fondo ajeno; una banda impresa es lisa). */
+    const val SHEET_OUT_SD = 8.0
     /** Tinta neutra más clara que la típica (L* de la mediana + LO..HI): conserva su gris (rampa). */
     @JvmField var NEUTRAL_KEEP_LO = 15.0
     @JvmField var NEUTRAL_KEEP_HI = 30.0
@@ -990,8 +992,8 @@ internal object NaturalColor {
             // (letras y palabras de cualquier cuerpo -pie de página pequeño, titular grande, palabra manuscrita enlazada-; no
             // las rayas largas y finas: cantos, bordes de la mesa o de la funda)
             if (mx < 0.15 * lhS || mx > 6.0 * lhS || ar < 4 || ar > 0.7 * bw0 * bh0) continue
-            // (lo pegado al borde de la imagen -a <= 1 %- es resto del recorte, no escritura)
-            val bm = max(2, (0.01 * max(w, h)).roundToInt())
+            // (lo pegado al borde de la imagen es resto del recorte, no escritura)
+            val bm = 3
             if (st[c * 5] <= bm || st[c * 5 + 1] <= bm || st[c * 5] + bw0 >= w - bm || st[c * 5 + 1] + bh0 >= h - bm) continue
             if (mx > 3.0 * lhS && min(bw0, bh0) < 0.4 * lhS) continue
             letters.add(doubleArrayOf(st[c * 5] + bw0 / 2.0, st[c * 5 + 1] + bh0 / 2.0, mx.toDouble()))
@@ -1017,13 +1019,17 @@ internal object NaturalColor {
             // (el tramo de Hough puede unir trozos de cantos distintos: recta reajustada al máximo del gradiente a lo largo del lado)
             val e = refineEdge(e0, vert, ga, w, h, if (vert) kotlin.math.abs(y2 - y1) else kotlin.math.abs(x2 - x1)) ?: continue
             // profundidad (distancia media al borde de la imagen): la más interior que valga
-            val depth = when (side) { 0 -> (y1 + y2) / 2; 1 -> w - (x1 + x2) / 2; 2 -> h - (y1 + y2) / 2; else -> (x1 + x2) / 2 }
+            // profundidad de la recta REAJUSTADA (en sus dos extremos, dentro de la banda exterior del 25 %)
+            val len = if (vert) h.toDouble() else w.toDouble(); val dim = if (vert) w.toDouble() else h.toDouble()
+            val dA = if (side == 0 || side == 3) e.a else dim - e.a; val dB = if (side == 0 || side == 3) e.a + e.b * len else dim - (e.a + e.b * len)
+            if (min(dA, dB) < -0.1 * dim || max(dA, dB) > 0.25 * dim) continue
+            val depth = (dA + dB) / 2
             if (depth <= bestD[side]) continue
             // escalón y papel dentro a lo largo de TODA la recta (una recta que sólo en parte es un canto -el borde de la funda- y
             // luego cruza la hoja no vale)
             val t0 = 0.0; val t1 = (if (vert) h else w) - 1.0
             val inw = if (side == 0 || side == 3) 1.0 else -1.0   // sentido hacia dentro de la hoja
-            val des = ArrayList<Double>(); val dv3 = ArrayList<DoubleArray>(); val cOut = ArrayList<Double>(); var sL = 0.0; var sL2 = 0.0; var paperIn = 0; var tot = 0
+            val des = ArrayList<Double>(); val dv3 = ArrayList<DoubleArray>(); val cOut = ArrayList<Double>(); val lOut = ArrayList<Double>(); val abOut = ArrayList<Double>(); var sL = 0.0; var sL2 = 0.0; var paperIn = 0; var tot = 0
             var t = t0
             while (t <= t1) {
                 val c = e.a + e.b * t
@@ -1037,7 +1043,8 @@ internal object NaturalColor {
                 for (k in 0 until 3) { val dv = ((lb[ii * 3 + k].toInt() and 0xFF) - (lb[io * 3 + k].toInt() and 0xFF)) * (if (k == 0) 100.0 / 255 else 1.0); v3[k] = dv; s2 += dv * dv }
                 des.add(kotlin.math.sqrt(s2)); dv3.add(v3); tot++
                 cOut.add(kotlin.math.hypot((lb[io * 3 + 1].toInt() and 0xFF) - 128.0, (lb[io * 3 + 2].toInt() and 0xFF) - 128.0))
-                val lo = (lb[io * 3].toInt() and 0xFF) * 100.0 / 255; sL += lo; sL2 += lo * lo
+                val lo = (lb[io * 3].toInt() and 0xFF) * 100.0 / 255; sL += lo; sL2 += lo * lo; lOut.add(lo)
+                abOut.add(kotlin.math.hypot((lb[io * 3 + 1].toInt() and 0xFF) - pab[0], (lb[io * 3 + 2].toInt() and 0xFF) - pab[1]))
                 if ((bb[ii].toInt() and 0xFF) >= 200 && paperAb(ii, 8.0)) paperIn++
             }
             if (tot < max(10.0, 0.5 * (t1 - t0) / 3.0)) continue
@@ -1072,8 +1079,12 @@ internal object NaturalColor {
             // (una banda impresa de color vivo y LISA -pie o cabecera de la página- no es fondo ajeno; la madera tiene vetas)
             val chrOut = cOut.sorted()[cOut.size / 2]
             val sdOut = kotlin.math.sqrt(max(0.0, sL2 / tot - (sL / tot) * (sL / tot)))
-            val ok = NaturalMath.sheetEdgeOk(step, stepFrac, paperIn.toDouble() / tot, beyond) && !(chrOut > SHEET_OUT_CHROMA && sdOut < 8.0)
-            if (logComps) log?.invoke("canto lado $side prof=%.0f escalón=%.1f (%.2f) papel=%.2f croma fuera=%.0f σL=%.1f letras fuera=$beyond -> $ok".format(depth, step, stepFrac, paperIn.toDouble() / tot, chrOut, sdOut))
+            // (y fuera hay FONDO AJENO: con textura -madera, objetos, cantos- y más oscuro que el papel o de otro color; una banda
+            // impresa lisa -pie de foto negro, cabecera de color- o el margen de la página no)
+            val lMed = lOut.sorted()[lOut.size / 2]; val abMed = abOut.sorted()[abOut.size / 2]
+            val foreignOut = sdOut >= SHEET_OUT_SD && (lMed < 0.75 * pab[2] * 100.0 / 255 || abMed >= 8.0)
+            val ok = NaturalMath.sheetEdgeOk(step, stepFrac, paperIn.toDouble() / tot, beyond) && foreignOut && !(chrOut > SHEET_OUT_CHROMA && sdOut < 8.0)
+            if (logComps) log?.invoke("canto lado $side prof=%.0f escalón=%.1f (%.2f) papel=%.2f croma fuera=%.0f σL=%.1f L=%.0f Δab=%.0f letras fuera=$beyond -> $ok".format(depth, step, stepFrac, paperIn.toDouble() / tot, chrOut, sdOut, lMed, abMed))
             if (ok) { best[side] = e; bestD[side] = depth }
         }
         if (best.all { it == null }) return null
