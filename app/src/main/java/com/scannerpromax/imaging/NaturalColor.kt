@@ -1087,7 +1087,7 @@ internal object NaturalColor {
         }
         // Tinta NEUTRA o DE COLOR, por zonas de ~1 letra (no por píxel: el borde de un trazo negro tiene franjas de
         // color de la lente y el desenfoque): croma medio del color del núcleo de los trazos, ponderado por el alfa
-        val tC = FloatArray(n)
+        val tC = FloatArray(n); val l0C = FloatArray(n)
         run {
             val colM0 = bag.add(Mat(n, 1, CvType.CV_32FC3)); colM0.put(0, 0, colC)
             Core.multiply(colM0, Scalar.all(1.0 / 255), colM0); Core.min(colM0, Scalar.all(1.0), colM0)
@@ -1118,14 +1118,15 @@ internal object NaturalColor {
                 if (chromaStats != null && aHA[i].toInt() and 0xFF > 200) chromaStats!!.add(cl)
             }
             // (croma propio del núcleo, para el tope del realce)
-            for (k in 0 until n) figC[k] = kotlin.math.sqrt(lb0[k * 3 + 1] * lb0[k * 3 + 1] + lb0[k * 3 + 2] * lb0[k * 3 + 2])
+            for (k in 0 until n) { figC[k] = kotlin.math.sqrt(lb0[k * 3 + 1] * lb0[k * 3 + 1] + lb0[k * 3 + 2] * lb0[k * 3 + 2]); l0C[k] = lb0[k * 3] }
         }
         NcProf.mark("c.gather"); NcProf.add("c.n", n.toDouble() / hn * 100)
         val colM = bag.add(Mat(n, 1, CvType.CV_32FC3)); colM.put(0, 0, colC)
         val noKM = bag.add(Mat(n, 1, CvType.CV_32F)); noKM.put(0, 0, noKC)
         val tM = bag.add(Mat(n, 1, CvType.CV_32F)); tM.put(0, 0, tC)
         val c0M = bag.add(Mat(n, 1, CvType.CV_32F)); c0M.put(0, 0, figC)
-        enhance(colM, noKM, tM, c0M, g, bag)
+        val l0M = bag.add(Mat(n, 1, CvType.CV_32F)); l0M.put(0, 0, l0C)
+        enhance(colM, noKM, tM, c0M, l0M, g, bag)
         NcProf.mark("c.enh")
         colM.get(0, 0, colC)
         val c8A = ByteArray(hn * 3) { -1 }
@@ -1140,7 +1141,7 @@ internal object NaturalColor {
     /**
      * Color del relleno liso en la tesela: media local (ventana de ~7 px a media resolución) del color balanceado de
      * los píxeles del relleno que no son tinta (el color propio de cada banda o columna, sin el de las letras), con el
-     * punto blanco de la página; donde no hay bastantes, el color del fondo sin trazos de la escala de análisis.
+     * los niveles negro/blanco de la página; donde no hay bastantes, el color del fondo sin trazos de la escala de análisis.
      */
     private fun localFill(fm: Mat, aBW: Mat, nbH: Mat, g: Global, outer: Rect, hs: Size, bag: MatBag): Mat {
         val fH = bag.mat(); areaDown(fm, fH, hs, bag)
@@ -1157,10 +1158,11 @@ internal object NaturalColor {
         Imgproc.boxFilter(mf, mf, -1, k, org.opencv.core.Point(-1.0, -1.0), false)
         val ok = bag.mat(); Imgproc.threshold(mf, ok, 3.0, 255.0, Imgproc.THRESH_BINARY); ok.convertTo(ok, CvType.CV_8U)
         Core.max(mf, Scalar(1e-3), mf); Core.merge(listOf(mf, mf, mf), m3); Core.divide(nf, m3, nf)
-        val c8 = bag.mat(); nf.convertTo(c8, CvType.CV_8UC3, 255.0 / g.white)
+        // (con los niveles de la página, como la tinta: el relleno conserva su peso visual frente al papel blanco puro)
+        val c8 = bag.mat(); nf.convertTo(c8, CvType.CV_8UC3, 255.0 / (g.white - g.black), -255.0 * g.black / (g.white - g.black))
         // (sin muestras propias: el color de la escala de análisis)
         val lo = upMask8(g.fillCol!!, g.scale, outer, bag, check = false)!!
-        val loH = bag.mat(); areaDown(lo, loH, hs, bag)
+        val loH = bag.mat(); areaDown(lo, loH, hs, bag); loH.convertTo(loH, -1, 255.0 / (g.white - g.black), -255.0 * g.black / (g.white - g.black))
         val nok = bag.mat(); Core.bitwise_not(ok, nok); loH.copyTo(c8, nok)
         val up = bag.mat(); Imgproc.resize(c8, up, outer.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
         return up
@@ -1244,7 +1246,7 @@ internal object NaturalColor {
      * densidad Beer-Lambert de la tinta tenue (salvo donde [noK] = 1: figuras, zonas macizas), niveles negro/blanco y
      * saturación en Lab (lo casi neutro sin dominante).
      */
-    private fun enhance(col: Mat, noK: Mat, t: Mat, c0: Mat, g: Global, bag: MatBag) {
+    private fun enhance(col: Mat, noK: Mat, t: Mat, c0: Mat, l0: Mat, g: Global, bag: MatBag) {
         run {
             val lc = bag.mat(); Core.transform(col, lc, Mat(1, 3, CvType.CV_32F).also { bag.add(it); it.put(0, 0, 0.299 / 255, 0.587 / 255, 0.114 / 255) })
             Core.max(lc, Scalar(1e-3), lc); Core.min(lc, Scalar(1.0), lc)
@@ -1269,6 +1271,12 @@ internal object NaturalColor {
         // niveles oscurecen la tinta tenue pero no la saturan de más; mismo tono (a y b escalan igual)
         run {
             val cap = bag.mat(); c0.convertTo(cap, -1, CHROMA_CAP, CHROMA_ADD); if (OFF and 32 != 0) cap.setTo(Scalar(1e4))
+            // (la tinta que se oscurece -más concentración, Beer-Lambert- gana croma en proporción: misma pureza, sin
+            // volverse gris; hasta x1.6)
+            val r = bag.mat(); L.convertTo(r, -1, -1.0, 100.0)
+            val d0 = bag.mat(); l0.convertTo(d0, -1, -1.0, 100.0); Core.max(d0, Scalar(5.0), d0)
+            Core.divide(r, d0, r); Core.max(r, Scalar(1.0), r); Imgproc.threshold(r, r, 1.6, 1.6, Imgproc.THRESH_TRUNC)
+            Core.multiply(cap, r, cap)
             val cc = bag.mat(); Core.max(c, Scalar(1e-3), cc)
             val k = bag.mat(); Core.divide(cap, cc, k); Imgproc.threshold(k, k, 1.0, 1.0, Imgproc.THRESH_TRUNC)
             Core.multiply(A, k, A); Core.multiply(B, k, B)
