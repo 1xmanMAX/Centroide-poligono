@@ -313,4 +313,28 @@ class NaturalColorTest {
         assertEquals("margen", 255.0, Core.minMaxLoc(margin.reshape(1)).minVal, 0.0)
         margin.release(); zone.release(); out.release(); nrm.release(); bw.release()
     }
+
+    @Test fun fotosRecortadas_soloLaFotoNoLosParrafos() {
+        assumeTrue("OpenCV de escritorio no disponible", SyntheticScenes.openCv)
+        MatBag().use { bag ->
+            val w = 600; val h = 800; val lh = 12.0
+            val lum = bag.add(Mat(h, w, CvType.CV_8U, Scalar(245.0)))
+            // Párrafos: renglones de trazos finos
+            for (row in 0 until 12) for (k in 0 until 40) {
+                val x = 40 + k * 13; val y = 60 + row * 18
+                Imgproc.line(lum, Point(x.toDouble(), y.toDouble()), Point(x.toDouble(), y + 9.0), Scalar(40.0), 1)
+                Imgproc.line(lum, Point(x.toDouble(), y.toDouble()), Point(x + 6.0, y.toDouble()), Scalar(40.0), 1)
+            }
+            // Foto: bloque de tonos medios con textura
+            val photo = Rect(150, 360, 300, 220)
+            val sub = lum.submat(photo); Core.randu(sub, 60.0, 190.0); sub.release()
+            val chroma = bag.add(Mat(h, w, CvType.CV_32F, Scalar(1.0)))
+            val paper = bag.mat(); Imgproc.threshold(lum, paper, 240.0, 255.0, Imgproc.THRESH_BINARY)
+            val rs = NaturalColor.photoRects(lum, chroma, paper, null, lh, 5.0, bag)
+            assertEquals(rs.toString(), 1, rs.size)
+            val r = rs[0]
+            assertTrue(r.toString(), r.x <= photo.x && r.y <= photo.y && r.x + r.width >= photo.x + photo.width && r.y + r.height >= photo.y + photo.height)
+            assertTrue(r.toString(), r.y > 60 + 12 * 18)
+        }
+    }
 }

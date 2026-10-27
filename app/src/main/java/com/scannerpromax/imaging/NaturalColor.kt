@@ -625,6 +625,20 @@ internal object NaturalColor {
                 Imgproc.rectangle(figures, r.tl(), org.opencv.core.Point(r.x + r.width - 1.0, r.y + r.height - 1.0), Scalar(255.0), -1)
                 Imgproc.rectangle(photos, r.tl(), org.opencv.core.Point(r.x + r.width - 1.0, r.y + r.height - 1.0), Scalar(255.0), -1)
             }
+            // (y lo detectado a trozos -una foto con cielo o paredes claras- se completa hasta su rectángulo)
+            if (!inp.bridgeOnly && inp.photoMode == 1) {
+                val all = bag.mat(); Core.bitwise_or(figures, photos, all)
+                Imgproc.dilate(all, all, Cv.kernel(Imgproc.MORPH_RECT, Cv.odd(max(3, lhS.roundToInt()))))
+                val lb2 = bag.mat(); val st2 = bag.mat(); val ce2 = bag.mat()
+                val n2 = Imgproc.connectedComponentsWithStats(all, lb2, st2, ce2, 8, CvType.CV_32S)
+                for (i in 1 until n2) {
+                    val rw = st2.get(i, 2)[0]; val rh = st2.get(i, 3)[0]
+                    if (rw < 5 * lhS || rh < 5 * lhS || rw * rh > 0.9 * sw * shh) continue
+                    val x = st2.get(i, 0)[0]; val y = st2.get(i, 1)[0]
+                    Imgproc.rectangle(figures, org.opencv.core.Point(x, y), org.opencv.core.Point(x + rw - 1, y + rh - 1), Scalar(255.0), -1)
+                    Imgproc.rectangle(photos, org.opencv.core.Point(x, y), org.opencv.core.Point(x + rw - 1, y + rh - 1), Scalar(255.0), -1)
+                }
+            }
             // (la foto se pinta desde el original: nunca sobre el fondo ajeno -fuera de la hoja, mesa-)
             foreignAll2?.let { f -> val nf = bag.mat(); Core.bitwise_not(f, nf); Core.bitwise_and(photos, nf, photos); Core.bitwise_and(figures, nf, figures) }
         }
