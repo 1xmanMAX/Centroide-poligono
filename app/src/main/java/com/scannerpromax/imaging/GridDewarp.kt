@@ -290,7 +290,7 @@ object GridDewarp {
         Imgproc.threshold(ink, bin, inkThreshold(ink), 255.0, Imgproc.THRESH_BINARY)
         val tl = textLayout(bin, max(ow, oh).toDouble(), bag) ?: return null
         if (tl.segs.isEmpty()) return null
-        val al = MarginAlign.estimate(tl.segs, tl.rowSlopes, tl.rowLens, tl.med, tl.pitch, ow.toDouble(), oh.toDouble()) ?: return null
+        val al = MarginAlign.estimate(tl.segs, tl.rowSlopes, tl.rowLens, tl.med, tl.pitch, ow.toDouble(), oh.toDouble(), shearOnly = true) ?: return null
         val k = al.m ?: return null to al.info
         if (!MarginAlign.small(k, ow.toDouble(), oh.toDouble(), 0.04)) return null to "${al.info} (esquinas > 4 %)"
         val map = MarginAlign.composeMap(model.map, model.gw, model.gh, ow.toDouble(), oh.toDouble(), k) ?: return null to al.info

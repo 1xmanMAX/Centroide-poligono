@@ -90,6 +90,11 @@ internal object MarginAlign {
     fun estimate(
         segs: List<TextGuides.Seg>, rowSlopes: DoubleArray, rowLens: DoubleArray,
         med: Double, pitch: Double, w: Double, h: Double,
+        /**
+         * Sólo cizalla (tras la malla de una hoja curvada: el canto derecho de esa salida es menos fiable y el trapecio
+         * cambia el paso vertical que la malla ya igualó). Con canto derecho, su pendiente debe coincidir con la izquierda.
+         */
+        shearOnly: Boolean = false,
     ): Result? {
         if (!enabled || rowSlopes.size < 10 || segs.size < 10) return null
         val ang = DoubleArray(rowSlopes.size) { Math.toDegrees(atan(rowSlopes[it])) }
@@ -161,6 +166,11 @@ internal object MarginAlign {
                 if (right == null && l2.n >= 0.6 * l1.n && l2.span >= minSpan) bL = (l1.b * l1.n + l2.b * l2.n) / (l1.n + l2.n)
             }
         }
+        if (shearOnly && right != null) {
+            if (abs(right.b - bL) > max(0.006, 3 * (l1.seB + right.seB))) return Result(angle, l1, right, null, w, h, guide, "$log márgenes discrepan")
+            bL = (bL * l1.n + right.b * right.n) / (l1.n + right.n)
+            right = null
+        }
         if (abs(bL) > 0.07) return Result(angle, l1, right, null, w, h, guide, "$log pendiente excesiva")
         // Pendientes no significativas: 0
         val sigL = abs(bL) >= 3 * l1.seB
@@ -181,8 +191,50 @@ internal object MarginAlign {
         val m = mul3(kc, rot)
         // Seguridad: la corrección no deforma más de un 8 % en ningún punto de la hoja
         if (!moderate(m, rot, w, h)) return Result(angle, l1, right, null, w, h, guide, "$log deformación excesiva")
+        // Comprobación: TODAS las columnas claras de inicios deben quedar verticales con la corrección; si una queda
+        // inclinada (p. ej. la cabecera recta y los párrafos torcidos) la distorsión es local: malla, no homografía
+        val o = DoubleArray(2)
+        for ((col, idx) in columns(sx, sy, sr, max(0.25 * med, 1.5), pitch, med, maxRms)) {
+            val xs = DoubleArray(idx.size); val ys = DoubleArray(idx.size)
+            for ((q, i) in idx.withIndex()) { apply(kc, sx[i], sy[i], o); xs[q] = o[0]; ys[q] = o[1] }
+            val b2 = slope(xs, ys)
+            if (abs(b2) > max(0.006, 3 * col.seB) && abs(b2) * col.span > minDrift) {
+                log.append(" col n=${col.n} b=%.4f->%.4f".format(col.b, b2))
+                val pts = FloatArray(idx.size * 2)
+                val sel = idx.sortedBy { segs[sIdx[it]].ys }
+                for ((q, i) in sel.withIndex()) { pts[2 * q] = segs[sIdx[i]].xs; pts[2 * q + 1] = segs[sIdx[i]].ys }
+                return Result(angle, l1, right, null, w, h, guide, "$log columnas discrepan", local = true, guide2 = pts)
+            }
+        }
         log.append(" corrige deriva=%.1f px%s".format(drift, if (right != null) " trapecio" else " cizalla"))
         return Result(angle, l1, right, m, w, h, guide, log.toString())
+    }
+
+    /**
+     * Hasta 4 columnas claras de inicios (n ≥ 6, recorrido ≥ 4 renglones, dispersión de impreso), quitando en cada vuelta
+     * los puntos a menos de 3 letras de la anterior; con sus índices en [x]/[y].
+     */
+    private fun columns(x: DoubleArray, y: DoubleArray, rows: IntArray, tol: Double, pitch: Double, med: Double, maxRms: Double): List<Pair<Line, IntArray>> {
+        val out = ArrayList<Pair<Line, IntArray>>()
+        var left = x.indices.toList()
+        repeat(4) {
+            if (left.size < 6) return out
+            val xx = DoubleArray(left.size) { x[left[it]] }; val yy = DoubleArray(left.size) { y[left[it]] }
+            val rr = IntArray(left.size) { rows[left[it]] }
+            val c = fitColumn(xx, yy, rr, tol, minDy = 0.5 * pitch) ?: return out
+            if (c.n < 6 || c.span < 4 * pitch || c.rms > maxRms) return out
+            out.add(c to IntArray(c.idx.size) { left[c.idx[it]] })
+            left = left.filter { abs(x[it] - c.x(y[it])) > 3 * med }
+        }
+        return out
+    }
+
+    /** Pendiente dx/dy por mínimos cuadrados. */
+    private fun slope(x: DoubleArray, y: DoubleArray): Double {
+        val my = y.average(); val mx = x.average()
+        var syy = 0.0; var sxy = 0.0
+        for (i in x.indices) { syy += (y[i] - my) * (y[i] - my); sxy += (y[i] - my) * (x[i] - mx) }
+        return if (syy < 1e-9) 0.0 else sxy / syy
     }
 
     /**

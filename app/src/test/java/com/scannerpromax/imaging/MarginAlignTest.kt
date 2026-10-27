@@ -174,6 +174,28 @@ class MarginAlignTest {
     }
 
     @Test
+    fun correccionCompuestaEnElMapaDeLaMalla() {
+        // Mapa identidad (salida = plano) 11 x 15 sobre 1000 x 1400 px; corrección = cizalla
+        val gw = 11; val gh = 15; val ow = 1000.0; val oh = 1400.0
+        val map = FloatArray(gw * gh * 2) { i -> val n = i / 2; if (i % 2 == 0) (n % gw).toFloat() / (gw - 1) else (n / gw).toFloat() / (gh - 1) }
+        val k = MarginAlign.keystone(0.0, 0.02, Double.NaN, Double.NaN).let { s ->
+            // centrada en y = 700
+            MarginAlign.mul3(doubleArrayOf(1.0, 0.0, 0.0, 0.0, 1.0, 700.0, 0.0, 0.0, 1.0), MarginAlign.mul3(s, doubleArrayOf(1.0, 0.0, 0.0, 0.0, 1.0, -700.0, 0.0, 0.0, 1.0)))
+        }
+        val m2 = MarginAlign.composeMap(map, gw, gh, ow, oh, k)!!
+        // Cada nodo de salida toma la fuente k⁻¹·P (con extrapolación lineal en los bordes)
+        val ki = MarginAlign.inv3(k)!!
+        val o = DoubleArray(2)
+        for ((a, b) in listOf(0 to 0, 5 to 7, 10 to 14, 3 to 12)) {
+            MarginAlign.apply(ki, a * (ow - 1) / (gw - 1), b * (oh - 1) / (gh - 1), o)
+            assertEquals(o[0] / (ow - 1), m2[2 * (b * gw + a)].toDouble(), 1e-4)
+            assertEquals(o[1] / (oh - 1), m2[2 * (b * gw + a) + 1].toDouble(), 1e-4)
+        }
+        assertTrue(MarginAlign.small(k, ow, oh, 0.02))
+        assertFalse(MarginAlign.small(k, ow, oh, 0.01))
+    }
+
+    @Test
     fun inclinacionDeUnaGuiaCuentaEnLaMalla() {
         val ys = FloatArray(20) { 100f + it * 30f }
         val xs = FloatArray(20) { 200f + 0.03f * ys[it] }
