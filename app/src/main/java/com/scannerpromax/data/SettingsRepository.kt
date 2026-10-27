@@ -76,7 +76,7 @@ class SettingsRepository(private val context: Context) {
                 null -> d.pdfTextMode
             }
         return AppSettings(
-            // Sólo hay 3 filtros en la interfaz: un ajuste antiguo (Auto, Mágico Pro, Grises...) se mapea al visible
+            // Sólo hay 4 filtros en la interfaz: un ajuste antiguo (Auto, Mágico Pro, Grises...) se mapea al visible
             defaultFilter = enumOr(this[Keys.DEFAULT_FILTER], d.defaultFilter).uiFilter,
             autoCapture = this[Keys.AUTO_CAPTURE] ?: d.autoCapture,
             autoRemoveLines = this[Keys.AUTO_REMOVE_LINES] ?: d.autoRemoveLines,

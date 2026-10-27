@@ -417,7 +417,8 @@ internal object PrintedPage {
         }
         val liftOn = Core.minMaxLoc(lift).maxVal > 1.005
         val out = Mat(oh, ow, if (color) CvType.CV_8UC3 else CvType.CV_8UC1, Scalar.all(255.0))
-        val natBuf = if (natural) bag.add(Mat(oh, ow, CvType.CV_8UC3, Scalar.all(Cv.PAPER_LEVEL))) else null
+        val bridgeBw = !color && !natural && NaturalColor.BRIDGE_BW
+        val natBuf = if (natural || bridgeBw) bag.add(Mat(oh, ow, CvType.CV_8UC3, Scalar.all(Cv.PAPER_LEVEL))) else null
         val levels = Cv.levelsLut(black, white, if (color) 1.25 else 1.0)
         // Luz de color (lámpara cálida, pantalla, foto con dominante): la tinta toma el tono de la luz y el color
         // reforzado la dejaba azulada o verdosa (y los textos claros sobre barras oscuras, invisibles) -> en COLOR
@@ -501,7 +502,11 @@ internal object PrintedPage {
         }
         levels.release(); satLut.release(); tmp.release()
         log?.invoke("render ${style} ${w}x$h -> ${ow}x$oh f=%.2f lh=%.1f win=$win black=%.0f white=%.0f noise=%.1f images=${images.size} satK=%.2f".format(f, lh, black, white, noise, satK))
-        if (natBuf != null) {
+        if (natBuf != null && bridgeBw) {
+            // B/N: continuidad del trazo (los bloques de imagen y el fondo ajeno no se tocan)
+            runCatching { NaturalColor.bridge(out, natBuf, lh, 0.0, outsideFull, images) }.onFailure { if (Cv.isOutOfMemory(it)) throw it }
+            out
+        } else if (natBuf != null) {
             try {
                 NaturalColor.compose(NaturalColor.Inputs(out, natBuf, lh, 0.0, images = images, exclude = outsideFull))
             } finally { out.release() }

@@ -260,6 +260,7 @@ object ScanRequestParser {
         "bw", "b&w", "black_white", "blackwhite", "mono", "blanco_negro" -> FilterType.BLACK_WHITE
         "enhanced", "magic", "text", "auto", "color_text" -> FilterType.MAGIC
         "original", "color", "none" -> FilterType.ORIGINAL
+        "natural", "natural_color", "color_natural" -> FilterType.NATURAL
         else -> null
     }
 

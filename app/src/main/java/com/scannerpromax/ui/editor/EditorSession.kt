@@ -567,7 +567,7 @@ internal class EditorSession(
                 null
             } ?: return@launch
             try {
-                // Sólo los 3 filtros visibles; primero el actual (lo que el usuario mira), luego el resto.
+                // Sólo los filtros visibles; primero el actual (lo que el usuario mira), luego el resto.
                 val current = e.filter.uiFilter
                 val order = listOf(current) + FilterType.visible.filter { it != current }
                 for (f in order) {

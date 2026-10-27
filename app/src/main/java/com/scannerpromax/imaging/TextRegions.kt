@@ -1051,6 +1051,8 @@ object TextRegions {
                 try {
                     val t0 = System.nanoTime()
                     var out = compose(p, lay, if (natural) Style.BLACK_WHITE else style, bag).also { log?.invoke("compose $style %.0f ms".format((System.nanoTime() - t0) / 1e6)) }
+                    // B/N: continuidad del trazo (huecos y roturas cerrados sólo donde la foto muestra tinta)
+                    if (style == Style.BLACK_WHITE && NaturalColor.BRIDGE_BW) runCatching { NaturalColor.bridge(out, p.n, lay.letterHeight, lay.strokeHalf, p.ruling, exclude2 = lay.blank, gridColor = p.rulingColor) }.onFailure { if (Cv.isOutOfMemory(it)) throw it }
                     runCatching { EdgeClean.clean(out, rgb, lay.letterHeight, region?.second) }.onFailure { if (Cv.isOutOfMemory(it)) throw it }
                     if (natural) {
                         // "Color natural": el B/N (ya sin bordes ajenos) es la máscara del color real normalizado

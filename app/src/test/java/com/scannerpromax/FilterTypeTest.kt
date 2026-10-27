@@ -8,8 +8,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FilterTypeTest {
-    @Test fun soloTresVisibles() {
-        assertEquals(listOf(FilterType.BLACK_WHITE, FilterType.MAGIC, FilterType.ORIGINAL), FilterType.visible)
+    @Test fun cuatroVisibles() {
+        assertEquals(listOf(FilterType.BLACK_WHITE, FilterType.MAGIC, FilterType.NATURAL, FilterType.ORIGINAL), FilterType.visible)
+        assertEquals("Color natural", FilterType.NATURAL.label)
         assertEquals("Blanco y negro", FilterType.BLACK_WHITE.label)
         assertEquals("Texto resaltado", FilterType.MAGIC.label)
         assertEquals("Color original", FilterType.ORIGINAL.label)
