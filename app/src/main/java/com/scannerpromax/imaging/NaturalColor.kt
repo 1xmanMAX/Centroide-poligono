@@ -103,6 +103,13 @@ internal object NaturalMath {
      * gris de lápiz o tinta negra ~0.03-0.06; color, aun claro o oscuro, >= ~0.2. Sube con el ruido de color del papel
      * ([cPaper] = p95 del croma del papel balanceado).
      */
+    /** L* CIE (0..100) de un gris sRGB 0..1 (con la curva sRGB, como la conversión a Lab de OpenCV). */
+    fun lightness(srgb: Double): Double {
+        val c = srgb.coerceIn(0.0, 1.0)
+        val y = if (c <= 0.04045) c / 12.92 else Math.pow((c + 0.055) / 1.055, 2.4)
+        return if (y > 0.008856) 116.0 * Math.cbrt(y) - 16.0 else 903.3 * y
+    }
+
     fun neutralLo(cPaper: Double): Double = max(0.07, 0.02 * cPaper)
 
     /** ¿La caja toca el borde de la imagen (1 px de margen)? */
@@ -213,6 +220,9 @@ internal object NaturalColor {
     const val NEUTRAL_LO = 4.0
     const val NEUTRAL_HI = 11.0
     const val MAX_BLACK = 70.0
+    /** Tinta neutra más clara que la típica (L* de la mediana + LO..HI): conserva su gris (rampa). */
+    @JvmField var NEUTRAL_KEEP_LO = 15.0
+    @JvmField var NEUTRAL_KEEP_HI = 30.0
     /** Relleno liso: ΔE mínimo frente al papel blanco y desviación típica máxima de L* (5x5) ([detectFills]). */
     const val FILL_DE = 7.0
     const val FILL_SD = 4.0
@@ -270,6 +280,9 @@ internal object NaturalColor {
         val foreign: Mat? = null,
         /** Zona ajena con escritura (banda impresa, sombra de color): sin lo añadido, con la tinta del B/N; o null. */
         val foreignSoft: Mat? = null,
+        /** L* (0..100) de la tinta típica del B/N (mediana), o 100 si no hay: la tinta neutra mucho más clara que ella
+         * (transparencia del reverso, manchas) conserva su gris en vez de pasar a negro. */
+        val inkL: Double = 100.0,
     ) {
         /** Ganancia de la luminancia (balance de blancos aplicado a la oscuridad sin copia balanceada). */
         val lumGain: Double get() = 0.299 * gain[0] + 0.587 * gain[1] + 0.114 * gain[2]
@@ -382,6 +395,7 @@ internal object NaturalColor {
         val ink = bag.mat(); Imgproc.threshold(bws, ink, 100.0, 255.0, Imgproc.THRESH_BINARY_INV)
         val nInk = Core.countNonZero(ink)
         val black = NaturalMath.blackPoint(if (nInk > 50) Cv.percentile(Cv.histogram(lum, ink), 0.03).toDouble() else null)
+        val inkL = if (nInk > 50) NaturalMath.lightness(Cv.percentile(Cv.histogram(lum, ink), 0.5) / 255.0) else 100.0
         val t0 = max(0.07, 3.0 * noise / 255.0)
         // Croma del papel (ruido de color de la cámara): umbral de la tinta de color relativo a él
         val chroma = chromaOf(smw, bag)
@@ -520,7 +534,7 @@ internal object NaturalColor {
         NcProf.mark("g.fills")
         debug?.let { d -> fl?.let { d("fills", it.first) }; foreignAll2?.let { d("foreign", it) }; softF[0]?.let { d("foreign_soft", it) } }
         return Global(gain, black, white, t0, support, figures, s, cLo, tF, fl?.first, fl?.second, max(FILL_DE, 2.5 * noise), cPaper, origWhite, photos, foreignAll2,
-            softF[0]?.clone())
+            softF[0]?.clone(), inkL = inkL)
     }
 
     /**
@@ -1139,6 +1153,9 @@ internal object NaturalColor {
             }
             // (croma propio del núcleo, para el tope del realce)
             for (k in 0 until n) { figC[k] = kotlin.math.sqrt(lb0[k * 3 + 1] * lb0[k * 3 + 1] + lb0[k * 3 + 2] * lb0[k * 3 + 2]); l0C[k] = lb0[k * 3] }
+            // (tinta neutra mucho más clara que la típica -transparencia del reverso, manchas, motas grises-: conserva su
+            // gris; pasarla a negro la volvía tinta y engordaba las motas -DIBCO-)
+            if (OFF and 1 == 0) for (k in 0 until n) tC[k] = max(tC[k], NaturalMath.ramp(l0C[k].toDouble(), g.inkL + NEUTRAL_KEEP_LO, g.inkL + NEUTRAL_KEEP_HI).toFloat())
         }
         NcProf.mark("c.gather"); NcProf.add("c.n", n.toDouble() / hn * 100)
         val colM = bag.add(Mat(n, 1, CvType.CV_32FC3)); colM.put(0, 0, colC)
