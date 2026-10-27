@@ -128,6 +128,19 @@ internal object NaturalColor {
     /** Nivel de [bridge] en el B/N (1 = cierre, 2 = cierre + histéresis + trazos tenues). */
     @JvmField internal var BRIDGE_LEVEL = 2
 
+    /**
+     * Hilos para las teselas: 0 = automático (gama baja -2 GB o <= 4 núcleos-: 2; si no, núcleos - 1, máximo 4).
+     * Cada tesela usa ~25 MB de intermedios.
+     */
+    @JvmField @Volatile var maxThreads = 0
+    @JvmField @Volatile var lowEnd = false
+
+    private fun threadCount(): Int {
+        if (maxThreads > 0) return maxThreads
+        val cores = Runtime.getRuntime().availableProcessors()
+        return if (lowEnd || cores <= 4) min(2, cores) else min(4, cores - 1)
+    }
+
     const val ANALYSIS_SIDE = 1000
     const val TILE = 1024
     const val SATURATION = 1.0
@@ -176,14 +189,18 @@ internal object NaturalColor {
     private class Global(
         val gain: DoubleArray, val black: Double, val white: Double, val t0: Double,
         val support: Mat, val figures: Mat, val scale: Double, val cLo: Double, val tF: Double,
-    ) { fun release() { support.release(); figures.release() } }
+    ) {
+        /** Ganancia de la luminancia (balance de blancos aplicado a la oscuridad sin copia balanceada). */
+        val lumGain: Double get() = 0.299 * gain[0] + 0.587 * gain[1] + 0.114 * gain[2]
+        fun release() { support.release(); figures.release() }
+    }
 
     /** Compone "Color natural" (8UC3 nuevo). */
     fun compose(inp: Inputs): Mat = MatBag().use { bag ->
         val W = inp.bw.cols(); val H = inp.bw.rows()
         require(inp.nrm.cols() == W && inp.nrm.rows() == H) { "tamaños distintos" }
         val t0 = System.nanoTime()
-        val g = analyzeGlobal(inp, bag)
+        NcProf.start(); val g = analyzeGlobal(inp, bag)
         try {
             val out = Mat(H, W, if (inp.bridgeOnly) CvType.CV_8UC1 else CvType.CV_8UC3, Scalar.all(255.0))
             val lh = max(4.0, inp.letterHeight)
@@ -198,6 +215,7 @@ internal object NaturalColor {
             val figB = ByteArray(sw * shh); g.figures.get(0, 0, figB)
             var tiles = 0; var skipped = 0
             if (debug != null && !inp.bridgeOnly) dbgA = Mat(H, W, CvType.CV_8UC1, Scalar(0.0))
+            val work = ArrayList<Rect>()
             var y = 0
             while (y < H) {
                 val y1 = min(H, y + TILE)
@@ -209,11 +227,20 @@ internal object NaturalColor {
                     val bwT = inp.bw.submat(y, y1, x, x1)
                     val mn = Core.minMaxLoc(bwT).minVal; bwT.release()
                     val any = mn < 250 || anyIn(supB, sw, shh, g.scale, x, y, x1, y1) || anyIn(figB, sw, shh, g.scale, x, y, x1, y1)
-                    if (any) tile(inp, g, out, Rect(x, y, x1 - x, y1 - y), pad, r, kc, kn, kl, lh)
-                    else skipped++
+                    if (any) work.add(Rect(x, y, x1 - x, y1 - y)) else skipped++
                     x = x1
                 }
                 y = y1
+            }
+            // Teselas independientes (escriben en zonas disjuntas de [out]) -> en paralelo, con un tope de hilos
+            val nT = min(work.size, threadCount())
+            if (nT <= 1) for (t in work) tile(inp, g, out, t, pad, r, kc, kn, kl, lh)
+            else {
+                val pool = java.util.concurrent.Executors.newFixedThreadPool(nT) { rn -> Thread(rn, "natural-color").apply { isDaemon = true } }
+                try {
+                    val fs = work.map { t -> pool.submit { tile(inp, g, out, t, pad, r, kc, kn, kl, lh) } }
+                    for (f in fs) try { f.get() } catch (e: java.util.concurrent.ExecutionException) { throw e.cause ?: e }
+                } finally { pool.shutdownNow() }
             }
             dbgA?.let { debug?.invoke("alpha", it); it.release(); dbgA = null }
             log?.invoke("compose ${W}x$H tiles=$tiles vacías=$skipped gain=%.2f,%.2f,%.2f black=%.0f white=%.0f t0=%.3f %.0f ms".format(
@@ -232,8 +259,17 @@ internal object NaturalColor {
 
     /** Estadística global a la escala de análisis: balance de blancos, puntos negro/blanco, máscaras de color y figuras. */
     private fun analyzeGlobal(inp: Inputs, bag: MatBag): Global {
-        val sm = bag.mat(); val s = Cv.downscale(inp.nrm, sm, ANALYSIS_SIDE)
-        val bws = bag.mat(); Imgproc.resize(inp.bw, bws, sm.size(), 0.0, 0.0, Imgproc.INTER_AREA)
+        // Una sola reducción de la página a resolución completa: a 2000 px (candidatos) y de ahí a 1000 (estadística)
+        // (por mitades exactas -media 2x2, la reducción más rápida- y el resto por áreas desde la imagen ya pequeña)
+        val big = bag.mat()
+        if (max(inp.nrm.cols(), inp.nrm.rows()) > 2.6 * ANALYSIS_SIDE) {
+            halve(inp.nrm, big)
+            Cv.downscale(big, big, 2 * ANALYSIS_SIDE)
+        } else Cv.downscale(inp.nrm, big, 2 * ANALYSIS_SIDE)
+        val ls = max(inp.nrm.cols(), inp.nrm.rows())
+        val s = if (ls <= ANALYSIS_SIDE) 1.0 else ANALYSIS_SIDE.toDouble() / ls
+        val sm = bag.mat(); Imgproc.resize(big, sm, Size(max(1.0, (inp.nrm.cols() * s).roundToInt().toDouble()), max(1.0, (inp.nrm.rows() * s).roundToInt().toDouble())), 0.0, 0.0, Imgproc.INTER_AREA)
+        val bws = bag.mat(); areaDown(inp.bw, bws, sm.size(), bag)
         val sw = sm.cols(); val shh = sm.rows()
         // Papel: blanco en el B/N y poco croma
         val ch = ArrayList<Mat>(3); Core.split(sm, ch); ch.forEach { bag.add(it) }
@@ -247,6 +283,7 @@ internal object NaturalColor {
         for (exM in listOf(inp.exclude, inp.exclude2)) excludeMask(exM, sm.size(), bag)?.let { ex -> Core.bitwise_not(ex, t); Core.bitwise_and(paper, t, paper) }
         val enough = Core.countNonZero(paper) > 0.05 * sm.total()
         val pc = DoubleArray(3) { c -> if (enough) Cv.percentile(Cv.histogram(ch[c], paper), 0.6).toDouble() else Cv.PAPER_LEVEL }
+        NcProf.mark("g.paper")
         val gain = NaturalMath.whiteGains(pc)
         // Imagen balanceada (8 bits) a la escala de análisis
         val smw = bag.mat(); Core.multiply(sm, Scalar(gain[0], gain[1], gain[2]), smw)
@@ -261,17 +298,18 @@ internal object NaturalColor {
         val chroma = chromaOf(smw, bag)
         val c8 = bag.mat(); chroma.convertTo(c8, CvType.CV_8U, 4.0)
         val cPaper = if (enough) Cv.percentile(Cv.histogram(c8, paper), 0.95) / 4.0 else 3.0
+        NcProf.mark("g.stats")
         val cLo = NaturalMath.chromaLow(cPaper)
         val tF = NaturalMath.faintLow(noise)
         // Candidatos a escritura que el B/N pudo perder (tenue o de color): sobre la imagen ERODIDA a doble escala
         // (los trazos finos no se diluyen con el papel al reducir)
         val er = bag.mat()
         run {
-            val big = bag.mat(); Cv.downscale(inp.nrm, big, 2 * ANALYSIS_SIDE)
             Imgproc.erode(big, big, Cv.kernel(Imgproc.MORPH_RECT, 3))
             Imgproc.resize(big, er, sm.size(), 0.0, 0.0, Imgproc.INTER_AREA)
             Core.multiply(er, Scalar(gain[0], gain[1], gain[2]), er)
         }
+        NcProf.mark("g.erode")
         val cm = bag.mat(); val cEr = chromaOf(er, bag)
         Imgproc.threshold(cEr, cm, cLo, 255.0, Imgproc.THRESH_BINARY); cm.convertTo(cm, CvType.CV_8U)
         val lumEr = bag.add(Cv.gray(er))
@@ -291,6 +329,7 @@ internal object NaturalColor {
             for (r in rs) Imgproc.rectangle(al, org.opencv.core.Point(r.x * s, r.y * s), org.opencv.core.Point((r.x + r.width) * s, (r.y + r.height) * s), Scalar(255.0), -1)
             Core.bitwise_and(cm, al, cm)
         }
+        NcProf.mark("g.cand")
         val lhS = max(2.0, inp.letterHeight * s)
         val support = Mat.zeros(sm.size(), CvType.CV_8U)
         val figures = Mat.zeros(sm.size(), CvType.CV_8U)
@@ -340,6 +379,7 @@ internal object NaturalColor {
                         else c
                     }
                 }
+        NcProf.mark("g.comps")
                 val sb = ByteArray(sw * shh); val fb = ByteArray(sw * shh)
                 if (logComps) for (it in 1 until n) if (st[it * 5 + 4] > 15) log?.invoke("comp cls=${cls[it]} ${st[it*5]},${st[it*5+1]} ${st[it*5+2]}x${st[it*5+3]} a=${st[it*5+4]} ink=%.3f thk=%.1f C=%.1f D=%.3f lh=%.1f".format(inkN[it].toDouble()/st[it*5+4], thk[it], sC[it]/st[it*5+4], sD[it]/st[it*5+4], lhS))
                 for (i in lb.indices) { when (cls[lb[i]]) { 1 -> sb[i] = -1; 2 -> fb[i] = -1 } }
@@ -353,15 +393,30 @@ internal object NaturalColor {
             }
             if (!inp.bridgeOnly) for (r in inp.images) Imgproc.rectangle(figures, org.opencv.core.Point(r.x * s, r.y * s), org.opencv.core.Point((r.x + r.width) * s - 1, (r.y + r.height) * s - 1), Scalar(255.0), -1)
         }
+        NcProf.mark("g.masks")
         log?.invoke("global cPaper=%.1f cLo=%.1f tF=%.3f paper=%.0f,%.0f,%.0f noise=%.1f ink=$nInk inkFrac=%.3f color=%.4f fig=%.4f".format(cPaper, cLo, tF, pc[0], pc[1], pc[2], noise,
             nInk.toDouble() / sm.total(), Core.countNonZero(support).toDouble() / sm.total(), Core.countNonZero(figures).toDouble() / sm.total()))
         debug?.let { d -> d("cand", cm); d("support", support); d("figures", figures) }
         return Global(gain, black, white, t0, support, figures, s, cLo, tF)
     }
 
+    /** Mitad exacta (media 2x2): el bilineal a escala 1/2 da la misma media y es varias veces más rápido que INTER_AREA. */
+    private fun halve(src: Mat, dst: Mat) =
+        Imgproc.resize(src, dst, Size(max(1, src.cols() / 2).toDouble(), max(1, src.rows() / 2).toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR)
+
+    /** Reducción por áreas a [size]: por mitades exactas mientras sobre más del doble ([halve]) y el resto por áreas. */
+    private fun areaDown(src: Mat, dst: Mat, size: Size, bag: MatBag) {
+        var cur = src
+        while (cur.cols() >= 2 * size.width && cur.rows() >= 2 * size.height && (cur.cols() / 2 > size.width || cur.cols() % 2 == 0)) {
+            val h = bag.mat(); halve(cur, h); cur = h
+            if (cur.cols() == size.width.toInt() && cur.rows() == size.height.toInt()) { cur.copyTo(dst); return }
+        }
+        Imgproc.resize(cur, dst, size, 0.0, 0.0, Imgproc.INTER_AREA)
+    }
+
     private fun excludeMask(ex: Mat?, size: Size, bag: MatBag): Mat? {
         if (ex == null || ex.empty()) return null
-        val m = bag.mat(); Imgproc.resize(ex, m, size, 0.0, 0.0, Imgproc.INTER_AREA)
+        val m = bag.mat(); areaDown(ex, m, size, bag)
         Imgproc.threshold(m, m, 20.0, 255.0, Imgproc.THRESH_BINARY)
         return m
     }
@@ -439,103 +494,255 @@ internal object NaturalColor {
         return m
     }
 
-    /** Una tesela [inner] (con [pad] de contexto) -> escribe en [out]. */
+    /** Rampa relativa en 8 bits (255 = 1): (x - lo) / (hi - lo) con lo = max(suelo, relLo·máx), hi = max(relHi·máx, lo) + suelo/4. */
+    private fun relRamp8(x: Mat, floor255: Double, mx: Mat, relLo: Double, relHi: Double, dst: Mat, bag: MatBag) {
+        val lo = bag.mat(); mx.convertTo(lo, -1, relLo); Core.max(lo, Scalar(floor255), lo)
+        val hi = bag.mat(); mx.convertTo(hi, -1, relHi); Core.max(hi, lo, hi); Core.add(hi, Scalar(max(1.0, floor255 * 0.25)), hi)
+        Core.subtract(hi, lo, hi)
+        Core.subtract(x, lo, lo)                 // (saturado: < lo -> 0)
+        Core.divide(lo, hi, dst, 255.0)          // (saturado: > hi -> 255)
+    }
+
+    /**
+     * Máscara de baja resolución -> 8 bits (0..255) en la zona [outer] de salida; null si allí está vacía. Se amplía
+     * sólo el recorte de la máscara que cubre la tesela (bilineal, alineado con su rejilla).
+     */
+    private fun upMask8(lo: Mat, s: Double, outer: Rect, bag: MatBag): Mat? {
+        val x0 = kotlin.math.floor(outer.x * s).toInt().coerceIn(0, lo.cols() - 1); val y0 = kotlin.math.floor(outer.y * s).toInt().coerceIn(0, lo.rows() - 1)
+        val x1 = (kotlin.math.ceil((outer.x + outer.width) * s).toInt() + 1).coerceIn(x0 + 1, lo.cols()); val y1 = (kotlin.math.ceil((outer.y + outer.height) * s).toInt() + 1).coerceIn(y0 + 1, lo.rows())
+        val roi = bag.add(lo.submat(y0, y1, x0, x1))
+        if (Core.countNonZero(roi) == 0) return null
+        // zona de salida que cubre el recorte: [x0/s, x1/s) (resize alinea los centros de celda como el remapeo afín)
+        val fx0 = (x0 / s).roundToInt(); val fy0 = (y0 / s).roundToInt()
+        val fw = max(1, (x1 / s).roundToInt() - fx0); val fh = max(1, (y1 / s).roundToInt() - fy0)
+        val big = bag.mat(); Imgproc.resize(roi, big, Size(fw.toDouble(), fh.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR)
+        val cx = (outer.x - fx0).coerceIn(0, fw - 1); val cy = (outer.y - fy0).coerceIn(0, fh - 1)
+        val cw = min(outer.width, fw - cx); val chh = min(outer.height, fh - cy)
+        if (cw == outer.width && chh == outer.height) return bag.add(big.submat(cy, cy + chh, cx, cx + cw))
+        // (borde de la imagen: se replica)
+        val m = bag.mat(); Core.copyMakeBorder(big.submat(cy, cy + chh, cx, cx + cw).also { bag.add(it) }, m, 0, outer.height - chh, 0, outer.width - cw, Core.BORDER_REPLICATE)
+        return m
+    }
+
+    /** Peso del color del centro del trazo: (oscuridad o croma)^3, por nivel de 8 bits. */
+    private val weightLut = FloatArray(256) { val v = it / 255f; v * v * v }
+
+    /**
+     * Sumas ponderadas del color a media resolución en una sola pasada (sin intermedios a resolución completa): cada
+     * celda 2x2 aporta peso·color balanceado (peso = max(oscuridad, croma/120)^3, el croma de la celda) -> [num]
+     * (32FC3) y [den] (32FC1), como la reducción por áreas de los productos a resolución completa (el trazo fino no
+     * se diluye con el papel al bajar de resolución).
+     */
+    private fun weightedSums(rgb: Mat, dk: Mat, chH: Mat, gain: DoubleArray, need: ByteArray, num: Mat, den: Mat) {
+        val w = rgb.cols(); val h = rgb.rows(); val hw = num.cols(); val hh = num.rows()
+        val px = ByteArray(w * h * 3); val dkA = ByteArray(w * h)
+        if (rgb.isContinuous) rgb.get(0, 0, px) else { val c = rgb.clone(); c.get(0, 0, px); c.release() }
+        dk.get(0, 0, dkA)
+        val ch = FloatArray(hw * hh); chH.get(0, 0, ch)
+        val nA = FloatArray(hw * hh * 3); val dA = FloatArray(hw * hh)
+        val g0 = gain[0].toFloat(); val g1 = gain[1].toFloat(); val g2 = gain[2].toFloat()
+        val lut = weightLut
+        val k = 255f / 120f
+        for (hy in 0 until hh) {
+            val y0 = 2 * hy; val yN = min(h, y0 + 2)
+            for (hx in 0 until hw) {
+                val hi = hy * hw + hx
+                if (need[hi].toInt() == 0) continue
+                val cw = min(255, (ch[hi] * k).toInt())
+                val x0 = 2 * hx; val xN = min(w, x0 + 2)
+                var sw = 0f; var s0 = 0f; var s1 = 0f; var s2 = 0f
+                for (y in y0 until yN) {
+                    val row = y * w
+                    for (x in x0 until xN) {
+                        val d = dkA[row + x].toInt() and 0xFF
+                        val wt = lut[if (d > cw) d else cw]
+                        val p = (row + x) * 3
+                        sw += wt
+                        s0 += wt * (px[p].toInt() and 0xFF); s1 += wt * (px[p + 1].toInt() and 0xFF); s2 += wt * (px[p + 2].toInt() and 0xFF)
+                    }
+                }
+                dA[hi] = sw; nA[hi * 3] = s0 * g0; nA[hi * 3 + 1] = s1 * g1; nA[hi * 3 + 2] = s2 * g2
+            }
+        }
+        num.put(0, 0, nA); den.put(0, 0, dA)
+    }
+
+    /**
+     * Una tesela [inner] (con [pad] de contexto) -> escribe en [out]. Mapas de evidencia y alfa en 8 bits (255 = 1:
+     * morfología y aritmética vectorizadas, ~4 veces menos memoria que en coma flotante); croma, tono de la
+     * rejilla y color a media resolución; composición final en 8 bits.
+     */
     private fun tile(inp: Inputs, g: Global, out: Mat, inner: Rect, pad: Int, r: Int, kc: Int, kn: Int, kl: Int, lhT: Double) = MatBag().use { bag ->
         val W = inp.bw.cols(); val H = inp.bw.rows()
         val ox0 = max(0, inner.x - pad); val oy0 = max(0, inner.y - pad)
         val ox1 = min(W, inner.x + inner.width + pad); val oy1 = min(H, inner.y + inner.height + pad)
         val outer = Rect(ox0, oy0, ox1 - ox0, oy1 - oy0)
         val crop = Rect(inner.x - ox0, inner.y - oy0, inner.width, inner.height)
-        // Color balanceado (float 0..255+)
-        val nw = bag.mat(); inp.nrm.submat(outer).also { bag.add(it) }.convertTo(nw, CvType.CV_32F)
-        Core.multiply(nw, Scalar(g.gain[0], g.gain[1], g.gain[2]), nw)
-        // Oscuridad (luminancia) relativa al papel blanco
-        val lum = bag.mat(); Core.transform(nw, lum, Mat(1, 3, CvType.CV_32F).also { bag.add(it); it.put(0, 0, 0.299, 0.587, 0.114) })
-        val dk = bag.mat(); lum.convertTo(dk, -1, -1.0 / 255.0, 1.0)
-        // (oscuridad algo suavizada: el grano no parte el trazo tenue)
+        NcProf.start()
+        // (sin copia balanceada a resolución completa: el balance de blancos es lineal por canal y se aplica a la
+        // luminancia, a la media resolución y a las sumas ponderadas del color)
+        val nrmT = bag.add(inp.nrm.submat(outer))
+        // Oscuridad (luminancia balanceada) relativa al papel blanco; algo suavizada (el grano no parte el trazo tenue)
+        val dk = bag.mat(); Imgproc.cvtColor(nrmT, dk, Imgproc.COLOR_RGB2GRAY); dk.convertTo(dk, -1, -g.lumGain, 255.0)
         val dks = bag.mat(); Imgproc.GaussianBlur(dk, dks, Size(0.0, 0.0), 1.0)
+        NcProf.mark("dark")
         val rLo = if (inp.bridgeOnly) REL_LO_BW else REL_LO; val rHi = if (inp.bridgeOnly) REL_HI_BW else REL_HI
         val mxD = bag.mat(); Imgproc.dilate(dks, mxD, Cv.kernel(Imgproc.MORPH_ELLIPSE, kl))
-        val e = bag.mat(); relRamp(dks, g.t0, kl, e, bag, rLo, rHi, mxD)
-        // Croma a media resolución (la conversión a Lab es lo más caro) y ampliado: también sirve para el color
+        NcProf.mark("localmax")
+        val e = bag.mat(); relRamp8(dks, 255.0 * g.t0, mxD, rLo, rHi, e, bag)
+        // Trazo tenue (lápiz, tinta pálida) dentro de las zonas candidatas (rampa más permisiva)
+        val ef = bag.mat(); relRamp8(dks, 255.0 * g.tF, mxD, if (inp.bridgeOnly) rLo else REL_LO_SUP, if (inp.bridgeOnly) rHi else REL_HI_SUP, ef, bag)
+        NcProf.mark("ramps")
+        // Croma a media resolución (Lab de 8 bits) -> evidencia de color (también a media resolución) y peso del color
         val hs = Size(max(1.0, (outer.width / 2.0).roundToInt().toDouble()), max(1.0, (outer.height / 2.0).roundToInt().toDouble()))
-        val nwH = bag.mat(); Imgproc.resize(nw, nwH, hs, 0.0, 0.0, Imgproc.INTER_AREA)
-        val chH = chromaOf(nwH, bag)
-        val chroma = bag.mat(); Imgproc.resize(chH, chroma, outer.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
-        val ec = bag.mat(); relRamp(chroma, g.cLo, kl, ec, bag, REL_LO_SUP, REL_HI_SUP)
-        // Trazo tenue (lápiz, tinta pálida) dentro de las zonas candidatas
-        // (en las zonas candidatas ya validadas -componentes con tinta, color propio o bastante oscuras- la rampa es más permisiva)
-        val ef = bag.mat(); relRamp(dks, g.tF, kl, ef, bag, if (inp.bridgeOnly) rLo else REL_LO_SUP, if (inp.bridgeOnly) rHi else REL_HI_SUP, mxD)
-        // Tono de la cuadrícula clara (mismo matiz que ella y poco más oscuro): ni color ni trazo tenue
-        inp.gridColor?.let { gc -> gridLike(nw, gc, g.gain, bag)?.let { gl -> Core.multiply(ec, gl, ec); Core.multiply(ef, gl, ef) } }
+        val nbH = bag.mat(); areaDown(nrmT, nbH, hs, bag); Core.multiply(nbH, Scalar(g.gain[0], g.gain[1], g.gain[2]), nbH)
+        val chH = bag.mat()
+        run {
+            val lab = bag.mat(); Imgproc.cvtColor(nbH, lab, Imgproc.COLOR_RGB2Lab)
+            val a = bag.mat(); val b = bag.mat()
+            Core.extractChannel(lab, a, 1); Core.extractChannel(lab, b, 2)
+            a.convertTo(a, CvType.CV_32F, 1.0, -128.0); b.convertTo(b, CvType.CV_32F, 1.0, -128.0)
+            Core.magnitude(a, b, chH)
+        }
+        val ecH = bag.mat()
+        run {
+            val c8 = bag.mat(); chH.convertTo(c8, CvType.CV_8U, 2.0)            // croma en medias unidades
+            val mxC = bag.mat(); Imgproc.dilate(c8, mxC, Cv.kernel(Imgproc.MORPH_ELLIPSE, Cv.odd(max(3, kl / 2))))
+            relRamp8(c8, 2.0 * g.cLo, mxC, REL_LO_SUP, REL_HI_SUP, ecH, bag)
+        }
+        // Tono de la cuadrícula clara (mismo matiz que ella y poco más oscuro): ni color ni trazo tenue (a media resolución)
+        var gl8: Mat? = null
+        inp.gridColor?.let { gc ->
+            val nwH = bag.mat(); nbH.convertTo(nwH, CvType.CV_32F)
+            gridLike(nwH, gc, g.gain, bag)?.let { gl ->
+                val gH = bag.mat(); gl.convertTo(gH, CvType.CV_8U, 255.0)
+                Core.multiply(ecH, gH, ecH, 1.0 / 255)
+                gl8 = bag.mat().also { Imgproc.resize(gH, it, outer.size(), 0.0, 0.0, Imgproc.INTER_LINEAR) }
+            }
+        }
+        val ec = bag.mat(); Imgproc.resize(ecH, ec, outer.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
+        gl8?.let { Core.multiply(ef, it, ef, 1.0 / 255) }
+        NcProf.mark("chroma")
         // Huella de la rejilla / fondo ajeno: ni tinta ni color
         for (exM in listOf(inp.exclude, inp.exclude2)) {
             if (exM == null || exM.empty()) continue
-            val ex = if (exM.cols() == W && exM.rows() == H) bag.mat().also { exM.submat(outer).also { m -> bag.add(m) }.convertTo(it, CvType.CV_32F, 1.0 / 255.0) }
-                else upMask(exM, exM.cols().toDouble() / W, outer, bag)
-            ex.convertTo(ex, -1, -1.0, 1.0)
-            Core.multiply(e, ex, e); Core.multiply(ec, ex, ec); Core.multiply(ef, ex, ef)
+            val ex = if (exM.cols() == W && exM.rows() == H) bag.add(exM.submat(outer)).let { m -> if (Core.countNonZero(m) == 0) null else bag.mat().also { Core.bitwise_not(m, it) } }
+                else upMask8(exM, exM.cols().toDouble() / W, outer, bag)?.also { Core.bitwise_not(it, it) }
+            if (ex == null) continue
+            Core.multiply(e, ex, e, 1.0 / 255); Core.multiply(ec, ex, ec, 1.0 / 255); Core.multiply(ef, ex, ef, 1.0 / 255)
         }
+        NcProf.mark("exclude")
         // Alfa del B/N y continuidad del trazo
-        val aBW = bag.mat(); inp.bw.submat(outer).also { bag.add(it) }.convertTo(aBW, CvType.CV_32F, -1.0 / 255.0, 1.0)
-        val ev = bag.mat()
-        if (inp.bridgeOnly) e.copyTo(ev) else Core.max(e, ec, ev)
+        val aBW = bag.mat(); Core.bitwise_not(inp.bw.submat(outer).also { bag.add(it) }, aBW)
+        val ev = if (inp.bridgeOnly) e else bag.mat().also { Core.max(e, ec, it) }
         val closeA = bag.mat(); Imgproc.morphologyEx(aBW, closeA, Imgproc.MORPH_CLOSE, Cv.kernel(Imgproc.MORPH_ELLIPSE, kc))
         Core.min(closeA, ev, closeA)
         val a = bag.mat(); Core.max(aBW, closeA, a)
-        if (inp.bridge == 2) {
-            val strong = bag.mat(); Imgproc.threshold(aBW, strong, 0.5, 1.0, Imgproc.THRESH_BINARY)
+        // Histéresis: lo tenue pegado a un trazo firme (~1.5 anchos); zonas candidatas (trazos tenues o de color que el
+        // B/N perdió) y figuras enteras
+        if (inp.bridge == 2 || !inp.bridgeOnly) {
+            val strong = bag.mat(); Imgproc.threshold(aBW, strong, 127.0, 255.0, Imgproc.THRESH_BINARY)
             Imgproc.dilate(strong, strong, Cv.kernel(Imgproc.MORPH_ELLIPSE, kn))
-            Core.multiply(strong, e, strong); Core.max(a, strong, a)
-            val sup = upMask(g.support, g.scale, outer, bag)
-            Core.multiply(sup, ef, sup); Core.max(a, sup, a)
+            Core.min(strong, ev, strong); Core.max(a, strong, a)
+            upMask8(g.support, g.scale, outer, bag)?.let { sup ->
+                if (inp.bridgeOnly) Core.multiply(sup, ef, sup, 1.0 / 255)
+                else { val evs = bag.mat(); Core.max(ef, ec, evs); Core.multiply(sup, evs, sup, 1.0 / 255) }
+                Core.max(a, sup, a)
+            }
         }
-        if (!inp.bridgeOnly) {
-            // Histéresis: lo tenue (gris o color) pegado a un trazo firme
-            val strong = bag.mat(); Imgproc.threshold(aBW, strong, 0.5, 1.0, Imgproc.THRESH_BINARY)
-            Imgproc.dilate(strong, strong, Cv.kernel(Imgproc.MORPH_ELLIPSE, kn))
-            Core.multiply(strong, ev, strong); Core.max(a, strong, a)
-            // Trazos tenues o de color claros que el B/N perdió (zonas candidatas) y figuras enteras
-            val sup = upMask(g.support, g.scale, outer, bag)
-            val evs = bag.mat(); Core.max(ef, ec, evs)
-            Core.multiply(sup, evs, sup); Core.max(a, sup, a)
-        }
-        val fig = if (inp.bridgeOnly) null else upMask(g.figures, g.scale, outer, bag)
+        val fig = if (inp.bridgeOnly) null else upMask8(g.figures, g.scale, outer, bag)
         if (fig != null) Core.max(a, fig, a)
-        Imgproc.threshold(a, a, ALPHA_MIN, 0.0, Imgproc.THRESH_TOZERO)
+        Imgproc.threshold(a, a, ALPHA_MIN * 255.0, 255.0, Imgproc.THRESH_TOZERO)
+        NcProf.mark("alpha")
 
         if (inp.bridgeOnly) {
-            // Sólo continuidad (para "Blanco y negro"): B/N = 255·(1 - alfa)
-            val o = bag.mat(); a.convertTo(o, CvType.CV_8U, -255.0, 255.0)
-            val dst = out.submat(inner); o.submat(crop).copyTo(dst); dst.release()
+            // Sólo continuidad (para "Blanco y negro"): B/N = 255 - alfa
+            Core.bitwise_not(a, a)
+            val dst = out.submat(inner); a.submat(crop).copyTo(dst); dst.release()
             return@use
         }
-        dbgA?.let { d -> val o = bag.mat(); a.convertTo(o, CvType.CV_8U, 255.0); val dd = d.submat(inner); o.submat(crop).copyTo(dd); dd.release() }
+        dbgA?.let { d -> val dd = d.submat(inner); a.submat(crop).copyTo(dd); dd.release() }
         if (Core.countNonZero(a) == 0) return@use   // (tesela sin tinta: queda blanca)
         // El COLOR se calcula a media resolución (varía despacio dentro del trazo; el borde nítido lo da el alfa a
-        // resolución completa): ~4 veces menos trabajo en la parte más cara
-        val figH = if (fig != null && Core.countNonZero(fig) > 0) bag.mat().also { Imgproc.resize(fig, it, hs, 0.0, 0.0, Imgproc.INTER_AREA) } else null
-        // Color del centro del trazo: media ponderada por oscuridad^3 en una ventana pequeña (el borde, mezcla de tinta
-        // y papel, toma el color del núcleo: sin aura clara ni bordes lavados). Los pesos y productos se forman a
-        // resolución completa y se REDUCEN (suma por áreas): el trazo fino no se diluye con el papel al bajar a media resolución
-        val wgt = bag.mat(); val cw = bag.mat(); chroma.convertTo(cw, -1, 1.0 / 120.0)
-        Core.max(dk, cw, wgt); Imgproc.threshold(wgt, wgt, 0.0, 0.0, Imgproc.THRESH_TOZERO)
-        Core.pow(wgt, 3.0, wgt); Core.add(wgt, Scalar(1e-5), wgt)
-        val w3f = bag.mat(); Core.merge(listOf(wgt, wgt, wgt), w3f)
-        val numF = bag.mat(); Core.multiply(nw, w3f, numF)
-        val num = bag.mat(); Imgproc.resize(numF, num, hs, 0.0, 0.0, Imgproc.INTER_AREA)
-        val w3 = bag.mat(); Imgproc.resize(w3f, w3, hs, 0.0, 0.0, Imgproc.INTER_AREA)
-        numF.release(); w3f.release()
+        // resolución completa)
+        val figH = if (fig != null) bag.mat().also { areaDown(fig, it, hs, bag) } else null
+        val hw = hs.width.toInt(); val hh = hs.height.toInt(); val hn = hw * hh
+        // Sólo los píxeles de media resolución que la composición usa (alfa > 0 y su vecindad de interpolación): el
+        // realce es puntual y se calcula sobre la lista compacta (~10-30 % de la tesela)
+        val aH = bag.mat(); areaDown(a, aH, hs, bag)
+        val act = bag.mat(); Imgproc.dilate(aH, act, Cv.kernel(Imgproc.MORPH_RECT, 3))
         val rh = max(1, (r + 1) / 2)
         val ks = Size((2 * rh + 1).toDouble(), (2 * rh + 1).toDouble())
-        Imgproc.boxFilter(num, num, -1, ks); val den = bag.mat(); Imgproc.boxFilter(w3, den, -1, ks)
-        val col = bag.mat(); Core.divide(num, den, col)
-        if (figH != null) {
-            // En las figuras, el color propio de cada píxel
-            val f3 = bag.mat(); Core.merge(listOf(figH, figH, figH), f3)
-            val d = bag.mat(); Core.subtract(nwH, col, d); Core.multiply(d, f3, d); Core.add(col, d, col)
+        // Color del centro del trazo: media ponderada por oscuridad^3 (o croma) en una ventana pequeña (el borde, mezcla
+        // de tinta y papel, toma el color del núcleo). Sumas de peso·color por celdas 2x2 de resolución completa (el
+        // trazo fino no se diluye con el papel al bajar a media resolución), sólo donde la ventana toca la zona activa
+        val num = bag.add(Mat(hh, hw, CvType.CV_32FC3)); val wH = bag.add(Mat(hh, hw, CvType.CV_32F))
+        run {
+            val need = bag.mat(); Imgproc.dilate(act, need, Cv.kernel(Imgproc.MORPH_RECT, 2 * rh + 1))
+            val needB = ByteArray(hn); need.get(0, 0, needB)
+            weightedSums(nrmT, dk, chH, g.gain, needB, num, wH)
         }
-        // Densidad: la tinta tenue se refuerza como si tuviera más concentración (mismo matiz, más vivo); la oscura no cambia
+        NcProf.mark("weights")
+        // (sumas de la ventana, sin normalizar: num/den es el mismo cociente)
+        Imgproc.boxFilter(num, num, CvType.CV_32F, ks, org.opencv.core.Point(-1.0, -1.0), false)
+        Imgproc.boxFilter(wH, wH, CvType.CV_32F, ks, org.opencv.core.Point(-1.0, -1.0), false)
+        // Zona de color maciza = el alfa cubre casi toda una ventana de ~1 altura de letra (un trazo cubre < ~50 %)
+        val fill = bag.mat()
+        run { val kw = Cv.odd((lhT / 2.0).roundToInt().coerceIn(3, 41)); Imgproc.boxFilter(aH, fill, CvType.CV_32F, Size(kw.toDouble(), kw.toDouble())) }
+        NcProf.mark("c.box")
+        val actB = ByteArray(hn); act.get(0, 0, actB)
+        var n = 0; for (v in actB) if (v.toInt() != 0) n++
+        if (n == 0) return@use
+        val numA = FloatArray(hn * 3); num.get(0, 0, numA)
+        val denA = FloatArray(hn); wH.get(0, 0, denA)
+        val fillA = FloatArray(hn); fill.get(0, 0, fillA)
+        val figA = figH?.let { ByteArray(hn).also { b -> it.get(0, 0, b) } }
+        val idx = IntArray(n); val colC = FloatArray(n * 3); val noKC = FloatArray(n)
+        val eps = 1e-4f   // (ventana sin peso: el color propio)
+        val nbAll = ByteArray(hn * 3).also { nbH.get(0, 0, it) }
+        var j = 0
+        for (i in 0 until hn) {
+            if (actB[i].toInt() == 0) continue
+            idx[j] = i
+            val d = denA[i] + eps
+            var f = 0f
+            for (c in 0 until 3) {
+                val own = (nbAll[i * 3 + c].toInt() and 0xFF).toFloat()
+                var v = (numA[i * 3 + c] + eps * own) / d
+                if (figA != null) { f = (figA[i].toInt() and 0xFF) / 255f; v += (own - v) * f }
+                colC[j * 3 + c] = v
+            }
+            // (sin refuerzo de densidad en figuras ni en zonas de color gruesas: un resaltador o una banda no son tinta tenue)
+            val fl = ((fillA[i] / 255f - FILL_LO.toFloat()) / (FILL_HI - FILL_LO).toFloat()).coerceIn(0f, 1f)
+            noKC[j] = max(f, fl)
+            j++
+        }
+        NcProf.mark("c.gather"); NcProf.add("c.n", n.toDouble() / hn * 100)
+        val colM = bag.add(Mat(n, 1, CvType.CV_32FC3)); colM.put(0, 0, colC)
+        val noKM = bag.add(Mat(n, 1, CvType.CV_32F)); noKM.put(0, 0, noKC)
+        enhance(colM, noKM, g, bag)
+        NcProf.mark("c.enh")
+        colM.get(0, 0, colC)
+        val c8A = ByteArray(hn * 3) { -1 }
+        for (k in 0 until n) { val i = idx[k]; for (c in 0 until 3) c8A[i * 3 + c] = (colC[k * 3 + c] * 255f + 0.5f).toInt().coerceIn(0, 255).toByte() }
+        val c8 = bag.add(Mat(hh, hw, CvType.CV_8UC3)); c8.put(0, 0, c8A)
+        NcProf.mark("color")
+        // Composición sobre blanco en 8 bits: out = 255 - a·(255 - color)/255
+        val cu = bag.mat(); Imgproc.resize(c8, cu, outer.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
+        Core.bitwise_not(cu, cu)
+        val a3 = bag.mat(); Core.merge(listOf(a, a, a), a3)
+        Core.multiply(cu, a3, cu, 1.0 / 255)
+        Core.bitwise_not(cu, cu)
+        val dst = out.submat(inner); cu.submat(crop).copyTo(dst); dst.release()
+        NcProf.mark("compose")
+    }
+
+    /**
+     * Realce del color sobre una lista compacta de píxeles ([col] N×1 RGB 0..255 en coma flotante -> 0..1 en el sitio):
+     * densidad Beer-Lambert de la tinta tenue (salvo donde [noK] = 1: figuras, zonas macizas), niveles negro/blanco y
+     * saturación en Lab (lo casi neutro sin dominante).
+     */
+    private fun enhance(col: Mat, noK: Mat, g: Global, bag: MatBag) {
         run {
             val lc = bag.mat(); Core.transform(col, lc, Mat(1, 3, CvType.CV_32F).also { bag.add(it); it.put(0, 0, 0.299 / 255, 0.587 / 255, 0.114 / 255) })
             Core.max(lc, Scalar(1e-3), lc); Core.min(lc, Scalar(1.0), lc)
@@ -543,16 +750,6 @@ internal object NaturalColor {
             Core.max(lc, Scalar(1e-3), lc)
             val k = bag.mat(); Core.divide(OD_TARGET, lc, k)
             Imgproc.threshold(k, k, K_MAX, K_MAX, Imgproc.THRESH_TRUNC); Core.max(k, Scalar(1.0), k)
-            // (sin refuerzo en figuras ni en zonas de color gruesas: un resaltador o una banda de tabla no son tinta tenue)
-            val noK = figH ?: Mat.zeros(hs, CvType.CV_32F).also { bag.add(it) }
-            // Zona de color maciza = el alfa cubre casi toda una ventana de ~1 altura de letra (un trazo, aunque sea
-            // grueso o esté en un párrafo denso, cubre < ~50 %)
-            run {
-                val aH = bag.mat(); Imgproc.resize(a, aH, hs, 0.0, 0.0, Imgproc.INTER_AREA)
-                val kw = Cv.odd((lhT / 2.0).roundToInt().coerceIn(3, 41))
-                Imgproc.boxFilter(aH, aH, -1, Size(kw.toDouble(), kw.toDouble()))
-                rampF(aH, FILL_LO, FILL_HI); Core.max(noK, aH, noK)
-            }
             run { val nf = bag.mat(); noK.convertTo(nf, -1, -1.0, 1.0); Core.subtract(k, Scalar(1.0), k); Core.multiply(k, nf, k); Core.add(k, Scalar(1.0), k) }
             val k3 = bag.mat(); Core.merge(listOf(k, k, k), k3)
             Core.max(col, Scalar.all(0.255), col); Core.multiply(col, Scalar.all(1.0 / 255), col); Core.min(col, Scalar.all(1.0), col)
@@ -570,13 +767,6 @@ internal object NaturalColor {
         Core.multiply(A, c, A); Core.multiply(B, c, B)
         Core.merge(listOf(L, A, B), lab)
         Imgproc.cvtColor(lab, col, Imgproc.COLOR_Lab2RGB)
-        Imgproc.resize(col, col, outer.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
-        // Composición sobre blanco: out = 1 - a·(1 - color)
-        col.convertTo(col, -1, -1.0, 1.0)
-        val a3 = bag.mat(); Core.merge(listOf(a, a, a), a3)
-        Core.multiply(col, a3, col)
-        val o = bag.mat(); col.convertTo(o, CvType.CV_8UC3, -255.0, 255.0)
-        val dst = out.submat(inner); o.submat(crop).copyTo(dst); dst.release()
     }
 
     /**
@@ -592,4 +782,14 @@ internal object NaturalColor {
             Core.min(bw, r, bw)
         } finally { r.release() }
     }
+}
+
+/** Perfil por etapas de [NaturalColor] (sólo escritorio / banco: [on] = false en la app, coste nulo). */
+internal object NcProf {
+    @JvmField var on = false
+    val times = java.util.concurrent.ConcurrentHashMap<String, Double>()
+    private val t = ThreadLocal.withInitial { 0L }
+    fun start() { if (on) t.set(System.nanoTime()) }
+    fun add(k: String, v: Double) { if (on) times.merge(k, v, Double::plus) }
+    fun mark(k: String) { if (!on) return; val n = System.nanoTime(); times.merge(k, (n - t.get()) / 1e6, Double::plus); t.set(n) }
 }
