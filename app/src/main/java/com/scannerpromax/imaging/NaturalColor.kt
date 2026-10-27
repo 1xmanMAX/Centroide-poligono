@@ -259,6 +259,8 @@ internal object NaturalColor {
         val cPaper: Double = 3.0,
         /** Blanco del papel (RGB) en la foto original, o null. */
         val origWhite: DoubleArray? = null,
+        /** Zonas de foto (8U, bloques de imagen) a la escala de análisis. */
+        val photos: Mat? = null,
         /** Fondo ajeno (8U, 255) a la escala de análisis, o null. */
         val foreign: Mat? = null,
         /** Zona ajena con escritura (banda impresa, sombra de color): sin lo añadido, con la tinta del B/N; o null. */
@@ -266,7 +268,7 @@ internal object NaturalColor {
     ) {
         /** Ganancia de la luminancia (balance de blancos aplicado a la oscuridad sin copia balanceada). */
         val lumGain: Double get() = 0.299 * gain[0] + 0.587 * gain[1] + 0.114 * gain[2]
-        fun release() { support.release(); figures.release(); fills?.release(); fillCol?.release(); foreign?.release(); foreignSoft?.release() }
+        fun release() { support.release(); figures.release(); fills?.release(); fillCol?.release(); foreign?.release(); foreignSoft?.release(); photos?.release() }
     }
 
     /** Compone "Color natural" (8UC3 nuevo). */
@@ -428,6 +430,9 @@ internal object NaturalColor {
         NcProf.mark("g.foreign")
         val support = Mat.zeros(sm.size(), CvType.CV_8U)
         val figures = Mat.zeros(sm.size(), CvType.CV_8U)
+        // (zonas de FOTO: sólo los bloques de imagen de la maquetación -fotos, ilustraciones-; una figura deducida de una
+        // componente de color -un párrafo con resaltador, un logo- sigue el tratamiento de la tinta con su color)
+        val photos = Mat.zeros(sm.size(), CvType.CV_8U)
         if (inp.bridge != 1) {
             val labels = bag.mat(); val stats = bag.mat(); val cent = bag.mat()
             val n = Imgproc.connectedComponentsWithStats(cm, labels, stats, cent, 8, CvType.CV_32S)
@@ -495,6 +500,7 @@ internal object NaturalColor {
                 if (rr.width <= 0 || rr.height <= 0) continue
                 if (softAll != null) { val sub = softAll.submat(rr); val fr = Core.countNonZero(sub).toDouble() / rr.area(); sub.release(); if (fr > 0.3) continue }
                 Imgproc.rectangle(figures, org.opencv.core.Point(r.x * s, r.y * s), org.opencv.core.Point((r.x + r.width) * s - 1, (r.y + r.height) * s - 1), Scalar(255.0), -1)
+                Imgproc.rectangle(photos, org.opencv.core.Point(r.x * s, r.y * s), org.opencv.core.Point((r.x + r.width) * s - 1, (r.y + r.height) * s - 1), Scalar(255.0), -1)
             }
         }
         NcProf.mark("g.masks")
@@ -508,7 +514,7 @@ internal object NaturalColor {
         fl?.let { (f, _) -> val nf = bag.mat(); Core.bitwise_not(figures, nf); Core.bitwise_and(f, nf, f) }
         NcProf.mark("g.fills")
         debug?.let { d -> fl?.let { d("fills", it.first) }; foreignAll2?.let { d("foreign", it) }; softF[0]?.let { d("foreign_soft", it) } }
-        return Global(gain, black, white, t0, support, figures, s, cLo, tF, fl?.first, fl?.second, max(FILL_DE, 2.5 * noise), cPaper, origWhite, foreignAll2,
+        return Global(gain, black, white, t0, support, figures, s, cLo, tF, fl?.first, fl?.second, max(FILL_DE, 2.5 * noise), cPaper, origWhite, photos, foreignAll2,
             softF[0]?.clone())
     }
 
@@ -1143,14 +1149,14 @@ internal object NaturalColor {
         val c8 = bag.add(Mat(hh, hw, CvType.CV_8UC3)); c8.put(0, 0, c8A)
         NcProf.mark("color")
         writeOut(c8, a, fm, fillUp, outer, inner, crop, out, bag)
-        if (fig != null && OFF and 16 == 0) photoZone(fig, nrmT, inp.orig, g, outer, inner, crop, out, bag)
+        if (fig != null && OFF and 16 == 0 && g.photos != null) upMask8(g.photos, g.scale, outer, bag)?.let { ph -> photoZone(ph, nrmT, inp.orig, g, outer, inner, crop, out, bag) }
         NcProf.mark("compose")
     }
 
     /**
      * Color del relleno liso en la tesela: media local (ventana de ~7 px a media resolución) del color balanceado de
      * los píxeles del relleno que no son tinta (el color propio de cada banda o columna, sin el de las letras), con el
-     * los niveles negro/blanco de la página; donde no hay bastantes, el color del fondo sin trazos de la escala de análisis.
+     * el punto blanco de la página; donde no hay bastantes, el color del fondo sin trazos de la escala de análisis.
      */
     private fun localFill(fm: Mat, aBW: Mat, nbH: Mat, g: Global, outer: Rect, hs: Size, bag: MatBag): Mat {
         val fH = bag.mat(); areaDown(fm, fH, hs, bag)
@@ -1167,11 +1173,12 @@ internal object NaturalColor {
         Imgproc.boxFilter(mf, mf, -1, k, org.opencv.core.Point(-1.0, -1.0), false)
         val ok = bag.mat(); Imgproc.threshold(mf, ok, 3.0, 255.0, Imgproc.THRESH_BINARY); ok.convertTo(ok, CvType.CV_8U)
         Core.max(mf, Scalar(1e-3), mf); Core.merge(listOf(mf, mf, mf), m3); Core.divide(nf, m3, nf)
-        // (con los niveles de la página, como la tinta: el relleno conserva su peso visual frente al papel blanco puro)
-        val c8 = bag.mat(); nf.convertTo(c8, CvType.CV_8UC3, 255.0 / (g.white - g.black), -255.0 * g.black / (g.white - g.black))
+        // (con el punto blanco de la página: su tono natural; con los niveles completos de la tinta los resaltadores y
+        // bandas salían demasiado oscuros -banco: más tinta espuria y menos bolígrafo conservado-)
+        val c8 = bag.mat(); nf.convertTo(c8, CvType.CV_8UC3, 255.0 / g.white)
         // (sin muestras propias: el color de la escala de análisis)
         val lo = upMask8(g.fillCol!!, g.scale, outer, bag, check = false)!!
-        val loH = bag.mat(); areaDown(lo, loH, hs, bag); loH.convertTo(loH, -1, 255.0 / (g.white - g.black), -255.0 * g.black / (g.white - g.black))
+        val loH = bag.mat(); areaDown(lo, loH, hs, bag); loH.convertTo(loH, -1, 255.0 / g.white)
         val nok = bag.mat(); Core.bitwise_not(ok, nok); loH.copyTo(c8, nok)
         val up = bag.mat(); Imgproc.resize(c8, up, outer.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
         return up
