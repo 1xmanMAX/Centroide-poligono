@@ -43,7 +43,7 @@ class TableLinesTest {
         // raya tenue rota de forma irregular (como la que la cámara deja), con un poco de inclinación
         val gaps = listOf(30..37, 80..95, 150..152, 210..240, 300..306)
         val b = band(400, 41, { y0 + it * 0.004 }, 2.0, 60.0) { i -> i in 10..390 && gaps.none { i in it } }
-        val at = { i: Int, j: Int -> b[i][j] }
+        val at = TableLinesMath.Band { i, j -> b[i][j] }
         val seed = TableLinesMath.Poly.line(y0 + 0.5, 0.0, 200.0)
         val tr = TableLinesMath.track(at, 41, 400, seed, 120, 180, prm())
         assertNotNull(tr); tr!!
@@ -58,7 +58,7 @@ class TableLinesTest {
 
     @Test fun rayaDiscontinuaImpresa_regularYLimpia_seReconoce() {
         val b = band(400, 41, { 20.0 }, 2.0, 150.0) { i -> i in 10..390 && (i - 10) % 18 < 10 }
-        val tr = TableLinesMath.track({ i, j -> b[i][j] }, 41, 400, TableLinesMath.Poly.line(20.0, 0.0, 200.0), 100, 300, prm())
+        val tr = TableLinesMath.track(TableLinesMath.Band { i, j -> b[i][j] }, 41, 400, TableLinesMath.Poly.line(20.0, 0.0, 200.0), 100, 300, prm())
         assertNotNull(tr)
         assertTrue("discontinua", tr!!.dashed)
     }

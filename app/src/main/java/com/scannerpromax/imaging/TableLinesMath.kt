@@ -18,6 +18,9 @@ import kotlin.math.sqrt
  */
 internal object TableLinesMath {
 
+    /** Acceso a la banda (sin cajas: los enteros no se envuelven en cada lectura). */
+    fun interface Band { fun at(i: Int, j: Int): Int }
+
     /** Medida de cada posición a lo largo: contraste [amp] (papel local - centro), centro subpíxel, anchura equivalente. */
     class Profile(val a0: Int, val n: Int) {
         val amp = DoubleArray(n)
@@ -51,7 +54,7 @@ internal object TableLinesMath {
         val gapMax: Int,          // hueco máximo al prolongar los extremos
     )
 
-    fun measure(at: (Int, Int) -> Int, across: Int, nAlong: Int, a0: Int, a1: Int, pred: (Int) -> Double, search: Int, paperExtra: Int): Profile {
+    fun measure(at: Band, across: Int, nAlong: Int, a0: Int, a1: Int, pred: (Int) -> Double, search: Int, paperExtra: Int): Profile {
         val p = Profile(a0, a1 - a0 + 1)
         val win = DoubleArray(2 * (search + paperExtra) + 3)
         for (k in 0 until p.n) {
@@ -65,7 +68,7 @@ internal object TableLinesMath {
     }
 
     /** (amp, centro, anchura, lado) en la posición [i] o null si no hay pico aislado (borde de un relleno, fuera). */
-    fun measureOne(at: (Int, Int) -> Int, across: Int, nAlong: Int, i: Int, yp: Double, search: Int, paperExtra: Int, buf: DoubleArray? = null): DoubleArray? {
+    fun measureOne(at: Band, across: Int, nAlong: Int, i: Int, yp: Double, search: Int, paperExtra: Int, buf: DoubleArray? = null): DoubleArray? {
         val c = yp.roundToInt()
         val lo = c - search - paperExtra; val hi = c + search + paperExtra
         if (c - search < 0 || c + search >= across) return null
@@ -76,7 +79,7 @@ internal object TableLinesMath {
         for (q in 0 until n) {
             val j = lo + q
             if (j < 0 || j >= across) { v[q] = Double.NaN; continue }
-            val s = (at(im, j) + at(i, j) + at(ip, j)) / 3.0
+            val s = (at.at(im, j) + at.at(i, j) + at.at(ip, j)) / 3.0
             v[q] = s
             if (s > paper) paper = s
         }
@@ -187,11 +190,11 @@ internal object TableLinesMath {
      * extremos mientras siga habiendo tinta alineada (huecos <= [Params.gapMax]) y vuelve a medir con búsqueda
      * estrecha alrededor del ajuste. null si no hay suficiente apoyo.
      */
-    fun track(at: (Int, Int) -> Int, across: Int, nAlong: Int, seed: Poly, s0: Int, s1: Int, prm: Params): Track? =
+    fun track(at: Band, across: Int, nAlong: Int, seed: Poly, s0: Int, s1: Int, prm: Params): Track? =
         trackAll(at, across, nAlong, seed, s0, s1, prm).maxByOrNull { it.inkFrac * it.length }
 
     /** Como [track], pero devuelve cada tramo separado por huecos grandes (p. ej. dos tablas alineadas) por separado. */
-    fun trackAll(at: (Int, Int) -> Int, across: Int, nAlong: Int, seed: Poly, s0: Int, s1: Int, prm: Params): List<Track> {
+    fun trackAll(at: Band, across: Int, nAlong: Int, seed: Poly, s0: Int, s1: Int, prm: Params): List<Track> {
         val b0 = s0.coerceIn(0, nAlong - 1); val b1 = s1.coerceIn(b0, nAlong - 1)
         var prof = measure(at, across, nAlong, b0, b1, { seed.at(it.toDouble()) }, prm.search, prm.paperExtra)
         var poly = robustFit(prof, prm, seed, 2.0 * prm.search) ?: return emptyList()
@@ -238,7 +241,7 @@ internal object TableLinesMath {
         return finish(at, across, nAlong, lo, hi, pred, tight, prm, true)
     }
 
-    private fun finish(at: (Int, Int) -> Int, across: Int, nAlong: Int, lo: Int, hi: Int, pred: (Int) -> Double, tight: Int, prm: Params, split: Boolean): List<Track> {
+    private fun finish(at: Band, across: Int, nAlong: Int, lo: Int, hi: Int, pred: (Int) -> Double, tight: Int, prm: Params, split: Boolean): List<Track> {
         if (!split) return listOfNotNull(finishOne(at, across, nAlong, lo, hi, pred, tight, prm, null))
         val pieces = ArrayList<IntArray>()
         val t = finishOne(at, across, nAlong, lo, hi, pred, tight, prm, pieces)
@@ -251,7 +254,7 @@ internal object TableLinesMath {
      * [Params.gapMax] (dos tablas alineadas una sobre otra, un palo de letra alineado más allá del borde), se queda el
      * tramo con más tinta y se vuelve a medir: una línea no salta de una tabla a otra.
      */
-    private fun finishOne(at: (Int, Int) -> Int, across: Int, nAlong: Int, lo: Int, hi: Int, pred: (Int) -> Double, tight: Int, prm: Params, pieces: MutableList<IntArray>?): Track? {
+    private fun finishOne(at: Band, across: Int, nAlong: Int, lo: Int, hi: Int, pred: (Int) -> Double, tight: Int, prm: Params, pieces: MutableList<IntArray>?): Track? {
         val prof = measure(at, across, nAlong, lo, hi, pred, tight, prm.paperExtra)
         val thr = threshold(prof, prm)
         val n = prof.n

@@ -60,6 +60,7 @@ internal object TableLines {
         val side = max(w, h)
         val lh = if (letterHeight > 0) letterHeight else side / 250.0
         // canal mínimo a resolución completa (la línea de color también oscurece)
+        val t0 = System.nanoTime()
         val ch = ArrayList<Mat>(3); Core.split(src, ch); for (c in ch) bag.add(c)
         val vFull = bag.mat(); Core.min(ch[0], ch[1], vFull); Core.min(vFull, ch[2], vFull)
         // análisis
@@ -88,7 +89,10 @@ internal object TableLines {
             gapMax = max((2.5 * lh).roundToInt(), (0.02 * side).roundToInt()),
         )
         val avoidRects = avoid.map { r -> doubleArrayOf(r[0] * w, r[1] * h, r[2] * w, r[3] * h) }
+        val t1 = System.nanoTime()
+        var tTrack = 0L; var tMorph = 0L
         for (hor in booleanArrayOf(true, false)) {
+            val tm0 = System.nanoTime()
             val bh = bag.mat()
             Imgproc.morphologyEx(nv, bh, Imgproc.MORPH_BLACKHAT, if (hor) Cv.kernel(Imgproc.MORPH_RECT, 1, kt) else Cv.kernel(Imgproc.MORPH_RECT, kt, 1))
             val m = bag.mat(); Imgproc.threshold(bh, m, thr, 255.0, Imgproc.THRESH_BINARY)
@@ -98,6 +102,7 @@ internal object TableLines {
             Imgproc.morphologyEx(m, m, Imgproc.MORPH_CLOSE, if (hor) Cv.kernel(Imgproc.MORPH_RECT, gap, 1) else Cv.kernel(Imgproc.MORPH_RECT, 1, gap))
             debug?.invoke(if (hor) "mH" else "mV", m); debug?.invoke(if (hor) "bhH" else "bhV", bh)
             val labels = bag.mat(); val stats = bag.mat(); val cents = bag.mat()
+            tMorph += System.nanoTime() - tm0
             val nc = Imgproc.connectedComponentsWithStats(m, labels, stats, cents, 8, CvType.CV_32S)
             val st = IntArray(max(0, nc) * 5); if (nc > 0) stats.get(0, 0, st)
             val aw = nv.cols(); val ah = nv.rows()
@@ -107,7 +112,7 @@ internal object TableLines {
             for (c in 1 until nc) {
                 val x = st[c * 5]; val y = st[c * 5 + 1]; val bw = st[c * 5 + 2]; val bhh = st[c * 5 + 3]; val area = st[c * 5 + 4]
                 val ext = if (hor) bw else bhh; val thin = if (hor) bhh else bw
-                if (ext < minLenA || area.toDouble() / ext > maxThick * s * 2 + 2 || thin > ext * 0.08 + maxThick * s * 2 + 4) continue
+                if (ext < minLenA || area.toDouble() / ext > maxThick * s + 2 || thin > ext * 0.08 + maxThick * s * 2 + 4) continue
                 // semilla: recta por los centros de la componente (media por columna)
                 val seed = seedLine(labels, c, x, y, bw, bhh, hor, s) ?: continue
                 val a0 = floor(((if (hor) x else y) + 0.5) / s - 0.5).toInt(); val a1 = ceil(((if (hor) x + bw else y + bhh) - 0.5) / s - 0.5).toInt()
@@ -119,7 +124,7 @@ internal object TableLines {
                 val band = bag.add(if (hor) vFull.submat(c0, c1, 0, w).clone() else vFull.submat(0, h, c0, c1).clone())
                 val bb = ByteArray((band.total()).toInt()); band.get(0, 0, bb); band.release()
                 val across = c1 - c0
-                val at: (Int, Int) -> Int = if (hor) { i, j -> bb[j * w + i].toInt() and 0xFF } else { i, j -> bb[i * across + j].toInt() and 0xFF }
+                val at = if (hor) TableLinesMath.Band { i, j -> bb[j * w + i].toInt() and 0xFF } else TableLinesMath.Band { i, j -> bb[i * across + j].toInt() and 0xFF }
                 val seedB = TableLinesMath.Poly(seed.c0 - c0, seed.c1, seed.c2, seed.mid, seed.scale)
                 for (tr in TableLinesMath.trackAll(at, across, nAlong, seedB, a0, a1, prm)) {
                 // de la banda a coordenadas de la página
@@ -148,6 +153,8 @@ internal object TableLines {
                 }
             }
         }
+        val t2 = System.nanoTime()
+        log?.invoke("tiempos: prep=%.0f morf=%.0f seguimiento=%.0f ms".format((t1 - t0) / 1e6, tMorph / 1e6, (t2 - t1 - tMorph) / 1e6))
         if (cands.isEmpty()) return@use 0
         // duplicados (dos semillas de la misma línea): la más larga
         val uniq = dedupe(cands)
@@ -177,6 +184,7 @@ internal object TableLines {
             val pa = (l.a0 + 0.5) * k - 0.5; val pb = (l.a1 + 0.5) * k - 0.5
             drawn.add(if (l.hor) doubleArrayOf(1.0, pa, ca, pb, cb) else doubleArrayOf(0.0, ca, pa, cb, pb))
         }
+        log?.invoke("fin %.0f ms".format((System.nanoTime() - t2) / 1e6))
         log?.invoke("tabla: candidatas=${cands.size} únicas=${kept.size} dibujadas=${drawn.size} kt=$kt lo=$lo gap=$gap thr=%.1f noise=%.1f lh=%.1f inkRef=%.0f".format(thr, noise, lh, inkRef))
         onDraw?.invoke(drawn)
         drawn.size
