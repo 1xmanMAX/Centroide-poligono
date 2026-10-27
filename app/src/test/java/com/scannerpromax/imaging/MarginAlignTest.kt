@@ -116,6 +116,19 @@ class MarginAlignTest {
     }
 
     @Test
+    fun trasLaMallaSoloCizalla() {
+        // Márgenes en trapecio: con sólo cizalla no hay corrección coherente
+        val p = page(bl = 0.02, br = -0.02)
+        val r = MarginAlign.estimate(p.first, p.second, p.third, med, pitch, w, h, shearOnly = true)!!
+        assertFalse(r.info, r.act)
+        // Márgenes paralelos: cizalla con la pendiente media de ambos
+        val q = page(bl = 0.02, br = 0.02)
+        val s = MarginAlign.estimate(q.first, q.second, q.third, med, pitch, w, h, shearOnly = true)!!
+        assertTrue(s.info, s.act)
+        assertEquals(0.0, slopeAfter(s.m!!, q.first, false) { it % 6 == 0 }, 0.002)
+    }
+
+    @Test
     fun letraAManoNoSeToca() {
         val r = est(page(bl = 0.03, noise = 6.0, justified = false))
         assertTrue(r == null || !r.act)
