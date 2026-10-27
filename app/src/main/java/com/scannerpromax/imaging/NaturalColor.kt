@@ -46,18 +46,27 @@ internal object NaturalMath {
 
     /**
      * ¿Componente añadida (tenue) lo bastante fuerte? Oscuridad media >= [GHOST_K] x la de la tinta típica del B/N, o con
-     * color propio (croma medio >= 1.5 x el del papel, >= 5). La transparencia del reverso y las manchas grises no pasan.
+     * color propio (croma medio >= 0.8 x el p95 del croma del papel, >= 3). La transparencia del reverso y las manchas grises no pasan.
      */
     fun strongEnough(meanDark: Double, inkDark: Double, meanChroma: Double, paperChroma: Double): Boolean =
-        meanDark >= NaturalColor.GHOST_K * inkDark || meanChroma >= max(5.0, 1.5 * paperChroma)
+        meanDark >= NaturalColor.GHOST_K * inkDark || meanChroma >= max(3.0, 0.8 * paperChroma)
+
+    /**
+     * ¿Componente sin tinta en el B/N lo bastante clara como escritura? Color vivo (croma medio >= VIVID_K·cLo), oscura
+     * (>= VIVID_KD·tF), o -si tiene tamaño de palabra y no está junto al borde (6 %)- tenue con algo de color propio
+     * (resaltador, tinta pálida en sombra).
+     */
+    fun vivid(meanC: Double, meanD: Double, cLo: Double, tF: Double, paperC: Double, wordSized: Boolean): Boolean =
+        meanC >= NaturalColor.VIVID_K * cLo || meanD >= NaturalColor.VIVID_KD * tF ||
+            (wordSized && ((meanD >= 1.25 * tF && meanC >= max(3.0, paperC)) || meanC >= 1.1 * cLo))
 
     /** ¿La caja toca el borde de la imagen (1 px de margen)? */
     fun touchesBorder(x: Int, y: Int, w: Int, h: Int, imgW: Int, imgH: Int): Boolean =
         x <= 1 || y <= 1 || x + w >= imgW - 1 || y + h >= imgH - 1
 
     /** ¿La caja está en la franja del 3 % junto al borde de la imagen? */
-    fun nearBorder(x: Int, y: Int, w: Int, h: Int, imgW: Int, imgH: Int): Boolean {
-        val mx = 0.03 * imgW; val my = 0.03 * imgH
+    fun nearBorder(x: Int, y: Int, w: Int, h: Int, imgW: Int, imgH: Int, frac: Double = 0.03): Boolean {
+        val mx = frac * imgW; val my = frac * imgH
         return x < mx || y < my || x + w > imgW - mx || y + h > imgH - my
     }
 
@@ -85,7 +94,7 @@ internal object NaturalMath {
         // Grosor = 2 x máxima distancia al borde (una palabra con las letras fundidas sigue siendo fina; una banda no)
         val thick = thickness > 1.2 * l
         if (thickness >= 2.5 * l && area >= 25 * l * l && fill >= 0.35 && short >= 3 * l) return if (inkFrac >= 0.04) 2 else 0
-        if (thick && inkFrac < 0.02 && (long > 8 * l || !vivid)) return 0
+        if (thick && inkFrac < 0.02 && ((long > 8 * l && fill > 0.5) || !vivid)) return 0
         // Sin nada de tinta en el B/N, sólo si su color u oscuridad media es clara (resaltador, tinta de color): las motas
         // del papel, de una banda impresa o los agujeros de la espiral, débiles, no
         if (inkFrac < 0.01 && !vivid) return 0
@@ -122,7 +131,7 @@ internal object NaturalColor {
     const val SATURATION = 1.0
     /** Densidad óptica (luminancia) objetivo de la tinta tenue y refuerzo máximo ([NaturalMath.densityGain]). */
     const val OD_TARGET = 0.75
-    const val K_MAX = 2.5
+    const val K_MAX = 2.8
     const val NEUTRAL_LO = 4.0
     const val NEUTRAL_HI = 11.0
     const val MAX_BLACK = 70.0
@@ -138,6 +147,9 @@ internal object NaturalColor {
      * oscuridad del texto) no deben unirse a la escritura; un tramo tenue del mismo trazo sí (>= ~la mitad). */
     @JvmField var REL_LO_BW = 0.5
     @JvmField var REL_HI_BW = 0.8
+    /** Rampa relativa de la evidencia en las zonas candidatas (tinta tenue o de color que el B/N perdió). */
+    @JvmField var REL_LO_SUP = 0.25
+    @JvmField var REL_HI_SUP = 0.6
     /** Alfa por debajo del cual el píxel es papel (blanco puro). */
     const val ALPHA_MIN = 0.05
 
@@ -149,7 +161,8 @@ internal object NaturalColor {
         val images: List<Rect> = emptyList(),      // bloques de imagen (pasan enteros, en color)
         val allowed: List<Rect>? = null,           // zonas donde puede haber color (null = toda la página)
         val exclude: Mat? = null,    // 8UC1 (cualquier tamaño): 255 = no es tinta (huella de la rejilla, fondo ajeno)
-        val exclude2: Mat? = null,   // ídem (p. ej. zonas en blanco de la segmentación, a resolución de trabajo)
+        val exclude2: Mat? = null,
+        val excludeForeign: Boolean = false,       // [exclude] es fondo ajeno (mesa): lo pegado a él cuenta como borde   // ídem (p. ej. zonas en blanco de la segmentación, a resolución de trabajo)
         /** 0 = "Color natural"; 1 = sólo cierre de roturas (para el B/N); 2 = cierre + histéresis + trazos tenues junto a tinta del B/N. */
         val bridge: Int = 0,
         val gridColor: DoubleArray? = null,        // RGB normalizado de la cuadrícula clara (su tono no es tinta), o null
@@ -290,6 +303,13 @@ internal object NaturalColor {
                 val dt = bag.mat(); Imgproc.distanceTransform(cm, dt, Imgproc.DIST_L2, 3)
                 val dtA = FloatArray(sw * shh); dt.get(0, 0, dtA)
                 val thk = DoubleArray(n); for (i in lb.indices) { val v = 2.0 * dtA[i]; if (v > thk[lb[i]]) thk[lb[i]] = v }
+                // Pegado al fondo ajeno (mesa, madera que el recorte dejó dentro): como si tocara el borde
+                val foreign = BooleanArray(n)
+                if (inp.excludeForeign) excludeMask(inp.exclude, sm.size(), bag)?.let { fm ->
+                    Imgproc.dilate(fm, fm, Cv.kernel(Imgproc.MORPH_RECT, 5))
+                    val fb = ByteArray(sw * shh); fm.get(0, 0, fb)
+                    for (i in lb.indices) if (fb[i].toInt() != 0) foreign[lb[i]] = true
+                }
                 // Croma y oscuridad medias de cada componente
                 val cA = FloatArray(sw * shh); cEr.get(0, 0, cA)
                 val lA = ByteArray(sw * shh); lumEr.get(0, 0, lA)
@@ -302,12 +322,12 @@ internal object NaturalColor {
                 val cls = IntArray(n) {
                     val x = st[it * 5]; val y = st[it * 5 + 1]; val w = st[it * 5 + 2]; val h = st[it * 5 + 3]; val ar = st[it * 5 + 4]
                     val inkF = inkN[it].toDouble() / max(1, ar)
-                    if (it == 0 || NaturalMath.touchesBorder(x, y, w, h, sw, shh)) 0
+                    if (it == 0 || foreign[it] || NaturalMath.touchesBorder(x, y, w, h, sw, shh)) 0
                     else {
                         val c = NaturalMath.colorComponentClass(w, h, ar, lhS, inkF, thk[it],
-                            vivid = sC[it] / max(1, ar) >= VIVID_K * cLo || sD[it] / max(1, ar) >= VIVID_KD * tF)
+                            vivid = NaturalMath.vivid(sC[it] / max(1, ar), sD[it] / max(1, ar), cLo, tF, cPaper, max(w, h) < 8 * lhS && !NaturalMath.nearBorder(x, y, w, h, sw, shh, 0.06)))
                         // Junto al borde (restos del canto, agujeros, mesa, madera): sólo trazos finos con tinta en el B/N
-                        if (NaturalMath.nearBorder(x, y, w, h, sw, shh) && (inkF < 0.01 || c == 2 || (thk[it] > 1.2 * lhS && inkF < 0.05))) 0
+                        if (NaturalMath.nearBorder(x, y, w, h, sw, shh) && (inkF < 0.01 || ((c == 2 || thk[it] > 1.2 * lhS) && inkF < 0.05))) 0
                         // (B/N: sólo lo que continúa tinta que el B/N ya tiene; ni color suelto ni figuras)
                         else if (inp.bridge == 2 && (c == 2 || inkF < 0.1)) 0
                         else if (c == 1 && inkF < 0.5 && !NaturalMath.strongEnough(sD[it] / max(1, ar), inkD, sC[it] / max(1, ar), cPaper)) 0
@@ -436,9 +456,10 @@ internal object NaturalColor {
         val nwH = bag.mat(); Imgproc.resize(nw, nwH, hs, 0.0, 0.0, Imgproc.INTER_AREA)
         val chH = chromaOf(nwH, bag)
         val chroma = bag.mat(); Imgproc.resize(chH, chroma, outer.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
-        val ec = bag.mat(); relRamp(chroma, g.cLo, kl, ec, bag)
+        val ec = bag.mat(); relRamp(chroma, g.cLo, kl, ec, bag, REL_LO_SUP, REL_HI_SUP)
         // Trazo tenue (lápiz, tinta pálida) dentro de las zonas candidatas
-        val ef = bag.mat(); relRamp(dks, g.tF, kl, ef, bag, rLo, rHi, mxD)
+        // (en las zonas candidatas ya validadas -componentes con tinta, color propio o bastante oscuras- la rampa es más permisiva)
+        val ef = bag.mat(); relRamp(dks, g.tF, kl, ef, bag, if (inp.bridgeOnly) rLo else REL_LO_SUP, if (inp.bridgeOnly) rHi else REL_HI_SUP, mxD)
         // Tono de la cuadrícula clara (mismo matiz que ella y poco más oscuro): ni color ni trazo tenue
         inp.gridColor?.let { gc -> gridLike(nw, gc, g.gain, bag)?.let { gl -> Core.multiply(ec, gl, ec); Core.multiply(ef, gl, ef) } }
         // Huella de la rejilla / fondo ajeno: ni tinta ni color
