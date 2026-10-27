@@ -86,17 +86,17 @@ internal object NaturalMath {
     }
 
     /**
-     * ¿Tono de fondo ajeno (madera, mesa)? Un solo tono ([conc] = |Σ(a,b)| / Σ croma >= 0.75), croma medio <= 25 y poca
-     * variación de luminancia (σ L* <= 16): una foto o una ilustración tienen colores vivos o contrastes fuertes.
+     * ¿Tono de fondo ajeno (madera)? Un solo tono ([conc] = |Σ(a,b)| / Σ croma >= 0.75), croma medio <= 25 y con TEXTURA
+     * (vetas: σ L* >= 8). Una sombra cálida sobre la hoja es lisa; una foto o ilustración (además vetada por los bloques
+     * de imagen) tiene colores vivos.
      */
-    fun foreignHue(conc: Double, meanChroma: Double, sdL: Double): Boolean = conc >= 0.75 && meanChroma <= 25.0 && sdL <= 16.0
+    fun foreignHue(conc: Double, meanChroma: Double, sdL: Double): Boolean = conc >= 0.75 && meanChroma <= 25.0 && sdL >= 8.0
 
     /**
-     * ¿Fondo ajeno que se quita entero (sin nada del B/N: mesa lisa) y no sólo lo añadido? Con tinta en el B/N -escritura
-     * en una banda de color o en una sombra cálida, o las vetas de la madera- se conserva lo del B/N (no se puede
-     * distinguir con seguridad una página densa de las vetas).
+     * ¿Fondo ajeno que se quita entero y no sólo lo añadido? Sin nada del B/N (mesa lisa), o madera con vetas marcadas
+     * (σ L* >= 12) que el B/N llenó de manchas (>= 15 %); con escritura de densidad normal se conserva lo del B/N.
      */
-    fun foreignIsHard(inkFrac: Double): Boolean = inkFrac < 0.005
+    fun foreignIsHard(inkFrac: Double, sdL: Double): Boolean = inkFrac < 0.005 || (inkFrac >= 0.15 && sdL >= 12.0)
 
     /**
      * PUREZA media de la tinta (croma / (100 - L*), zona de ~1 letra) por debajo de la cual es NEUTRA (-> negro):
@@ -638,6 +638,7 @@ internal object NaturalColor {
         // Con escritura dentro (tinta del B/N de densidad de texto: 0.5-15 %) es una banda impresa o una sombra de color
         // sobre la hoja: sólo se quita lo añadido (color, figuras, rellenos), no la tinta del B/N ([soft]); la madera o la
         // mesa (vetas: tinta muy densa, o nada) se quitan enteras
+        val sdLc = DoubleArray(nc)
         // Madera / mesa: UN tono (concentración del tono >= 0.75) y croma moderado; una ilustración o una foto de color
         // pegada al borde (libro infantil, revista) tiene muchos tonos o mucho croma -> no es fondo ajeno
         run {
@@ -656,15 +657,17 @@ internal object NaturalColor {
             }
             for (c in 1 until nc) if (keep[c]) {
                 val ar = max(1, st[c * 5 + 4]).toDouble()
+                sdLc[c] = kotlin.math.sqrt(max(0.0, sl2[c] / ar - (sl[c] / ar) * (sl[c] / ar)))
                 val conc = kotlin.math.sqrt(sa[c] * sa[c] + sb2[c] * sb2[c]) / max(1e-6, sc[c])
                 val sdL = kotlin.math.sqrt(max(0.0, sl2[c] / ar - (sl[c] / ar) * (sl[c] / ar)))
                 // (un bloque de imagen -foto, ilustración- pegado al borde no es fondo ajeno)
+                if (logComps) log?.invoke("ajeno comp ${st[c * 5]},${st[c * 5 + 1]} ${st[c * 5 + 2]}x${st[c * 5 + 3]} conc=%.2f C=%.1f sdL=%.1f img=%.2f".format(conc, sc[c] / ar, sdL, inImg[c] / ar))
                 if (!NaturalMath.foreignHue(conc, sc[c] / ar, sdL) || inImg[c] >= 0.1 * ar) keep[c] = false
             }
         }
         // (tinta del B/N a esta escala: < 200 -el texto fino se aclara al reducir-)
         val inkN = IntArray(nc); for (i in 0 until n) if (keep[la[i]] && (bwB[i].toInt() and 0xFF) < 200) inkN[la[i]]++
-        val hard = BooleanArray(nc) { c -> keep[c] && NaturalMath.foreignIsHard(inkN[c].toDouble() / max(1, st[c * 5 + 4])) }
+        val hard = BooleanArray(nc) { c -> keep[c] && NaturalMath.foreignIsHard(inkN[c].toDouble() / max(1, st[c * 5 + 4]), sdLc[c]) }
         val fb = ByteArray(n); val sb = ByteArray(n); var any = false; var anyS = false
         for (i in 0 until n) { val l = la[i]; if (hard[l]) { fb[i] = -1; any = true } else if (keep[l]) { sb[i] = -1; anyS = true } }
         if (anyS) { softOut[0] = Mat(h, w, CvType.CV_8U).also { it.put(0, 0, sb); Imgproc.dilate(it, it, Cv.kernel(Imgproc.MORPH_RECT, 5)) } }
