@@ -133,7 +133,11 @@ object GridDewarp {
     // =====================================================================================
 
     /** Resultado de la estimación: modelo (null = no corregir) y ángulo global por renglones y márgenes (o null). */
-    internal class Estimate(val model: Model?, val skew: Double?)
+    internal class Estimate(
+        val model: Model?, val skew: Double?,
+        /** Márgenes del texto ([MarginAlign]): giro + cizalla/trapecio que deja verticales los márgenes, o null. */
+        val align: MarginAlign.Result? = null,
+    )
 
     /** Estima el modelo sobre [rgb] (RGB 8UC3 ya rectificado, cualquier tamaño). null = no corregir. */
     internal fun estimate(rgb: Mat, debug: Debug? = null): Model? = estimateFull(rgb, debug).model
@@ -165,13 +169,22 @@ object GridDewarp {
         var hl = hc; var vl = vc
         var skew: Double? = null
         var footRows: List<DewarpMath.LineObs> = emptyList()
+        var align: MarginAlign.Result? = null
+        var tiltInfo = ""
         // Respaldo: renglones de texto si las líneas horizontales no cubren la hoja
         if (coverage(hl, h.toDouble()) < 0.35 && coverage(vl, w.toDouble()) < 0.35) {
             val tl = textLayout(bin, longSide, bag)
             if (tl != null && tl.rowSlopes.size >= 4) {
                 hl = tl.rows; textRows = true
                 footRows = tl.footRows
-                val gl = tl.guides.map { g -> DewarpMath.LineObs(false, g.x, g.y, weight = g.weight, loose = g.loose, noise = g.resid, guide = true) }
+                var gl = tl.guides.map { g -> DewarpMath.LineObs(false, g.x, g.y, weight = g.weight, loose = g.loose, noise = g.resid, guide = true) }
+                // Márgenes del texto: columna principal de inicios (y canto derecho si está justificado)
+                align = if (tl.segs.isNotEmpty()) runCatching {
+                    MarginAlign.estimate(tl.segs, tl.rowSlopes, tl.rowLens, tl.med, tl.pitch, w.toDouble(), h.toDouble())
+                }.getOrNull() else null
+                // En la malla, las columnas entran como verticales impuestas si ninguna guía estricta de inicios las cubre ya
+                marginGuide(align?.guidePoints, align, tl)?.let { gl = gl + it }
+                if (align?.local == true) marginGuide(align.guide2, align, tl)?.let { gl = gl + it }
                 vl = vl + gl
                 debug?.guides = tl.guides.size
                 val strict = tl.guides.filter { !it.loose }
@@ -199,6 +212,17 @@ object GridDewarp {
             val f2 = fitModel(w.toDouble(), h.toDouble(), footRows, vc, textRows, debug, content, paper)
             if (f2.model != null) fit = f2
         }
+        // Columnas de inicios rectas pero con pendientes distintas sobre renglones rectos (cizalla local: la hoja
+        // "plana" para la rectitud): la malla con las guías juzgadas también por su INCLINACIÓN respecto de la
+        // perpendicular a los renglones
+        if (fit.model == null && fit.reason.startsWith("plana") && align?.local == true && MarginAlign.meshGuide) {
+            // (guías con más peso: la inclinación es lo que hay que corregir y la placa delgada la suaviza)
+            val vt = vl.map { l -> if (l.guide && !l.loose) DewarpMath.LineObs(l.horizontal, l.x, l.y, l.weight * tiltGuideGain, l.target, l.loose, l.noise, l.guide) else l }
+            val f2 = fitModel(w.toDouble(), h.toDouble(), hl, vt, textRows, debug, content, paper, tiltRef = kotlin.math.tan(Math.toRadians(align.angle)))
+            if (DewarpMath.trace) println("  malla por inclinación de columnas: ${f2.reason}")
+            tiltInfo = " | malla por inclinación: ${f2.reason} ${f2.model?.info ?: ""}"
+            if (f2.model != null) fit = f2
+        }
         // Cantos de la hoja (plano ampliado alrededor del recorte): si están curvados, quebrados o desplazados respecto
         // del recorte, el modelo por los cantos (con las líneas de la hoja) sustituye al de sólo líneas
         var borderInfo = ""
@@ -209,8 +233,39 @@ object GridDewarp {
         }
         debug?.msSolve = (System.nanoTime() - t1) / 1e6
         lastInfo = "${fit.reason} ${fit.model?.info ?: ""} | $borderInfo"
-        if (DewarpMath.trace) println("  estimación ${w}x$h: ${fit.reason} ${fit.model?.info ?: ""} ángulo=$skew")
-        Estimate(fit.model, skew)
+        if (DewarpMath.trace) println("  estimación ${w}x$h: ${fit.reason} ${fit.model?.info ?: ""} ángulo=$skew márgenes=${align?.info}")
+        lastAlign = (align?.info ?: "") + tiltInfo
+        Estimate(fit.model, skew, align)
+    }
+
+    /** Peso extra de las guías verticales en la malla por inclinación de columnas (banco de pruebas). */
+    internal var tiltGuideGain = 3.0
+
+    /** Motivo de la última decisión de [MarginAlign] (banco de pruebas). */
+    @Volatile internal var lastAlign = ""
+
+    /**
+     * Columna principal de inicios ([MarginAlign.Result.guidePoints]) como guía vertical de la malla, salvo que una guía
+     * ESTRICTA de inicios ya la siga (a menos de 1.5 letras en la mitad de su recorrido). Puntos suavizados como las
+     * guías del texto ([DewarpMath.robustSmooth]): sigue la curvatura del margen de una hoja combada.
+     */
+    private fun marginGuide(p: FloatArray?, align: MarginAlign.Result?, tl: TextLayout): DewarpMath.LineObs? {
+        if (!MarginAlign.meshGuide || p == null) return null
+        val l = align?.left ?: return null
+        val n = p.size / 2
+        if (n < 6) return null
+        val ys = FloatArray(n) { p[2 * it + 1] }; val xs = FloatArray(n) { p[2 * it] }
+        val tol = (0.4 * tl.med).toFloat().coerceAtLeast(1.5f)
+        for (g in tl.guides) {
+            if (!g.start || g.loose) continue
+            var hit = 0
+            for (k in 0 until n) { val gx = TextGuides.curveAt(g.x, g.y, ys[k]); if (!gx.isNaN() && abs(gx - xs[k]) <= 1.5f * tl.med) hit++ }
+            if (hit >= n / 2) return null
+        }
+        val pitch = tl.pitch.toFloat().coerceAtLeast((1.2 * tl.med).toFloat())
+        val sm = DewarpMath.robustSmooth(DewarpMath.Chain(ys, xs), win = 2.6f * pitch, outTol = tol, minInlier = 0.7f) ?: return null
+        if (sm.size < 6) return null
+        return DewarpMath.LineObs(false, sm.c, sm.t, weight = 1.0, noise = l.rms, guide = true)
     }
 
     /** Pliegues por placa delgada reponderada ([DewarpMath.foldWeights]); desactivable en el banco de pruebas. */
@@ -491,6 +546,9 @@ object GridDewarp {
         val rowLens: DoubleArray,
         /** Respaldo: sólo la línea base por los pies de las letras (método anterior). */
         val footRows: List<DewarpMath.LineObs> = emptyList(),
+        /** Tramos de cada renglón (inicios y finales: márgenes del texto) y paso entre renglones. */
+        val segs: List<TextGuides.Seg> = emptyList(),
+        val pitch: Double = 0.0,
     )
 
     /** Guías del texto activables por separado (banco de pruebas). */
@@ -616,8 +674,9 @@ object GridDewarp {
         }
         // Tramos de cada renglón (cortes en huecos > 2.5 letras: calles entre columnas, tabuladores)
         val guides = ArrayList<TextGuides.Guide>()
+        val segs = ArrayList<TextGuides.Seg>()
+        var pitchOut = 0.0
         if (textGuides && centers.size >= 4) {
-            val segs = ArrayList<TextGuides.Seg>()
             val gap = (2.5 * med).toFloat()
             for ((ri, cen) in centers.withIndex()) {
                 val l = assigned[ri]
@@ -642,6 +701,7 @@ object GridDewarp {
             }
             near.sort()
             val pitch = if (near.isEmpty()) (2.2 * med).toFloat() else near[near.size / 2].coerceIn((1.2 * med).toFloat(), (5 * med).toFloat())
+            pitchOut = pitch.toDouble()
             guides.addAll(TextGuides.alignedGuides(segs, fMed, pitch, w.toFloat(), start = true))
             guides.addAll(TextGuides.alignedGuides(segs, fMed, pitch, w.toFloat(), start = false))
             if (DewarpMath.trace) for (g in guides) println("  guía ${if (g.start) "inicio" else "final"} n=${g.size} x=%.0f y=%.0f..%.0f resid=%.2f soporte=%.2f peso=%.2f${if (g.loose) " amplia" else ""}".format(g.x[0], g.y[0], g.y[g.size - 1], g.resid, g.support, g.weight))
@@ -655,7 +715,7 @@ object GridDewarp {
             val s = DewarpMath.robustSmooth(b, win = (med * 4).toFloat(), outTol = (med * 0.18).toFloat().coerceAtLeast(1.2f), minInlier = 0.5f) ?: continue
             foot.add(DewarpMath.LineObs(true, s.t, s.c, weight = 0.5))
         }
-        return TextLayout(out, guides, med, slopes.toDoubleArray(), lens.toDoubleArray(), foot)
+        return TextLayout(out, guides, med, slopes.toDoubleArray(), lens.toDoubleArray(), foot, segs, pitchOut)
     }
 
     /**
@@ -673,6 +733,8 @@ object GridDewarp {
         w: Double, h: Double,
         hLines: List<DewarpMath.LineObs>, vLines: List<DewarpMath.LineObs>,
         textRows: Boolean, debug: Debug?, content: FloatArray? = null, paper: Triple<ByteArray, Int, Int>? = null,
+        /** Pendiente dy/dx de los renglones: las guías verticales cuentan también su inclinación respecto de su perpendicular. */
+        tiltRef: Double? = null,
     ): Fit {
         var kept: List<DewarpMath.LineObs> = emptyList()
         fun fail(r: String) = Fit(null, r, kept).also { debug?.reason = r }
@@ -702,7 +764,7 @@ object GridDewarp {
             }
             // Una línea muy curvada que el campo sigue en gran parte NO es atípica (sólo le falta resolución);
             // un trazo recto que cruza la malla en otro ángulo sí (su residuo es comparable a toda su desviación).
-            val bad = BooleanArray(lines.size) { res[it] > lim[it] && res[it] > 0.4 * DewarpMath.straightnessDev(lines[it]) }
+            val bad = BooleanArray(lines.size) { res[it] > lim[it] && res[it] > 0.4 * beforeDev(lines[it], tiltRef) }
             val keep = lines.indices.filter { !bad[it] }
             if (keep.size == lines.size || keep.size < 3) return@repeat
             for (i in lines.indices) if (bad[i]) rejected.add(lines[i])
@@ -731,7 +793,7 @@ object GridDewarp {
         val judged = lines.filter { !it.loose }.ifEmpty { lines }
         fun p90(l: List<Double>) = if (l.isEmpty()) 0.0 else l.sorted()[(l.size * 0.9).toInt().coerceAtMost(l.size - 1)]
         // Percentil 90: una esquina doblada afecta a pocas líneas pero debe corregirse
-        val p80b = p90(judged.map { DewarpMath.straightnessDev(it) })
+        val p80b = p90(judged.map { beforeDev(it, tiltRef) })
         val p80a = p90(judged.map { DewarpMath.lineResidual(field, it) })
         val nH = lines.count { it.horizontal }; val nV = lines.size - nH
         debug?.apply {
@@ -749,7 +811,7 @@ object GridDewarp {
             // Texto: las guías verticales del texto se juzgan aparte de los renglones (y demás líneas): un margen
             // combado con renglones rectos también es hoja curvada; el grupo que ya era recto no debe torcerse
             val fams = listOf(false, true).map { g -> judged.filter { it.guide == g } }.filter { it.isNotEmpty() }
-            val b = fams.map { f -> p90(f.map { max(0.0, DewarpMath.straightnessDev(it) - 2 * it.noise) }) }
+            val b = fams.map { f -> p90(f.map { l -> max(0.0, beforeDev(l, tiltRef) - 2 * l.noise) }) }
             if (DewarpMath.trace) for (l in judged.filter { it.guide }) println("  guía x=%.0f y=%.0f..%.0f n=${l.size} desv=%.2f ruido=%.2f residuo=%.2f".format(l.x[0], l.y[0], l.y[l.size - 1], DewarpMath.straightnessDev(l), l.noise, DewarpMath.lineResidual(field, l)))
             val a = fams.map { f -> p90(f.map { DewarpMath.lineResidual(field, it) }) }
             if (b.all { it < flatLimit }) return fail("plana; $info")
@@ -791,6 +853,18 @@ object GridDewarp {
         val extInfo = if (u0 < 0 || v0 < 0 || u1 > w || v1 > h) " lienzo %.1f,%.1f..%.1f,%.1f".format(u0, v0, u1 - w, v1 - h) else ""
         debug?.reason = "aplicado; $info$extInfo"
         return Fit(Model(gw, gh, map, conf, info + extInfo, u0 / w, v0 / h, u1 / w, v1 / h, paper?.first, paper?.second ?: 0, paper?.third ?: 0), "aplicado", lines, p80a)
+    }
+
+    /**
+     * Desviación de una línea ANTES del campo: su curvatura ([DewarpMath.straightnessDev]) y, con [tiltRef] (pendiente
+     * dy/dx de los renglones), para una guía vertical también su inclinación respecto de la perpendicular a los renglones
+     * (semirrecorrido: lo que [DewarpMath.lineResidual] mide sobre una recta inclinada).
+     */
+    internal fun beforeDev(l: DewarpMath.LineObs, tiltRef: Double?): Double {
+        val d = DewarpMath.straightnessDev(l)
+        if (tiltRef == null || l.horizontal || !l.guide || l.size < 2) return d
+        val (_, b) = DewarpMath.lineFit(l.y, l.x, 0, l.size)
+        return max(d, abs(b + tiltRef) * abs(l.y[l.size - 1] - l.y[0]) / 2)
     }
 
     // =====================================================================================

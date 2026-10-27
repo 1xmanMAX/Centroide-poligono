@@ -159,6 +159,8 @@ class PageProcessor(val tier: DeviceTier) {
             // combina con el deskew.
             var model: GridDewarp.Model? = null
             var angle = 0.0
+            // Márgenes del texto torcidos respecto de los renglones (cizalla/trapecio residual): giro + corrección
+            var align: MarginAlign.Result? = null
             if (edits.autoDewarp || edits.autoDeskew) {
                 val side = if (edits.autoDewarp) GridDewarp.EST_SIDE else 1000
                 // La foto reducida sirve para la imagen de estimación y, si hace falta, para el plano ampliado de los cantos
@@ -173,12 +175,15 @@ class PageProcessor(val tier: DeviceTier) {
                     } else null
                     model = est?.model
                     // Ángulo: renglones + márgenes del texto si son coherentes; si no, perfiles de proyección
-                    if (model == null && edits.autoDeskew) angle = est?.skew ?: Cleanup.estimateSkew(red)
+                    if (model == null && edits.autoDeskew) {
+                        align = est?.align?.takeIf { it.act }
+                        angle = align?.angle ?: est?.skew ?: Cleanup.estimateSkew(red)
+                    }
                 } finally {
                     red.release(); small.release()
                 }
             }
-            if (quad == null && angle == 0.0 && model == null) {
+            if (quad == null && angle == 0.0 && model == null && align == null) {
                 // Sin warp: reducción INTER_AREA (si hace falta) + rotación sin pérdidas
                 val warped = cropMat(src, null, tier.maxWorkingPixels, maxSide)
                 src.release(); rgba = null
@@ -231,7 +236,13 @@ class PageProcessor(val tier: DeviceTier) {
             //    documento no se recortan (el texto pegado al borde se conservaba sólo a medias)
             var rd: DoubleArray? = null
             val preW = ow; val preH = oh
-            if (angle != 0.0) {
+            // Recorte a mano: la corrección de márgenes no amplía el lienzo (sólo el del giro, como siempre)
+            val aw = align?.let { MarginAlign.warpFor(it, ow, oh, expand = edits.manualQuad != true) }
+            if (aw != null) {
+                ow = aw.w; oh = aw.h
+                rd = aw.m
+                mTot = mul3(aw.m, mTot)
+            } else if (angle != 0.0) {
                 val rm = Imgproc.getRotationMatrix2D(org.opencv.core.Point(ow / 2.0, oh / 2.0), angle, 1.0)
                 val a = DoubleArray(6); rm.get(0, 0, a); rm.release()
                 val (nw, nh) = Cleanup.rotatedCanvas(ow, oh, angle)
@@ -408,7 +419,11 @@ class PageProcessor(val tier: DeviceTier) {
         val w = img.cols(); val h = img.rows()
         val sw = srcW.toDouble(); val sh = srcH.toDouble()
         val corners = arrayOf(0.0 to 0.0, sw - 1.0 to 0.0, sw - 1.0 to sh - 1.0, 0.0 to sh - 1.0)
-        val pts = corners.map { (x, y) -> org.opencv.core.Point(rd[0] * x + rd[1] * y + rd[2], rd[3] * x + rd[4] * y + rd[5]) }
+        // (homografía: giro y, si la hay, corrección de márgenes; la imagen de un cuadrilátero sigue siendo convexa)
+        val pts = corners.map { (x, y) ->
+            val z = rd[6] * x + rd[7] * y + rd[8]
+            org.opencv.core.Point((rd[0] * x + rd[1] * y + rd[2]) / z, (rd[3] * x + rd[4] * y + rd[5]) / z)
+        }
         val mask = Mat(h, w, CvType.CV_8UC1, org.opencv.core.Scalar(255.0))
         val poly = org.opencv.core.MatOfPoint(*pts.toTypedArray())
         try {
@@ -529,19 +544,34 @@ class PageProcessor(val tier: DeviceTier) {
         // previa (a resolución de pantalla) y el render (a resolución completa) deciden lo mismo
         var est: GridDewarp.Estimate? = null
         var skewFixed: Double? = null
+        var align: MarginAlign.Result? = null
         if (edits.autoDewarp || edits.autoDeskew) {
             val red = Mat()
             try {
                 val side = if (edits.autoDewarp) GridDewarp.EST_SIDE else 1000
                 if (max(cur.cols(), cur.rows()) > side) Cv.downscale(cur, red, side) else cur.copyTo(red)
                 if (edits.autoDewarp) est = dewarpModel(red, quadKey, rot, cacheable = cacheable)
-                if (est?.model == null && edits.autoDeskew) skewFixed = est?.skew ?: Cleanup.estimateSkew(red)
+                if (est?.model == null && edits.autoDeskew) {
+                    align = est?.align?.takeIf { it.act }
+                    skewFixed = align?.angle ?: est?.skew ?: Cleanup.estimateSkew(red)
+                }
             } finally { red.release() }
         }
         val model = est?.model
         if (model != null) {
             val d = GridDewarp.apply(cur, model)
             cur.release(); cur = d
+        } else if (align != null) {
+            // Giro + corrección de márgenes en un solo remuestreo (mismas decisiones que [geometryFullMat])
+            val aw = MarginAlign.warpFor(align, cur.cols(), cur.rows(), expand = edits.manualQuad != true)
+            if (aw != null) {
+                val m = Mat(3, 3, CvType.CV_64F); m.put(0, 0, *aw.m)
+                val d = Mat()
+                Imgproc.warpPerspective(cur, d, m, Size(aw.w.toDouble(), aw.h.toDouble()), Imgproc.INTER_CUBIC, Core.BORDER_REPLICATE)
+                m.release()
+                fillOutsideRotated(d, aw.m, cur.cols(), cur.rows())
+                cur.release(); cur = d
+            }
         } else if (edits.autoDeskew) {
             val skew = skewFixed ?: 0.0
             val d = if (skew == 0.0) cur.clone() else Cleanup.rotateExpand(cur, skew)
