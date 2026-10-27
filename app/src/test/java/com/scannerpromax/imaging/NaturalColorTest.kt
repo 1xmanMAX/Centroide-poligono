@@ -270,17 +270,18 @@ class NaturalColorTest {
     @Test fun fueraDeLaHoja_blanco_yElTextoJuntoAlMargenSeConserva() {
         assumeTrue("OpenCV de escritorio no disponible", SyntheticScenes.openCv)
         val (nrm, bw) = textPage { Scalar(50.0, 50.0, 55.0) }
-        // la hoja termina en x = 590: más allá, madera (original) con vetas que el B/N y la normalizada conservan
+        // la hoja termina en x = 600: más allá, madera (original) con vetas que el B/N y la normalizada conservan
         val orig = Mat(H, W, CvType.CV_8UC3, Scalar(215.0, 215.0, 212.0))
-        Imgproc.rectangle(orig, Point(590.0, 0.0), Point(W.toDouble(), H.toDouble()), Scalar(120.0, 80.0, 45.0), -1)
+        Imgproc.rectangle(orig, Point(600.0, 0.0), Point(W.toDouble(), H.toDouble()), Scalar(120.0, 80.0, 45.0), -1)
+        for (y in 0 until H step 30) Imgproc.rectangle(orig, Point(600.0, y.toDouble()), Point(W.toDouble(), y + 14.0), Scalar(195.0, 150.0, 100.0), -1)   // vetas
         for (y in 10 until H step 23) {
-            Imgproc.line(bw, Point(600.0, y.toDouble()), Point(630.0, y + 4.0), Scalar(30.0), 2)
-            Imgproc.line(nrm, Point(600.0, y.toDouble()), Point(630.0, y + 4.0), Scalar(110.0, 75.0, 40.0), 2)
+            Imgproc.line(bw, Point(608.0, y.toDouble()), Point(632.0, y + 4.0), Scalar(30.0), 2)
+            Imgproc.line(nrm, Point(608.0, y.toDouble()), Point(632.0, y + 4.0), Scalar(110.0, 75.0, 40.0), 2)
         }
         val out = NaturalColor.compose(NaturalColor.Inputs(bw, nrm, 20.0, 1.5, orig = orig))
-        val wood = out.submat(Rect(596, 0, 44, H))
+        val wood = out.submat(Rect(606, 0, 34, H))
         assertEquals("fuera de la hoja", 255.0, Core.minMaxLoc(wood.reshape(1)).minVal, 0.0)
-        // la última columna de "letras" (x ~ 568-576, a 15 px del canto) sigue ahí
+        // la última columna de "letras" (x ~ 568-579, a 20 px del canto) sigue ahí
         val last = 40 + 24 * ((W - 60 - 1 - 40) / 24)
         assertTrue("letra junto al margen: ${px(out, last + 4, 40 + 8).toList()}", px(out, last + 4, 40 + 8).average() < 140)
         wood.release(); out.release(); orig.release(); nrm.release(); bw.release()
