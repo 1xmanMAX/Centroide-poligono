@@ -43,6 +43,9 @@ internal object TableLines {
     /** Banco de pruebas: segmentos dibujados (hor, x0, y0, x1, y1) en px de la salida. */
     internal var onDraw: ((List<DoubleArray>) -> Unit)? = null
 
+    /** Banco de pruebas: máscaras intermedias. */
+    internal var debug: ((String, Mat) -> Unit)? = null
+
     private const val ANALYSIS_SIDE = 1600
 
     /**
@@ -63,12 +66,15 @@ internal object TableLines {
         val vs = bag.mat(); val s = Cv.downscale(vFull, vs, ANALYSIS_SIDE)
         val bgS = bag.add(Cv.estimateBackground(vs, 256))
         val nv = bag.mat(); Cv.divideByBackground(vs, bgS, nv)
-        val (noise, _) = Cv.paperStats(Cv.histogram(nv))
+        val hist = Cv.histogram(nv)
+        val (noise, pm) = Cv.paperStats(hist)
+        // contraste de la tinta de la página (texto): papel - percentil 0.5 %
+        val inkRef = max(40.0, pm - Cv.percentile(hist, 0.005))
         // grosor máximo de una línea de tabla: fina respecto de la letra (el núcleo transversal del black-hat debe ser
         // menor que la altura de letra: si no, las letras enteras responden como "estructura fina")
         val maxThick = max(3.0, min(0.0035 * side, 0.3 * lh))
         val lhA = lh * s
-        val kt = Cv.odd(max((0.6 * lhA).roundToInt().coerceIn(5, 21), (2 * maxThick * s + 1).roundToInt()))
+        val kt = Cv.odd(max((0.4 * lhA).roundToInt().coerceIn(5, 21), (2 * maxThick * s + 1).roundToInt()))
         val lo = Cv.odd(max(9, (1.2 * lhA).roundToInt()))
         val gap = Cv.odd(max(9, (2.0 * lhA).roundToInt()))
         val thr = max(8.0, 3.0 * noise)
@@ -89,6 +95,7 @@ internal object TableLines {
             Imgproc.morphologyEx(m, m, Imgproc.MORPH_CLOSE, if (hor) Cv.kernel(Imgproc.MORPH_RECT, 5, 1) else Cv.kernel(Imgproc.MORPH_RECT, 1, 5))
             Imgproc.morphologyEx(m, m, Imgproc.MORPH_OPEN, if (hor) Cv.kernel(Imgproc.MORPH_RECT, lo, 1) else Cv.kernel(Imgproc.MORPH_RECT, 1, lo))
             Imgproc.morphologyEx(m, m, Imgproc.MORPH_CLOSE, if (hor) Cv.kernel(Imgproc.MORPH_RECT, gap, 1) else Cv.kernel(Imgproc.MORPH_RECT, 1, gap))
+            debug?.invoke(if (hor) "mH" else "mV", m); debug?.invoke(if (hor) "bhH" else "bhV", bh)
             val labels = bag.mat(); val stats = bag.mat(); val cents = bag.mat()
             val nc = Imgproc.connectedComponentsWithStats(m, labels, stats, cents, 8, CvType.CV_32S)
             val st = IntArray(max(0, nc) * 5); if (nc > 0) stats.get(0, 0, st)
@@ -116,7 +123,7 @@ internal object TableLines {
                 val tr = TableLinesMath.track(at, across, nAlong, seedB, a0, a1, prm) ?: continue
                 // de la banda a coordenadas de la página
                 val centers = DoubleArray(tr.centers.size) { tr.centers[it] + c0 }
-                val t2 = TableLinesMath.Track(tr.a0, tr.a1, centers, tr.thick, tr.amp, tr.inkFrac, tr.maxGap, tr.dashed, tr.rms, tr.embedded, tr.touching)
+                val t2 = TableLinesMath.Track(tr.a0, tr.a1, centers, tr.thick, tr.amp, tr.inkFrac, tr.maxGap, tr.dashed, tr.rms, tr.embedded, tr.touching, tr.maxRun, tr.irregular)
                 cands.add(TableLinesMath.Cand(hor, tr.a0.toDouble(), tr.a1.toDouble(), t2.mean, t2))
             }
         }
@@ -134,11 +141,11 @@ internal object TableLines {
             } ?: (0.0 to null)
             l.outCov = cov; colors[l] = col
         }
-        val ok = TableLinesMath.accept(kept, w, h, lh, maxThick)
+        val ok = TableLinesMath.accept(kept, w, h, lh, maxThick, inkRef)
         val drawn = ArrayList<DoubleArray>()
         val chn = out.channels()
         for ((idx, l) in kept.withIndex()) {
-            log?.invoke("cand ${if (l.hor) "H" else "V"} a=%.0f..%.0f c=%.1f len=%.0f thick=%.2f amp=%.0f ink=%.2f gap=${l.tr.maxGap} dash=${l.tr.dashed} rms=%.2f emb=%.2f touch=%.2f out=%.2f -> ${ok[idx]}".format(l.a0, l.a1, l.c, l.len, l.tr.thick, l.tr.amp, l.tr.inkFrac, l.tr.rms, l.tr.embedded, l.tr.touching, l.outCov))
+            log?.invoke("cand ${if (l.hor) "H" else "V"} a=%.0f..%.0f c=%.1f len=%.0f thick=%.2f amp=%.0f ink=%.2f gap=${l.tr.maxGap} dash=${l.tr.dashed} rms=%.2f emb=%.2f touch=%.2f run=${l.tr.maxRun} irr=${l.tr.irregular} out=%.2f -> ${ok[idx]}".format(l.a0, l.a1, l.c, l.len, l.tr.thick, l.tr.amp, l.tr.inkFrac, l.tr.rms, l.tr.embedded, l.tr.touching, l.outCov))
             if (!ok[idx]) continue
             val color = lineColor(colors[l], chn)
             val tOut = max(1.0, l.tr.thick * k).coerceAtMost(maxThick * k)
@@ -149,7 +156,7 @@ internal object TableLines {
             val pa = (l.a0 + 0.5) * k - 0.5; val pb = (l.a1 + 0.5) * k - 0.5
             drawn.add(if (l.hor) doubleArrayOf(1.0, pa, ca, pb, cb) else doubleArrayOf(0.0, ca, pa, cb, pb))
         }
-        log?.invoke("tabla: candidatas=${cands.size} únicas=${kept.size} dibujadas=${drawn.size} kt=$kt lo=$lo gap=$gap thr=%.1f noise=%.1f lh=%.1f".format(thr, noise, lh))
+        log?.invoke("tabla: candidatas=${cands.size} únicas=${kept.size} dibujadas=${drawn.size} kt=$kt lo=$lo gap=$gap thr=%.1f noise=%.1f lh=%.1f inkRef=%.0f".format(thr, noise, lh, inkRef))
         onDraw?.invoke(drawn)
         drawn.size
     }

@@ -153,6 +153,10 @@ internal object TableLinesMath {
         val embedded: Double,
         /** Fracción de posiciones con tinta pegada a un lado (renglón de texto tomado por línea). */
         val touching: Double = 0.0,
+        /** Trazo continuo más largo (px). */
+        val maxRun: Int = 0,
+        /** Trazos y huecos de longitudes irregulares (raya continua rota por la cámara, no puntos guía ni texto alineado). */
+        val irregular: Boolean = true,
     ) {
         val length get() = a1 - a0 + 1
         fun centerAt(i: Double): Double {
@@ -218,15 +222,18 @@ internal object TableLinesMath {
         val ink = BooleanArray(n)
         val xs = DoubleArray(n); val ys = DoubleArray(n); val ws = DoubleArray(n); var m = 0
         val widths = ArrayList<Double>(); val amps = ArrayList<Double>()
-        var emb = 0; var touch = 0
+        var emb = 0; var touch = 0; var cand = 0
         for (k in 0 until n) {
             if (!prof.valid(k)) continue
             val i = lo + k
             if (prof.amp[k] >= thr && abs(prof.center[k] - pred(i)) <= tight && prof.width[k] <= prm.maxThick * 1.5) {
+                cand++
+                if (prof.side[k] >= prof.amp[k] * 0.5) emb++
+                // tinta pegada a un lado (letras): esa posición no cuenta como línea (renglones, bordes de columnas
+                // de texto alineado, tachados)
+                if (prof.side2[k] >= prof.amp[k] * TOUCH_K) { touch++; continue }
                 ink[k] = true; xs[m] = i.toDouble(); ys[m] = prof.center[k]; ws[m] = prof.amp[k]; m++
                 widths.add(prof.width[k]); amps.add(prof.amp[k])
-                if (prof.side[k] >= prof.amp[k] * 0.5) emb++
-                if (prof.side2[k] >= prof.amp[k] * 0.3) touch++
             }
         }
         if (m < 8) return null
@@ -257,14 +264,24 @@ internal object TableLinesMath {
         val rmsLocal = if (sn2 > 0) sqrt(sl2 / sn2) else 99.0
         val centers = DoubleArray(n) { g.at((lo + it).toDouble()) + corr[it] }
         // continuidad: huecos y regularidad de los trazos
+        // (huecos de 1-2 px dentro de un trazo no lo parten)
+        val inkC = ink.copyOf()
+        run {
+            var k = 0
+            while (k < n) {
+                if (!inkC[k]) { var e = k; while (e < n && !inkC[e]) e++; if (k > 0 && e < n && e - k <= 2) for (q in k until e) inkC[q] = true; k = e } else k++
+            }
+        }
         var maxGap = 0; var run = 0
         val dashes = ArrayList<Int>(); val gaps = ArrayList<Int>()
-        var cur = ink[0]; var len = 0
+        var cur = inkC[0]; var len = 0
         for (k in 0 until n) {
-            if (!ink[k]) { run++; maxGap = max(maxGap, run) } else run = 0
-            if (ink[k] == cur) len++ else { (if (cur) dashes else gaps).add(len); cur = ink[k]; len = 1 }
+            if (!inkC[k]) { run++; maxGap = max(maxGap, run) } else run = 0
+            if (inkC[k] == cur) len++ else { (if (cur) dashes else gaps).add(len); cur = inkC[k]; len = 1 }
         }
         (if (cur) dashes else gaps).add(len)
+        val maxRun = dashes.maxOrNull() ?: 0
+        val irregular = irregularRuns(dashes, gaps)
         val inkFrac = m.toDouble() / n
         widths.sort(); amps.sort()
         val thick = widths[widths.size / 2]
@@ -274,7 +291,7 @@ internal object TableLinesMath {
         for (k in 0 until n) if (!ink[k]) { gs += if (prof.valid(k)) prof.amp[k] else 0.0; gn++ }
         val gapAmp = if (gn > 0) gs / gn else 0.0
         val dashed = isRegularDash(dashes, gaps, thick, inkFrac, gapAmp, amp)
-        return Track(lo, hi, centers, thick, amp, inkFrac, maxGap, dashed, rmsLocal, emb.toDouble() / m, touch.toDouble() / m)
+        return Track(lo, hi, centers, thick, amp, inkFrac, maxGap, dashed, rmsLocal, emb.toDouble() / cand, touch.toDouble() / cand, maxRun, irregular)
     }
 
     private fun isInk(p: Profile, k: Int, thr: Double, poly: Poly, tol: Double): Boolean =
@@ -325,6 +342,17 @@ internal object TableLinesMath {
      * Raya discontinua IMPRESA: >= 6 trazos, trazos y huecos de longitud regular (CV < 0.3), huecos de al menos el
      * grosor y LIMPIOS (sin tinta tenue: la raya continua pálida que la cámara rompe sí tiene contraste en los huecos).
      */
+    /**
+     * Trazos/huecos IRREGULARES: los puntos guía (".....") y los palos de letras alineadas en columna se repiten con
+     * longitudes casi iguales; una raya continua que la cámara o la binarización rompió, no.
+     */
+    fun irregularRuns(dashes: List<Int>, gaps: List<Int>): Boolean {
+        val d = dashes.drop(1).dropLast(1); val g = gaps.drop(1).dropLast(1)
+        if (d.size < 4 || g.size < 4) return true
+        fun cv(l: List<Int>): Double { val m = l.average(); if (m <= 0) return 9.0; return sqrt(l.sumOf { (it - m) * (it - m) } / l.size) / m }
+        return cv(d) >= 0.5 || cv(g) >= 0.5
+    }
+
     fun isRegularDash(dashes: List<Int>, gaps: List<Int>, thick: Double, inkFrac: Double, gapAmp: Double, amp: Double): Boolean {
         if (inkFrac > 0.8 || dashes.size < 6) return false
         val d = dashes.drop(1).dropLast(1); val g = gaps.drop(1).dropLast(1)
@@ -350,17 +378,31 @@ internal object TableLinesMath {
      * Las rayas discontinuas impresas a propósito no se tocan. Una línea de la que la salida no muestra casi nada sólo
      * se redibuja si está dentro de la estructura de la tabla (cruza >= 2 líneas que sí se ven).
      */
+    /** Tinta a un lado (fracción del contraste de la línea) a partir de la cual una posición no cuenta como línea. */
+    @JvmField var TOUCH_K = 0.4
+
     /** Dispersión máxima (px) de los centros alrededor de la curva suavizada. */
     @JvmField var RMS_MAX = 0.7
+    @JvmField var RMS_MAX_CONT = 1.2
+    /** Contraste mínimo (fracción del de la tinta de la página) de una línea que la salida no muestra. */
+    @JvmField var FAINT_MIN = 0.08
 
-    fun accept(c: List<Cand>, w: Int, h: Int, lh: Double, maxThick: Double): BooleanArray {
+    fun accept(c: List<Cand>, w: Int, h: Int, lh: Double, maxThick: Double, inkRef: Double = 0.0): BooleanArray {
         val n = c.size
+        // tenue pero inequívoca: casi continua en la foto y con contraste apreciable respecto de la tinta de la página
+        // (la transparencia del reverso es mucho más pálida)
+        val strong = BooleanArray(n) { k -> val tr = c[k].tr; tr.inkFrac >= 0.85 && tr.maxRun >= 0.5 * c[k].len && tr.amp >= FAINT_MIN * inkRef }
         val basic = BooleanArray(n) { k ->
             val l = c[k]; val tr = l.tr
             val side = if (l.hor) w else h
             val minLen = if (l.hor) max(4.0 * lh, 0.06 * w) else max(2.5 * lh, 0.025 * h)
-            l.len >= minLen && !tr.dashed && tr.thick <= maxThick && tr.rms <= RMS_MAX &&
-                tr.embedded < 0.3 && tr.touching < 0.7 && tr.inkFrac >= 0.35 && l.len <= side
+            // trazo continuo largo, o raya rota de forma irregular con bastante tinta
+            val solid = tr.maxRun >= 2.5 * lh || tr.maxRun >= 0.85 * l.len
+            // una línea casi continua admite más dispersión (contraste bajo = centro más ruidoso); el texto no lo es
+            val rmsMax = if (tr.inkFrac >= 0.85 && tr.maxRun >= 0.5 * l.len) RMS_MAX_CONT else RMS_MAX
+            l.len >= minLen && !tr.dashed && tr.thick <= maxThick && tr.rms <= rmsMax &&
+                tr.embedded < 0.3 && tr.touching < 0.7 && tr.inkFrac >= 0.35 && l.len <= side &&
+                (solid || (tr.irregular && tr.inkFrac >= 0.45 && tr.maxRun >= lh && l.len >= 6 * lh))
         }
         val tolOf = { l: Cand -> max(3.0 * l.tr.thick, 0.6 * lh) }
         fun crosses(a: Cand, b: Cand): Boolean {
@@ -368,22 +410,33 @@ internal object TableLinesMath {
             val t = max(tolOf(a), tolOf(b))
             return b.c >= a.a0 - t && b.c <= a.a1 + t && a.c >= b.a0 - t && a.c <= b.a1 + t
         }
+        // filas/columnas de una misma tabla: extensión parecida (una palabra subrayada bajo una tabla no lo es) y cerca
         fun parallel(a: Cand, b: Cand): Boolean {
-            if (a.hor != b.hor || abs(a.c - b.c) < 2 * max(a.tr.thick, b.tr.thick) + 2) return false
+            if (a.hor != b.hor || abs(a.c - b.c) < 2 * max(a.tr.thick, b.tr.thick) + 2 || abs(a.c - b.c) > 15 * lh) return false
             val ov = min(a.a1, b.a1) - max(a.a0, b.a0)
-            return ov >= 0.5 * min(a.len, b.len)
+            return ov >= 0.6 * max(a.len, b.len)
         }
         val visible = BooleanArray(n) { basic[it] && c[it].outCov >= 0.1 }
+        val support = BooleanArray(n) { visible[it] || (basic[it] && strong[it]) }
         val ok = BooleanArray(n)
         for (k in 0 until n) {
             if (!basic[k]) continue
             val l = c[k]
             val side = if (l.hor) w else h
             var par = 0; var cr = 0
-            for (q in 0 until n) if (q != k && visible[q]) { if (parallel(l, c[q])) par++; if (crosses(l, c[q])) cr++ }
+            var parS = 0; var crS = 0
+            for (q in 0 until n) if (q != k) {
+                if (visible[q]) { if (parallel(l, c[q])) par++; if (crosses(l, c[q])) cr++ }
+                if (support[q]) { if (parallel(l, c[q])) parS++; if (crosses(l, c[q])) crS++ }
+            }
             val longRule = l.len >= 0.3 * side && l.tr.inkFrac >= 0.6
             val table = par >= 2 || cr >= 2
-            ok[k] = if (visible[k]) longRule || table else cr >= 2 && l.tr.inkFrac >= 0.5
+            ok[k] = when {
+                visible[k] -> longRule || table
+                // la salida no la muestra: sólo dentro de la estructura de una tabla
+                strong[k] -> parS >= 2 || crS >= 2
+                else -> cr >= 2 && l.tr.inkFrac >= 0.5
+            }
         }
         return ok
     }
