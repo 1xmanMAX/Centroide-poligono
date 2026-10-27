@@ -16,10 +16,11 @@ enum class ScanMode(val label: String) {
 /**
  * Filtros de mejora. Cada uno lo implementa [com.scannerpromax.imaging.ImageEnhancer].
  *
- * La interfaz SÓLO ofrece los de [FilterType.Companion.visible] (Blanco y negro, Texto resaltado, Color natural,
- * Color original). El resto se conserva porque los documentos guardados los usan (quitarlos rompería la
- * deserialización) y siguen renderizándose con su filtro; en la interfaz se muestran como su equivalente
- * visible ([uiFilter]).
+ * La interfaz SÓLO ofrece los de [FilterType.Companion.visible] (Blanco y negro, Color natural, Color original).
+ * El resto se conserva porque los documentos guardados los usan (quitarlos rompería la deserialización) y siguen
+ * renderizándose con su filtro; en la interfaz se muestran como su equivalente visible ([uiFilter]). Excepción:
+ * "Texto resaltado" (MAGIC), sustituido por "Color natural", se MIGRA al cargar ([migrated]): se muestra y se
+ * reprocesa como NATURAL (su render MAGIC sigue existiendo para el banco de pruebas).
  */
 @Serializable
 enum class FilterType(val label: String, val description: String = "") {
@@ -42,19 +43,25 @@ enum class FilterType(val label: String, val description: String = "") {
         get() = when (this) {
             BLACK_WHITE, GRAYSCALE, ECO_INK -> BLACK_WHITE
             ORIGINAL, VIVID -> ORIGINAL
-            NATURAL -> NATURAL
-            AUTO, MAGIC, MAGIC_PRO, NO_SHADOW, LIGHTEN, WHITEBOARD -> MAGIC
+            AUTO, MAGIC, MAGIC_PRO, NO_SHADOW, LIGHTEN, WHITEBOARD, NATURAL -> NATURAL
         }
+
+    /**
+     * Filtro con el que se guarda/renderiza una página cargada de una versión anterior: "Texto resaltado" (MAGIC) ya
+     * no existe en la interfaz y pasa a "Color natural"; el resto no cambia (su hash de procesado tampoco).
+     */
+    val migrated: FilterType
+        get() = if (this == MAGIC) NATURAL else this
 
     /** true si la interfaz lo ofrece. */
     val isVisible: Boolean get() = this in visible
 
     companion object {
         /** Los únicos filtros que ofrece la interfaz, en este orden. */
-        val visible: List<FilterType> = listOf(BLACK_WHITE, MAGIC, NATURAL, ORIGINAL)
+        val visible: List<FilterType> = listOf(BLACK_WHITE, NATURAL, ORIGINAL)
 
-        /** Filtro por defecto de los documentos nuevos ("Texto resaltado"). */
-        val DEFAULT: FilterType = MAGIC
+        /** Filtro por defecto de los documentos nuevos ("Color natural", antes "Texto resaltado"). */
+        val DEFAULT: FilterType = NATURAL
     }
 }
 
@@ -104,13 +111,13 @@ data class Adjustments(
 data class PageEdits(
     val quad: Quad? = null,             // null = imagen completa
     val rotation: Int = 0,              // 0, 90, 180, 270 (horario), aplicado tras el recorte
-    val filter: FilterType = FilterType.MAGIC,
+    val filter: FilterType = FilterType.NATURAL,
     val adjustments: Adjustments = Adjustments(),
     val autoRemoveLines: Boolean = false,   // quitar rayas/líneas sueltas (dobleces, marcas de bolígrafo, bordes)
     val autoDenoise: Boolean = true,        // limpiar ruido/puntos
     val autoDeskew: Boolean = true,         // enderezar texto torcido unos grados
     val autoDewarp: Boolean = true,         // enderezar hoja curvada/combada (malla de líneas de tablas y cuadrículas)
-    val keepRuling: Boolean = true,         // conservar la cuadrícula / renglones del cuaderno (limpia, tono claro) en Texto resaltado y B/N
+    val keepRuling: Boolean = true,         // conservar la cuadrícula / renglones del cuaderno (limpia, tono claro) en Color natural y B/N
     val eraseStrokes: List<EraseStroke> = emptyList(),
     /**
      * Tipo de documento según la IA (antigua clasificación local, ya eliminada; se conserva por compatibilidad con documentos guardados: "receipt", "whiteboard", "screen"…) que orienta el filtro

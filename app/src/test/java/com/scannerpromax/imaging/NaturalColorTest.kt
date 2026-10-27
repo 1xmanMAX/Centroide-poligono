@@ -65,6 +65,33 @@ class NaturalColorTest {
         assertFalse(NaturalMath.nearBorder(40, 40, 5, 5, 100, 100))
     }
 
+    @Test fun zonas_rellenoAjenoNeutraYCantos() {
+        val lh = 6.0
+        // relleno liso: banda gruesa, contorno nítido; una sombra (contorno difuso) o junto al borde, no
+        assertTrue(NaturalMath.isFlatFill(5000, 0.5, 9.0, lh, 16.0, 2.0, false))
+        assertFalse("contorno difuso", NaturalMath.isFlatFill(5000, 0.5, 9.0, lh, 16.0, 12.0, false))
+        assertFalse("junto al borde", NaturalMath.isFlatFill(5000, 0.5, 9.0, lh, 16.0, 2.0, true))
+        assertFalse("línea fina", NaturalMath.isFlatFill(5000, 0.5, 4.0, lh, 16.0, 2.0, false))
+        assertFalse("pequeño", NaturalMath.isFlatFill(300, 0.9, 9.0, lh, 16.0, 2.0, false))
+        // fondo ajeno: otra cromaticidad y más oscuro (madera); una sombra conserva la cromaticidad; un resaltador es claro
+        assertTrue(NaturalMath.isForeignColor(0.04, 0.78))
+        assertFalse("sombra", NaturalMath.isForeignColor(0.005, 0.3))
+        assertFalse("resaltador", NaturalMath.isForeignColor(0.06, 1.0))
+        assertTrue("vetas", NaturalMath.foreignIsHard(0.3, 18.0)); assertTrue("liso", NaturalMath.foreignIsHard(0.0, 3.0))
+        assertFalse("con escritura", NaturalMath.foreignIsHard(0.06, 18.0))
+        assertFalse("página densa lisa", NaturalMath.foreignIsHard(0.3, 5.0))
+        assertTrue("madera", NaturalMath.foreignHue(0.99, 7.0, 18.0))
+        assertFalse("sombra cálida lisa", NaturalMath.foreignHue(1.0, 18.0, 5.5))
+        assertFalse("ilustración", NaturalMath.foreignHue(0.55, 32.0, 14.0))
+        // canto: largo y fino en la franja del 5 %; una letra junto al borde no
+        assertTrue(NaturalMath.borderStroke(980, 100, 6, 400, 1200, 1000, 1000, lh))
+        assertFalse(NaturalMath.borderStroke(980, 100, 6, 8, 40, 1000, 1000, lh))
+        assertFalse("en el interior", NaturalMath.borderStroke(500, 100, 6, 400, 1500, 1000, 1000, lh))
+        // pureza a partir de la cual la tinta es de color
+        assertEquals(0.07, NaturalMath.neutralLo(1.0), 1e-9)
+        assertTrue(NaturalMath.neutralLo(6.0) > 0.07)
+    }
+
     // ---------------------------------------------------------------------------------------- composición (OpenCV)
 
     private val W = 640; private val H = 420
@@ -148,5 +175,40 @@ class NaturalColorTest {
         val roi = out.submat(Rect(560, 340, 60, 60))
         assertEquals(255.0, Core.minMaxLoc(roi.reshape(1)).minVal, 0.0)
         roi.release(); out.release(); nrm.release(); bw.release()
+    }
+
+    @Test fun rellenoLiso_pasaConSuColor_yTintaGrisANegro_yAzulSigueAzul() {
+        assumeTrue("OpenCV de escritorio no disponible", SyntheticScenes.openCv)
+        val nrm = Mat(H, W, CvType.CV_8UC3, Scalar.all(230.0))
+        val bw = Mat(H, W, CvType.CV_8UC1, Scalar(255.0))
+        // banda de tabla gris azulada (RGB normalizado) con texto gris oscuro encima; el B/N sólo tiene el texto
+        val band = Scalar(185.0, 195.0, 210.0)
+        Imgproc.rectangle(nrm, Point(60.0, 60.0), Point(580.0, 140.0), band, -1)
+        for (x in 100..520 step 40) {
+            Imgproc.line(nrm, Point(x.toDouble(), 80.0), Point(x + 8.0, 120.0), Scalar(70.0, 72.0, 75.0), 4)
+            Imgproc.line(bw, Point(x.toDouble(), 80.0), Point(x + 8.0, 120.0), Scalar(0.0), 4, Imgproc.LINE_AA)
+        }
+        // texto gris "plomo" (casi neutro) y texto azul sobre el papel
+        for (x in 100..520 step 40) {
+            Imgproc.line(nrm, Point(x.toDouble(), 220.0), Point(x + 8.0, 260.0), Scalar(105.0, 105.0, 108.0), 4)
+            Imgproc.line(bw, Point(x.toDouble(), 220.0), Point(x + 8.0, 260.0), Scalar(0.0), 4, Imgproc.LINE_AA)
+            Imgproc.line(nrm, Point(x.toDouble(), 320.0), Point(x + 8.0, 360.0), BLUE, 4)
+            Imgproc.line(bw, Point(x.toDouble(), 320.0), Point(x + 8.0, 360.0), Scalar(0.0), 4, Imgproc.LINE_AA)
+        }
+        val out = NaturalColor.compose(NaturalColor.Inputs(bw, nrm, 20.0, 2.0))
+        // dentro de la banda, entre letras: el color de la banda (no blanco), sin halo blanco junto a la letra
+        val inBand = px(out, 120, 100)
+        assertTrue("banda: ${inBand.toList()}", inBand.average() < 245 && inBand[2] > inBand[0])
+        val nearLetter = px(out, 107, 100)
+        assertTrue("halo: ${nearLetter.toList()}", nearLetter.average() < 248)
+        // texto gris -> casi negro y neutro
+        val g = px(out, 104, 240)
+        assertTrue("gris->negro: ${g.toList()}", g.max()!! < 80 && g.max()!! - g.min()!! < 12)
+        // azul sigue azul
+        val b = px(out, 104, 340)
+        assertTrue("azul: ${b.toList()}", b[2] > b[0] + 30)
+        // papel blanco puro
+        assertEquals(255.0, Core.minMaxLoc(out.submat(Rect(10, 380, 80, 30)).reshape(1)).minVal, 0.0)
+        out.release(); nrm.release(); bw.release()
     }
 }

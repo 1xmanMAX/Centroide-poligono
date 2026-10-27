@@ -258,7 +258,8 @@ object ScanRequestParser {
     /** null = el filtro por defecto de Ajustes. */
     fun parseFilter(s: String?): FilterType? = when (s?.trim()?.lowercase()) {
         "bw", "b&w", "black_white", "blackwhite", "mono", "blanco_negro" -> FilterType.BLACK_WHITE
-        "enhanced", "magic", "text", "auto", "color_text" -> FilterType.MAGIC
+        // ("Texto resaltado" ya no existe: lo sustituye "Color natural")
+        "enhanced", "magic", "text", "auto", "color_text" -> FilterType.NATURAL
         "original", "color", "none" -> FilterType.ORIGINAL
         "natural", "natural_color", "color_natural" -> FilterType.NATURAL
         else -> null

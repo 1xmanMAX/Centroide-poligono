@@ -1,6 +1,7 @@
 package com.scannerpromax.data
 
 import com.scannerpromax.domain.FilterType
+import com.scannerpromax.domain.Page
 import com.scannerpromax.domain.PageEdits
 import kotlinx.serialization.json.Json
 import java.io.File
@@ -32,6 +33,28 @@ object PageFiles {
 
     fun processedName(pageId: String, edits: PageEdits) =
         "$PROCESSED_DIR/${pageId}_${editsHash(edits)}.${if (isBinaryFilter(edits.filter)) "png" else "jpg"}"
+
+    /**
+     * Migración de una página guardada con un filtro retirado ("Texto resaltado" -> "Color natural",
+     * [FilterType.migrated]): el resto de ediciones (recorte, giro, ajustes, borrados, renglones…) se conserva tal cual.
+     * El hash de las ediciones cambia, así que el procesado y la miniatura se regeneran al abrirla (el resultado CAMBIA:
+     * MAGIC y NATURAL son renders distintos); las páginas con otros filtros no cambian de hash y no se reprocesan.
+     * El OCR y la maquetación de la IA no dependen del filtro (Indra lee la versión sólo con geometría y la geometría de
+     * salida es la misma), así que se renombran al hash nuevo en vez de repetirlos; el texto corregido por el usuario
+     * está en la propia página.
+     */
+    fun migrateFilter(dir: File, page: Page): Page {
+        val f = page.edits.filter.migrated
+        if (f == page.edits.filter) return page
+        val edits = page.edits.copy(filter = f)
+        fun move(from: String, to: String): Boolean {
+            val a = File(dir, from); val b = File(dir, to)
+            return b.exists() || (a.exists() && a.renameTo(b))
+        }
+        move(layoutName(page.id, page.edits), layoutName(page.id, edits))
+        val ocr = page.ocrFile?.let { old -> if (old == ocrName(page.id, page.edits) && move(old, ocrName(page.id, edits))) ocrName(page.id, edits) else old }
+        return page.copy(edits = edits, ocrFile = ocr)
+    }
 
     fun thumbName(pageId: String, edits: PageEdits) = "$THUMB_DIR/${pageId}_${editsHash(edits)}.jpg"
 

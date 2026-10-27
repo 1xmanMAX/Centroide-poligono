@@ -574,6 +574,7 @@ internal object Cv {
         lastTier = tier
         val cores = max(1, tier.cores)
         val lowEnd = tier.isLowRam || cores <= 4
+        NaturalColor.lowEnd = lowEnd
         var n = if (lowEnd) max(1, cores - 1) else max(1, cores - 1).coerceAtMost(6)
         // Con la cámara abierta en gama baja: 2 hilos como máximo, para que la vista previa, el análisis en vivo
         // y el hilo principal no compitan con el procesado de la foto anterior.

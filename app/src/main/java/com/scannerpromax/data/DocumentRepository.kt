@@ -846,7 +846,7 @@ class DocumentRepository(
         return when (mode) {
             ScanMode.PHOTO -> PageEdits(quad = null, filter = FilterType.ORIGINAL, autoDenoise = false, autoDeskew = false, autoDewarp = false)
             ScanMode.WHITEBOARD -> PageEdits(quad = quad, filter = FilterType.WHITEBOARD, autoDeskew = false, autoDewarp = false)
-            ScanMode.ID_CARD -> PageEdits(quad = quad, filter = docFilter ?: FilterType.MAGIC, autoDeskew = false, autoDewarp = false)
+            ScanMode.ID_CARD -> PageEdits(quad = quad, filter = docFilter ?: FilterType.DEFAULT, autoDeskew = false, autoDewarp = false)
             ScanMode.DOCUMENT, ScanMode.RECEIPT, ScanMode.BOOK -> PageEdits(
                 quad = quad,
                 filter = docFilter ?: FilterType.DEFAULT,
@@ -1136,8 +1136,12 @@ class DocumentRepository(
                 val doc = json.decodeFromString(Document.serializer(), f.readText())
                 if (f === tmp) writeAtomic(main, f.readText())
                 // Descarta páginas cuyo original desapareció.
-                val pages = doc.pages.filter { File(dir, it.originalFile).exists() }
-                return if (pages.size == doc.pages.size) doc else doc.copy(pages = pages)
+                val kept = doc.pages.filter { File(dir, it.originalFile).exists() }
+                // "Texto resaltado" -> "Color natural" (FilterType.migrated). Sólo esas páginas cambian de hash.
+                val pages = kept.map { PageFiles.migrateFilter(dir, it) }
+                if (pages != kept) runCatching { writeAtomic(main, json.encodeToString(Document.serializer(), doc.copy(pages = pages))) }
+                    .onFailure { Log.w(TAG, "No se pudo guardar la migración de filtros en $dir", it) }
+                return if (pages == doc.pages) doc else doc.copy(pages = pages)
             } catch (t: Throwable) {
                 Log.w(TAG, "doc.json ilegible en $dir", t)
             }

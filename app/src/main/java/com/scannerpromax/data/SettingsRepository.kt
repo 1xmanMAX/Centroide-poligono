@@ -141,7 +141,7 @@ class SettingsRepository(private val context: Context) {
 }
 
 data class AppSettings(
-    /** Filtro de las páginas nuevas: uno de [FilterType.visible] ("Texto resaltado" por defecto). */
+    /** Filtro de las páginas nuevas: uno de [FilterType.visible] ("Color natural" por defecto; un "Texto resaltado" guardado se lee como él). */
     val defaultFilter: FilterType = FilterType.DEFAULT,
     val autoCapture: Boolean = true,
     val autoRemoveLines: Boolean = false,

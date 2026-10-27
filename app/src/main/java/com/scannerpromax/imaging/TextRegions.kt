@@ -1061,7 +1061,7 @@ object TextRegions {
                             out = NaturalColor.compose(NaturalColor.Inputs(bw, p.nColor ?: p.n, lay.letterHeight, lay.strokeHalf,
                                 images = lay.regions.filter { it.kind == Kind.IMAGE }.map { Rect(it.left, it.top, it.width, it.height) },
                                 allowed = lay.regions.map { Rect(it.left, it.top, it.width, it.height) },
-                                exclude = p.ruling, exclude2 = lay.blank, gridColor = p.rulingColor))
+                                exclude = p.ruling, exclude2 = lay.blank, gridColor = p.rulingColor, orig = rgb))
                         } finally { bw.release() }
                         // (lo de color fuera de la escritura que el B/N no tenía: misma limpieza de bordes)
                         runCatching { EdgeClean.clean(out, rgb, lay.letterHeight, region?.second) }.onFailure { if (Cv.isOutOfMemory(it)) throw it }

@@ -250,7 +250,7 @@ class RedesignPhase2ScreenshotTest {
     private val reviewPages = List(5) { i ->
         Page(
             id = "p$i", originalFile = "p$i.jpg", width = 2480, height = 3508,
-            edits = PageEdits(filter = if (i == 2) FilterType.BLACK_WHITE else FilterType.MAGIC),
+            edits = PageEdits(filter = if (i == 2) FilterType.BLACK_WHITE else FilterType.NATURAL),
             ocrText = if (i < 3) "texto" else null,
         )
     }
@@ -294,7 +294,7 @@ class RedesignPhase2ScreenshotTest {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                             FilterThumb("Blanco y negro", null, false, {}) { FakeThumb(Color.White, Color.Black) }
-                            FilterThumb("Texto resaltado", null, true, {}) { FakeThumb(Color.White, Color(0xFF1C1C1E)) }
+                            FilterThumb("Color natural", null, true, {}) { FakeThumb(Color.White, Color(0xFF1C1C1E)) }
                             FilterThumb("Color original", null, false, {}) { FakeThumb(Color(0xFFF1ECE2), Color(0xFF5B5348)) }
                         }
                         Row(verticalAlignment = Alignment.CenterVertically) {

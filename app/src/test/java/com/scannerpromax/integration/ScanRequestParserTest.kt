@@ -252,7 +252,8 @@ class ScanRequestParserTest {
     }
 
     @Test fun filters() {
-        assertEquals(FilterType.MAGIC, ScanRequestParser.parseFilter("enhanced"))
+        assertEquals(FilterType.NATURAL, ScanRequestParser.parseFilter("enhanced"))
+        assertEquals(FilterType.NATURAL, ScanRequestParser.parseFilter("magic"))
         assertEquals(FilterType.ORIGINAL, ScanRequestParser.parseFilter("original"))
         assertEquals(FilterType.NATURAL, ScanRequestParser.parseFilter("natural"))
         assertNull(ScanRequestParser.parseFilter("sepia"))
