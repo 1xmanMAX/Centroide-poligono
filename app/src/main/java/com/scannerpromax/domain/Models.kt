@@ -16,8 +16,8 @@ enum class ScanMode(val label: String) {
 /**
  * Filtros de mejora. Cada uno lo implementa [com.scannerpromax.imaging.ImageEnhancer].
  *
- * La interfaz SÓLO ofrece los tres de [FilterType.Companion.visible] (Blanco y negro, Texto resaltado, Color
- * original). El resto se conserva porque los documentos guardados los usan (quitarlos rompería la
+ * La interfaz SÓLO ofrece los de [FilterType.Companion.visible] (Blanco y negro, Texto resaltado, Color natural,
+ * Color original). El resto se conserva porque los documentos guardados los usan (quitarlos rompería la
  * deserialización) y siguen renderizándose con su filtro; en la interfaz se muestran como su equivalente
  * visible ([uiFilter]).
  */
@@ -34,6 +34,7 @@ enum class FilterType(val label: String, val description: String = "") {
     LIGHTEN("Aclarar"),
     VIVID("Vívido"),            // fotos / documentos a color
     WHITEBOARD("Pizarra"),
+    NATURAL("Color natural", "Hoja blanca pura y la tinta con sus colores reales: el B/N recorta la escritura y deja pasar su color"),
     ;
 
     /** Filtro visible que representa a este en la interfaz (los antiguos se muestran como su equivalente). */
@@ -41,6 +42,7 @@ enum class FilterType(val label: String, val description: String = "") {
         get() = when (this) {
             BLACK_WHITE, GRAYSCALE, ECO_INK -> BLACK_WHITE
             ORIGINAL, VIVID -> ORIGINAL
+            NATURAL -> NATURAL
             AUTO, MAGIC, MAGIC_PRO, NO_SHADOW, LIGHTEN, WHITEBOARD -> MAGIC
         }
 
@@ -49,7 +51,7 @@ enum class FilterType(val label: String, val description: String = "") {
 
     companion object {
         /** Los únicos filtros que ofrece la interfaz, en este orden. */
-        val visible: List<FilterType> = listOf(BLACK_WHITE, MAGIC, ORIGINAL)
+        val visible: List<FilterType> = listOf(BLACK_WHITE, MAGIC, NATURAL, ORIGINAL)
 
         /** Filtro por defecto de los documentos nuevos ("Texto resaltado"). */
         val DEFAULT: FilterType = MAGIC

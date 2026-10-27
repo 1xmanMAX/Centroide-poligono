@@ -110,13 +110,14 @@ object TextRegions {
         val rulingColor: DoubleArray? = null,   // RGB medio normalizado de la rejilla (null si no hay)
         val rulingLevel: Double = 0.0,          // oscuridad típica de la rejilla clara (0 si no hay)
         val gridDark: Mat = Mat(),              // 8UC1 oscuridad ANTES de suprimir la rejilla, a media resolución (o vacía)
+        val nColor: Mat? = null,                // "Color natural": RGB normalizado con el color de las sombras tratado (n queda sin tratar, como en B/N)
     ) {
         /** true si los restos de la red regular ya se borraron de [dark] ([eraseGridRemnants]). */
         var gridErased = false
-        fun release() { n.release(); dark.release(); gain.release(); ruling.release(); rulingH.release(); rulingV.release(); gridDark.release() }
+        fun release() { n.release(); dark.release(); gain.release(); ruling.release(); rulingH.release(); rulingV.release(); gridDark.release(); nColor?.release() }
     }
 
-    internal fun prepare(rgb0: Mat, bgSide: Int = 384, refineSide: Int = 512, shadowColor: Boolean = true): Prepared = MatBag().use { bag ->
+    internal fun prepare(rgb0: Mat, bgSide: Int = 384, refineSide: Int = 512, shadowColor: Boolean = true, separateColor: Boolean = false): Prepared = MatBag().use { bag ->
         // Pizarra / pantalla en modo oscuro: escritura CLARA sobre fondo oscuro -> se invierte (tiza -> tinta oscura
         // sobre blanco) y el resto de la tubería no cambia
         val rgb = if (lightOnDark(rgb0, bag)) bag.mat().also { Core.bitwise_not(rgb0, it); log?.invoke("polaridad invertida") } else rgb0
@@ -129,8 +130,10 @@ object TextRegions {
         // Sombras (mano, celular): la tinta cálida de la zona recupera su color ([Shadows.treatZone]; el color de los
         // trazos y su oscuridad cromática salen de [n])
         val shadowsOk = ShadowMath.pageAllowsShadows(rgb0.cols(), rgb0.rows())
+        // ("Color natural": el mapa de tinta sale de [n] sin tratar -igual que el B/N- y el color, de una copia tratada)
+        val nColor = if (separateColor) n.clone() else null
         if (shadowsOk && shadowColor && rgb === rgb0) Shadows.analyze(bgs)?.let { m ->
-            try { ShadowDebug.time("treatZoneTR") { Shadows.treatZone(n, m, denoise = false) } } finally { m.release() }
+            try { ShadowDebug.time("treatZoneTR") { Shadows.treatZone(nColor ?: n, m, denoise = false) } } finally { m.release() }
         }
         val bgl = bag.add(Cv.gray(bgs))
         val gain = Mat(); bgl.convertTo(gain, CvType.CV_32F)
@@ -177,7 +180,7 @@ object TextRegions {
         if (glOut[0] <= 0) gd.release()
         // Color de la rejilla (para redibujarla limpia con su tono, [PageEdits.keepRuling])
         val rc = if (!ruling.empty() && Core.countNonZero(ruling) > 200) Core.mean(n, ruling).`val`.copyOf(3) else null
-        Prepared(n, dark, gain, ruling, pm, noise, rh, rv, rc, glOut[0], gd)
+        Prepared(n, dark, gain, ruling, pm, noise, rh, rv, rc, glOut[0], gd, nColor)
     }
 
     /**
@@ -1017,14 +1020,16 @@ object TextRegions {
     // 4. Render
     // =====================================================================================
 
-    enum class Style { COLOR, BLACK_WHITE }
+    /** COLOR = "Texto resaltado", BLACK_WHITE = "Blanco y negro", NATURAL = "Color natural" (B/N como máscara del color real, [NaturalColor]). */
+    enum class Style { COLOR, BLACK_WHITE, NATURAL }
 
     /**
      * Render del filtro sobre [rgb] (8UC3, resolución completa; no se modifica). COLOR: 8UC3 (tinta con su
      * color reforzado sobre blanco puro); BLACK_WHITE: 8UC1 (tinta negra con bordes suaves sobre blanco puro).
      */
     internal fun render(rgb: Mat, style: Style, fast: Boolean = false, keepRuling: Boolean = true): Mat = MatBag().use { bag ->
-        val p = prepare(rgb, bgSide = if (fast) 256 else 384, refineSide = if (fast) 320 else 512, shadowColor = style == Style.COLOR)
+        val natural = style == Style.NATURAL
+        val p = prepare(rgb, bgSide = if (fast) 256 else 384, refineSide = if (fast) 320 else 512, shadowColor = style != Style.BLACK_WHITE, separateColor = natural)
         try {
             // Cuadrícula del cuaderno reconstruida como red regular: sus restos que la supresión no reconoció (tramos en
             // sombra, entrecortados) se borran del mapa de tinta ANTES de segmentar; delimita la zona de escritura
@@ -1045,10 +1050,22 @@ object TextRegions {
                 val lay = layout(p)
                 try {
                     val t0 = System.nanoTime()
-                    val out = compose(p, lay, style, bag).also { log?.invoke("compose $style %.0f ms".format((System.nanoTime() - t0) / 1e6)) }
+                    var out = compose(p, lay, if (natural) Style.BLACK_WHITE else style, bag).also { log?.invoke("compose $style %.0f ms".format((System.nanoTime() - t0) / 1e6)) }
                     runCatching { EdgeClean.clean(out, rgb, lay.letterHeight, region?.second) }.onFailure { if (Cv.isOutOfMemory(it)) throw it }
+                    if (natural) {
+                        // "Color natural": el B/N (ya sin bordes ajenos) es la máscara del color real normalizado
+                        val bw = out
+                        try {
+                            out = NaturalColor.compose(NaturalColor.Inputs(bw, p.nColor ?: p.n, lay.letterHeight, lay.strokeHalf,
+                                images = lay.regions.filter { it.kind == Kind.IMAGE }.map { Rect(it.left, it.top, it.width, it.height) },
+                                allowed = lay.regions.map { Rect(it.left, it.top, it.width, it.height) },
+                                exclude = p.ruling, exclude2 = lay.blank, gridColor = p.rulingColor))
+                        } finally { bw.release() }
+                        // (lo de color fuera de la escritura que el B/N no tenía: misma limpieza de bordes)
+                        runCatching { EdgeClean.clean(out, rgb, lay.letterHeight, region?.second) }.onFailure { if (Cv.isOutOfMemory(it)) throw it }
+                    }
                     // (zona de escritura con medio paso de margen: la rejilla dibujada no entra en el hueco entre páginas)
-                    if (keepRuling && fullGrid != null) runCatching { drawRuling(out, p, lay, style == Style.COLOR, fullGrid, region?.second) }.onFailure { if (Cv.isOutOfMemory(it)) throw it }
+                    if (keepRuling && fullGrid != null) runCatching { drawRuling(out, p, lay, style != Style.BLACK_WHITE, fullGrid, region?.second) }.onFailure { if (Cv.isOutOfMemory(it)) throw it }
                     out
                 } finally { lay.release() }
             } finally { region?.first?.release(); region?.second?.release() }

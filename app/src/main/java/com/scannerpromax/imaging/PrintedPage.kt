@@ -332,6 +332,8 @@ internal object PrintedPage {
         val st = stats ?: analyze(rgb)
         val w = rgb.cols(); val h = rgb.rows()
         val color = style == TextRegions.Style.COLOR
+        // "Color natural": se renderiza el B/N y se guarda el color normalizado de cada franja ([NaturalColor])
+        val natural = style == TextRegions.Style.NATURAL
         // Fondo (papel + iluminación) a baja resolución
         val bgPre = bag.mat()
         val bg = bag.add(ShadowDebug.time("bgPP") { Cv.estimateBackground(rgb, if (fast) 256 else 384, refine = true, refineSide = if (fast) 320 else 1024, preShadow = bgPre) })
@@ -415,6 +417,7 @@ internal object PrintedPage {
         }
         val liftOn = Core.minMaxLoc(lift).maxVal > 1.005
         val out = Mat(oh, ow, if (color) CvType.CV_8UC3 else CvType.CV_8UC1, Scalar.all(255.0))
+        val natBuf = if (natural) bag.add(Mat(oh, ow, CvType.CV_8UC3, Scalar.all(Cv.PAPER_LEVEL))) else null
         val levels = Cv.levelsLut(black, white, if (color) 1.25 else 1.0)
         // Luz de color (lámpara cálida, pantalla, foto con dominante): la tinta toma el tono de la luz y el color
         // reforzado la dejaba azulada o verdosa (y los textos claros sobre barras oscuras, invisibles) -> en COLOR
@@ -471,6 +474,10 @@ internal object PrintedPage {
             val src = res.submat(a0, a1, 0, ow)
             val dst = out.submat(y0, y0 + (a1 - a0), 0, ow)
             src.copyTo(dst); src.release(); dst.release()
+            if (natBuf != null && a1 > a0) {
+                val ws = work.submat(a0, a1, 0, ow); val nd = natBuf.submat(y0, y0 + (a1 - a0), 0, ow)
+                ws.copyTo(nd); ws.release(); nd.release()
+            }
             // Bloques de imagen dentro de la franja: niveles en gris del normalizado (sin binarizar)
             for (b in images) {
                 val iy0 = max(b.y, y0); val iy1 = min(b.y + b.height, y0 + (a1 - a0))
@@ -494,7 +501,11 @@ internal object PrintedPage {
         }
         levels.release(); satLut.release(); tmp.release()
         log?.invoke("render ${style} ${w}x$h -> ${ow}x$oh f=%.2f lh=%.1f win=$win black=%.0f white=%.0f noise=%.1f images=${images.size} satK=%.2f".format(f, lh, black, white, noise, satK))
-        out
+        if (natBuf != null) {
+            try {
+                NaturalColor.compose(NaturalColor.Inputs(out, natBuf, lh, 0.0, images = images, exclude = outsideFull))
+            } finally { out.release() }
+        } else out
     }
 
     /**

@@ -158,7 +158,7 @@ object ImageEnhancer {
      */
     internal fun isSegmented(filter: FilterType, analysis: ContentAnalysis?): Boolean = when (filter) {
         FilterType.MAGIC, FilterType.MAGIC_PRO, FilterType.NO_SHADOW, FilterType.LIGHTEN,
-        FilterType.BLACK_WHITE, FilterType.GRAYSCALE, FilterType.ECO_INK -> true
+        FilterType.BLACK_WHITE, FilterType.GRAYSCALE, FilterType.ECO_INK, FilterType.NATURAL -> true
         FilterType.AUTO -> analysis?.darkBoard == true ||
             analysis?.kind.let { it == null || it == ContentKind.TEXT || it == ContentKind.TEXT_COLOR || it == ContentKind.LOW_LIGHT }
         else -> false
@@ -207,7 +207,7 @@ object ImageEnhancer {
     /** Filtros que se renderizan con la segmentación ([TextRegions] / [PrintedPage]). */
     private fun segmentedFamily(filter: FilterType) = when (filter) {
         FilterType.MAGIC, FilterType.MAGIC_PRO, FilterType.NO_SHADOW, FilterType.LIGHTEN,
-        FilterType.BLACK_WHITE, FilterType.GRAYSCALE, FilterType.ECO_INK -> true
+        FilterType.BLACK_WHITE, FilterType.GRAYSCALE, FilterType.ECO_INK, FilterType.NATURAL -> true
         else -> false
     }
 
@@ -233,6 +233,8 @@ object ImageEnhancer {
                 segmented(src, opt, TextRegions.Style.COLOR)
             FilterType.BLACK_WHITE, FilterType.GRAYSCALE, FilterType.ECO_INK ->
                 segmented(src, opt, TextRegions.Style.BLACK_WHITE)
+            // "Color natural": el B/N como máscara suave del color real de la tinta sobre blanco puro ([NaturalColor])
+            FilterType.NATURAL -> segmented(src, opt, TextRegions.Style.NATURAL)
             FilterType.VIVID -> vivid(src, opt)
             FilterType.WHITEBOARD -> whiteboard(src, opt)
         }
