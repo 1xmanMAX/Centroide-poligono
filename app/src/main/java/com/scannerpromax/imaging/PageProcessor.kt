@@ -37,12 +37,12 @@ class PageProcessor(val tier: DeviceTier) {
     private val previewLock = Any()
 
     /** Renderizado final a calidad completa. */
-    fun render(original: Bitmap, edits: PageEdits, progress: ProgressCallback? = null): Bitmap {
+    fun render(original: Bitmap, edits: PageEdits, progress: ProgressCallback? = null, layoutImages: List<FloatArray> = emptyList()): Bitmap {
         progress?.invoke(0f)
         val geo = geometryFull(original, edits, maxSide = 0)
         // (el callback de progreso puede lanzar para cancelar un render en segundo plano: nada queda sin liberar)
         try { progress?.invoke(0.3f) } catch (e: Throwable) { geo.release(); throw e }
-        val out = finish(geo, edits, ImageEnhancer.Options.of(tier, fast = false), progress)
+        val out = finish(geo, edits, ImageEnhancer.Options.of(tier, fast = false).copy(layoutImages = layoutImages), progress)
         try {
             val bmp = Cv.toBitmap(out)
             progress?.invoke(1f)

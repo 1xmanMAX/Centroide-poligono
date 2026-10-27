@@ -30,6 +30,32 @@ data class DocLayout(
     val fills: List<LayoutFill> = emptyList(),
 )
 
+/** Roles del detector de maquetación que son FOTO (imagen, ilustración, sello) aunque el bloque sea FIGURE. */
+private val PHOTO_ROLES = setOf("image", "header_image", "footer_image", "seal", "chart")
+
+/**
+ * Cajas de FOTO de la maquetación (PP-DocLayoutV3 o la nube): bloques de imagen, figura, gráfico y sello, normalizadas
+ * 0..1 (izquierda, arriba, derecha, abajo) respecto a [DocLayout.imageWidth] x [DocLayout.imageHeight]. Sin los dibujos
+ * solo-tinta (rol "dibujo": son escritura) ni las cajas que cubren casi toda la página (> [maxArea]: una página entera
+ * tomada por figura se trataría como foto y perdería el realce del texto). "Color natural" las pinta como foto (color
+ * original con mejora suave) en vez de binarizarlas.
+ */
+fun DocLayout.photoBoxes(maxArea: Float = 0.6f): List<FloatArray> {
+    if (imageWidth <= 0 || imageHeight <= 0) return emptyList()
+    val w = imageWidth.toFloat(); val h = imageHeight.toFloat()
+    return blocks.filter { b ->
+        when (b.type) {
+            BlockType.CHART -> true
+            BlockType.FIGURE -> b.role == null || b.role in PHOTO_ROLES || b.role == "nube"
+            else -> false
+        }
+    }.mapNotNull { b ->
+        val l = (b.box.left / w).coerceIn(0f, 1f); val t = (b.box.top / h).coerceIn(0f, 1f)
+        val r = (b.box.right / w).coerceIn(0f, 1f); val bt = (b.box.bottom / h).coerceIn(0f, 1f)
+        if (r - l <= 0.005f || bt - t <= 0.005f || (r - l) * (bt - t) > maxArea) null else floatArrayOf(l, t, r, bt)
+    }
+}
+
 /** Fondo de color liso: caja (px) + color ARGB. */
 @Serializable
 data class LayoutFill(val box: LayoutBox, val color: Int)

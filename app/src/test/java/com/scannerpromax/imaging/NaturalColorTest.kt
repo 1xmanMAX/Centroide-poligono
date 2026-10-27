@@ -211,4 +211,105 @@ class NaturalColorTest {
         assertEquals(255.0, Core.minMaxLoc(out.submat(Rect(10, 380, 80, 30)).reshape(1)).minVal, 0.0)
         out.release(); nrm.release(); bw.release()
     }
+
+    // ---------------------------------------------------------------------------------------- fase 3
+
+    @Test fun fase3_decisionesPuras() {
+        assertEquals(100.0, NaturalMath.lightness(1.0), 1e-6)
+        assertEquals(0.0, NaturalMath.lightness(0.0), 1e-6)
+        assertEquals(53.4, NaturalMath.lightness(0.5), 0.2)   // gris sRGB medio
+        // canto de la hoja: escalón en casi todo el lado, papel dentro y sin escritura del otro lado
+        assertTrue(NaturalMath.sheetEdgeOk(20.0, 0.95, 0.9, 0))
+        assertFalse("raya impresa (papel a ambos lados)", NaturalMath.sheetEdgeOk(2.0, 0.1, 1.0, 0))
+        assertFalse("cruza la hoja", NaturalMath.sheetEdgeOk(20.0, 0.5, 0.9, 0))
+        assertFalse("texto del otro lado", NaturalMath.sheetEdgeOk(20.0, 0.95, 0.9, 8))
+        assertFalse("sin papel dentro", NaturalMath.sheetEdgeOk(20.0, 0.95, 0.3, 0))
+        // cajas de la maquetación -> px
+        val r = NaturalColor.layoutRects(listOf(floatArrayOf(0.1f, 0.2f, 0.5f, 0.6f), floatArrayOf(0.5f, 0.5f, 0.5f, 0.9f)), 1000, 2000)
+        assertEquals(1, r.size)
+        assertEquals(Rect(100, 400, 400, 800), r[0])
+    }
+
+    /** Escena con tinta en toda la página (rejilla de "letras") sobre papel normalizado 230; [ink] color de la tinta por columna. */
+    private fun textPage(ink: (Int) -> Scalar): Pair<Mat, Mat> {
+        val nrm = Mat(H, W, CvType.CV_8UC3, Scalar.all(230.0))
+        val bw = Mat(H, W, CvType.CV_8UC1, Scalar(255.0))
+        for (y in 40 until H - 40 step 30) for (x in 40 until W - 60 step 24) {
+            Imgproc.line(nrm, Point(x.toDouble(), y.toDouble()), Point(x + 8.0, y + 16.0), ink(x), 3)
+            Imgproc.line(bw, Point(x.toDouble(), y.toDouble()), Point(x + 8.0, y + 16.0), Scalar(0.0), 3, Imgproc.LINE_AA)
+        }
+        return nrm to bw
+    }
+
+    private fun chroma(rgb: DoubleArray): Double {
+        val m = Mat(1, 1, CvType.CV_32FC3); m.put(0, 0, floatArrayOf((rgb[0] / 255).toFloat(), (rgb[1] / 255).toFloat(), (rgb[2] / 255).toFloat()))
+        Imgproc.cvtColor(m, m, Imgproc.COLOR_RGB2Lab); val v = m.get(0, 0); m.release()
+        return Math.hypot(v[1], v[2])
+    }
+
+    @Test fun sombraCalida_laTintaNegraNoSaleMarron() {
+        assumeTrue("OpenCV de escritorio no disponible", SyntheticScenes.openCv)
+        // media hoja con luz cálida: en la original el papel es anaranjado; en la normalizada el papel es neutro pero la tinta
+        // negra conserva la dominante de la luz (marrón)
+        val x0 = 400
+        val (nrm, bw) = textPage { x -> if (x >= x0) Scalar(95.0, 70.0, 40.0) else Scalar(60.0, 60.0, 60.0) }
+        val orig = Mat(H, W, CvType.CV_8UC3, Scalar(215.0, 215.0, 212.0))
+        Imgproc.rectangle(orig, Point(x0 - 5.0, 0.0), Point(W.toDouble(), H.toDouble()), Scalar(170.0, 135.0, 85.0), -1)
+        val ref = NaturalColor.compose(NaturalColor.Inputs(bw, nrm, 20.0, 1.5))
+        val out = NaturalColor.compose(NaturalColor.Inputs(bw, nrm, 20.0, 1.5, orig = orig))
+        // trazo en la sombra cálida (centro de una "letra" de la derecha)
+        val xs = 40 + 24 * ((x0 + 60 - 40) / 24); val p = px(out, xs + 4, 40 + 30 * 4 + 8); val p0 = px(ref, xs + 4, 40 + 30 * 4 + 8)
+        assertTrue("sin luz local: ${p0.toList()} croma ${chroma(p0)}", chroma(p0) > 8)
+        assertTrue("con luz local: ${p.toList()} croma ${chroma(p)}", chroma(p) < 0.5 * chroma(p0))
+        // la tinta de la parte iluminada no cambia
+        val q = px(out, 40 + 4, 40 + 30 * 4 + 8); val q0 = px(ref, 40 + 4, 40 + 30 * 4 + 8)
+        for (c in 0 until 3) assertEquals(q0[c], q[c], 3.0)
+        out.release(); ref.release(); orig.release(); nrm.release(); bw.release()
+    }
+
+    @Test fun fueraDeLaHoja_blanco_yElTextoJuntoAlMargenSeConserva() {
+        assumeTrue("OpenCV de escritorio no disponible", SyntheticScenes.openCv)
+        val (nrm, bw) = textPage { Scalar(50.0, 50.0, 55.0) }
+        // la hoja termina en x = 590: más allá, madera (original) con vetas que el B/N y la normalizada conservan
+        val orig = Mat(H, W, CvType.CV_8UC3, Scalar(215.0, 215.0, 212.0))
+        Imgproc.rectangle(orig, Point(590.0, 0.0), Point(W.toDouble(), H.toDouble()), Scalar(120.0, 80.0, 45.0), -1)
+        for (y in 10 until H step 23) {
+            Imgproc.line(bw, Point(600.0, y.toDouble()), Point(630.0, y + 4.0), Scalar(30.0), 2)
+            Imgproc.line(nrm, Point(600.0, y.toDouble()), Point(630.0, y + 4.0), Scalar(110.0, 75.0, 40.0), 2)
+        }
+        val out = NaturalColor.compose(NaturalColor.Inputs(bw, nrm, 20.0, 1.5, orig = orig))
+        val wood = out.submat(Rect(596, 0, 44, H))
+        assertEquals("fuera de la hoja", 255.0, Core.minMaxLoc(wood.reshape(1)).minVal, 0.0)
+        // la última columna de "letras" (x ~ 568-576, a 15 px del canto) sigue ahí
+        val last = 40 + 24 * ((W - 60 - 1 - 40) / 24)
+        assertTrue("letra junto al margen: ${px(out, last + 4, 40 + 8).toList()}", px(out, last + 4, 40 + 8).average() < 140)
+        wood.release(); out.release(); orig.release(); nrm.release(); bw.release()
+    }
+
+    @Test fun tintaGrisMuyClara_conservaSuGris_laOscuraPasaANegro() {
+        assumeTrue("OpenCV de escritorio no disponible", SyntheticScenes.openCv)
+        // texto gris oscuro (plomo) en casi toda la página y unos trazos gris claro (transparencia del reverso) que el B/N tiene
+        val (nrm, bw) = textPage { x -> if (x in 280..330) Scalar(185.0, 185.0, 185.0) else Scalar(95.0, 95.0, 95.0) }
+        val out = NaturalColor.compose(NaturalColor.Inputs(bw, nrm, 20.0, 1.5))
+        val dark = px(out, 40 + 4, 40 + 30 * 3 + 8)
+        assertTrue("plomo -> negro: ${dark.toList()}", dark.max()!! < 70)
+        val xs = 40 + 24 * ((300 - 40) / 24)
+        val light = px(out, xs + 4, 40 + 30 * 3 + 8)
+        assertTrue("reverso conserva su gris: ${light.toList()}", light.average() > 85 && light.average() > dark.max()!! + 30)
+        out.release(); nrm.release(); bw.release()
+    }
+
+    @Test fun cuaderno_fueraDeLaZonaDeEscritura_sinColorAnadido() {
+        assumeTrue("OpenCV de escritorio no disponible", SyntheticScenes.openCv)
+        val (nrm, bw) = scene()
+        // dos trazos naranjas claros (el B/N no los ve): uno dentro de la zona de escritura y otro en el margen
+        Imgproc.line(nrm, Point(560.0, 40.0), Point(600.0, 380.0), ORANGE, 5)
+        val zone = Mat(H, W, CvType.CV_8UC1, Scalar(0.0))
+        Imgproc.rectangle(zone, Point(40.0, 20.0), Point(530.0, 400.0), Scalar(255.0), -1)
+        val out = NaturalColor.compose(NaturalColor.Inputs(bw, nrm, 20.0, 2.5, writing = zone))
+        assertTrue("naranja dentro: ${px(out, 300, 295).toList()}", px(out, 300, 295).average() < 245)
+        val margin = out.submat(Rect(545, 30, 70, 360))
+        assertEquals("margen", 255.0, Core.minMaxLoc(margin.reshape(1)).minVal, 0.0)
+        margin.release(); zone.release(); out.release(); nrm.release(); bw.release()
+    }
 }

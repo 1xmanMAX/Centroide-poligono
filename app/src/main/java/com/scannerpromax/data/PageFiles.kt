@@ -20,6 +20,13 @@ object PageFiles {
 
     fun isBinaryFilter(f: FilterType) = f == FilterType.BLACK_WHITE || f == FilterType.ECO_INK
 
+    /**
+     * ¿[a] y [b] dan el procesado con la MISMA geometría (recorte, giro, enderezado)? Entonces las coordenadas de la
+     * maquetación de una valen para la otra aunque cambien el filtro, los ajustes, los borrados o la cuadrícula.
+     */
+    fun sameGeometry(a: PageEdits, b: PageEdits): Boolean =
+        a.quad == b.quad && a.rotation == b.rotation && a.autoDeskew == b.autoDeskew && a.autoDewarp == b.autoDewarp
+
     /** Hash estable (entre ejecuciones) de las ediciones: va en el nombre de archivo, así cada versión tiene el suyo. */
     fun editsHash(edits: PageEdits): String =
         Integer.toHexString(hashJson.encodeToString(PageEdits.serializer(), edits).hashCode())

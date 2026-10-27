@@ -314,6 +314,13 @@ internal object NaturalColor {
         fun release() { support.release(); figures.release(); fills?.release(); fillCol?.release(); foreign?.release(); foreignSoft?.release(); photos?.release(); lw?.release() }
     }
 
+    /** Cajas normalizadas 0..1 (izq., arriba, dcha., abajo) de la maquetación -> rectángulos en px de una salida [w] x [h]. */
+    fun layoutRects(boxes: List<FloatArray>, w: Int, h: Int): List<Rect> = boxes.mapNotNull { b ->
+        val x0 = (b[0] * w).roundToInt().coerceIn(0, w); val y0 = (b[1] * h).roundToInt().coerceIn(0, h)
+        val x1 = (b[2] * w).roundToInt().coerceIn(0, w); val y1 = (b[3] * h).roundToInt().coerceIn(0, h)
+        if (x1 - x0 < 2 || y1 - y0 < 2) null else Rect(x0, y0, x1 - x0, y1 - y0)
+    }
+
     /** Compone "Color natural" (8UC3 nuevo). */
     fun compose(inp: Inputs): Mat = MatBag().use { bag ->
         val W = inp.bw.cols(); val H = inp.bw.rows()
@@ -1038,7 +1045,7 @@ internal object NaturalColor {
             // luego cruza la hoja no vale)
             val t0 = 0.0; val t1 = (if (vert) h else w) - 1.0
             val inw = if (side == 0 || side == 3) 1.0 else -1.0   // sentido hacia dentro de la hoja
-            val des = ArrayList<Double>(); var paperIn = 0; var tot = 0
+            val des = ArrayList<Double>(); val dv3 = ArrayList<DoubleArray>(); var paperIn = 0; var tot = 0
             val pin = DoubleArray(3); var nPin = 0
             var t = t0
             while (t <= t1) {
@@ -1049,15 +1056,20 @@ internal object NaturalColor {
                 if (pi[0] !in 0 until w || pi[1] !in 0 until h || po[0] !in 0 until w || po[1] !in 0 until h) continue
                 val ii = pi[1] * w + pi[0]; val io = po[1] * w + po[0]
                 var s2 = 0.0
-                for (k in 0 until 3) { val dv = ((lb[ii * 3 + k].toInt() and 0xFF) - (lb[io * 3 + k].toInt() and 0xFF)) * (if (k == 0) 100.0 / 255 else 1.0); s2 += dv * dv }
-                des.add(kotlin.math.sqrt(s2)); tot++
+                val v3 = DoubleArray(3)
+                for (k in 0 until 3) { val dv = ((lb[ii * 3 + k].toInt() and 0xFF) - (lb[io * 3 + k].toInt() and 0xFF)) * (if (k == 0) 100.0 / 255 else 1.0); v3[k] = dv; s2 += dv * dv }
+                des.add(kotlin.math.sqrt(s2)); dv3.add(v3); tot++
                 if ((bb[ii].toInt() and 0xFF) >= 200) { paperIn++; for (k in 0 until 3) pin[k] += lb[ii * 3 + k].toInt() and 0xFF; nPin++ }
             }
             if (tot < max(10.0, 0.5 * (t1 - t0) / 3.0)) continue
             des.sort()
             val step = des[des.size / 2]
             // (y escalón en casi todo el lado: una recta que cruza la hoja tiene papel a los dos lados en ese tramo)
-            val stepFrac = des.count { it >= 0.5 * SHEET_STEP }.toDouble() / des.size
+            // (del MISMO signo: el escalón de un canto es siempre el mismo -de papel a mesa u hoja de debajo-; una línea de
+            // texto o una mancha cruzan la recta con saltos de signo y tamaño variables)
+            val med = DoubleArray(3) { k -> dv3.map { it[k] }.sorted()[dv3.size / 2] }
+            val mn = kotlin.math.sqrt(med.sumOf { it * it })
+            val stepFrac = if (mn < 1e-6) 0.0 else dv3.count { v -> (v[0] * med[0] + v[1] * med[1] + v[2] * med[2]) / mn >= 0.5 * SHEET_STEP }.toDouble() / dv3.size
             // escritura del otro lado (entre la recta y el borde de la imagen) SOBRE PAPEL como el de dentro (las astillas de la
             // madera o los restos de la funda tienen otro fondo)
             for (k in 0 until 3) pin[k] /= max(1, nPin)
@@ -1075,7 +1087,7 @@ internal object NaturalColor {
                     if ((bb[i].toInt() and 0xFF) < 200) continue
                     var s2 = 0.0
                     for (k in 0 until 3) { val dv = ((lb[i * 3 + k].toInt() and 0xFF) - pin[k]) * (if (k == 0) 100.0 / 255 else 1.0); s2 += dv * dv }
-                    fr++; if (kotlin.math.sqrt(s2) < max(4.0, 0.5 * step)) near++
+                    fr++; if (kotlin.math.sqrt(s2) < max(10.0, 0.5 * step)) near++
                 }
                 if (fr > 0 && near * 2 >= fr) beyond++
             }
