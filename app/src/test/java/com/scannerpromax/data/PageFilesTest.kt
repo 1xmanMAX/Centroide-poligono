@@ -97,4 +97,12 @@ class PageFilesTest {
         assertEquals(PageFiles.editsHash(auto), PageFiles.editsHash(auto.copy(manualQuad = null)))
         assertNotEquals(PageFiles.editsHash(auto), PageFiles.editsHash(auto.copy(manualQuad = true)))
     }
+
+    @Test fun mismaGeometria_filtroYAjustesNoCuentan() {
+        val a = edits.copy(filter = FilterType.NATURAL)
+        assertTrue(PageFiles.sameGeometry(a, a.copy(filter = FilterType.BLACK_WHITE, keepRuling = false)))
+        assertFalse(PageFiles.sameGeometry(a, a.copy(rotation = 90)))
+        assertFalse(PageFiles.sameGeometry(a, a.copy(quad = null)))
+        assertFalse(PageFiles.sameGeometry(a, a.copy(autoDewarp = false)))
+    }
 }

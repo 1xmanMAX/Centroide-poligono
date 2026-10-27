@@ -56,6 +56,12 @@ object ImageEnhancer {
          * resolución completa no).
          */
         val preview: Boolean = false,
+        /**
+         * Cajas de foto de la maquetación guardada de la página (PP-DocLayoutV3: imagen, figura, gráfico, sello), normalizadas
+         * 0..1 (izq., arriba, dcha., abajo; [com.scannerpromax.domain.photoBoxes]): "Color natural" las pinta como foto. Vacía =
+         * sólo la detección clásica.
+         */
+        val layoutImages: List<FloatArray> = emptyList(),
     ) {
         companion object {
             fun default(): Options {
@@ -518,15 +524,15 @@ object ImageEnhancer {
         }
         if (stats != null && stats.printed) {
             val k = base.cols().toDouble() / max(1, rgb.cols())
-            return@use PrintedPage.render(base, style, opt.fast, opt.maxPixels, if (k != 1.0) stats.scaled(k) else stats, sheetSides = opt.sheetSides).also { cleanEdges(it, base, opt.sheetSides) }
+            return@use PrintedPage.render(base, style, opt.fast, opt.maxPixels, if (k != 1.0) stats.scaled(k) else stats, sheetSides = opt.sheetSides, layoutImages = opt.layoutImages).also { cleanEdges(it, base, opt.sheetSides) }
         }
         // Si la segmentación de cuaderno falla con una imagen atípica (no por memoria), la ruta que conserva todo
         try {
-            TextRegions.render(base, style, opt.fast, opt.keepRuling)
+            TextRegions.render(base, style, opt.fast, opt.keepRuling, opt.layoutImages)
         } catch (e: Exception) {
             if (Cv.isOutOfMemory(e)) throw e
             val k = base.cols().toDouble() / max(1, rgb.cols())
-            PrintedPage.render(base, style, opt.fast, opt.maxPixels, stats?.let { if (k != 1.0) it.scaled(k) else it }, sheetSides = opt.sheetSides).also { cleanEdges(it, base, opt.sheetSides) }
+            PrintedPage.render(base, style, opt.fast, opt.maxPixels, stats?.let { if (k != 1.0) it.scaled(k) else it }, sheetSides = opt.sheetSides, layoutImages = opt.layoutImages).also { cleanEdges(it, base, opt.sheetSides) }
         }
     }
 

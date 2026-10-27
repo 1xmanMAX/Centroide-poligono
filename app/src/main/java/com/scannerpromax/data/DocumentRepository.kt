@@ -12,6 +12,7 @@ import com.scannerpromax.domain.OcrResult
 import com.scannerpromax.domain.Page
 import com.scannerpromax.domain.PageEdits
 import com.scannerpromax.domain.Pt
+import com.scannerpromax.domain.photoBoxes
 import com.scannerpromax.domain.Quad
 import com.scannerpromax.domain.ScanMode
 import com.scannerpromax.imaging.BitmapIO
@@ -891,6 +892,25 @@ class DocumentRepository(
     }
 
     /**
+     * Cajas de foto (imagen, figura, gráfico, sello; normalizadas 0..1) de la maquetación de la IA guardada para la página
+     * con la MISMA geometría que [edits] ([PageFiles.sameGeometry]: las coordenadas valen aunque cambien el filtro o los
+     * ajustes): la de estas ediciones (se regenera el procesado) o la de la versión actual de la página. Vacía si no hay
+     * (motor básico, aún en cola) o no se puede leer: comportamiento de siempre.
+     */
+    private suspend fun layoutPhotoBoxes(docId: String, pageId: String, edits: PageEdits): List<FloatArray> {
+        val current = runCatching { findPage(docId, pageId)?.edits }.getOrNull()
+        val dir = docDir(docId)
+        return withContext(Dispatchers.IO) { runCatching {
+            val cands = listOfNotNull(edits, current?.takeIf { it != edits && PageFiles.sameGeometry(it, edits) })
+            for (e in cands) {
+                val layout = com.scannerpromax.pdf.DocLayoutFiles.read(File(dir, PageFiles.processedName(pageId, e))) ?: continue
+                return@runCatching layout.photoBoxes()
+            }
+            emptyList<FloatArray>()
+        }.getOrDefault(emptyList()) }
+    }
+
+    /**
      * Renderiza procesado + miniatura y los guarda. NO recicla [original].
      * [edits] está en el espacio de la página ([pageW] x [pageH]); si [original] se decodificó a otro tamaño
      * el quad se reescala antes de renderizar (los trazos de borrado ya son normalizados).
@@ -909,7 +929,9 @@ class DocumentRepository(
         val processedName = processedName(pageId, edits)
         val thumbName = thumbName(pageId, edits)
         val workEdits = edits.quad?.let { q -> edits.copy(quad = toSpace(q, pageW, pageH, original.width, original.height)) } ?: edits
-        val rendered = processor.render(original, workEdits, progress)
+        // Cajas de foto de la maquetación guardada (PP-DocLayoutV3): "Color natural" las conserva como foto
+        val photos = if (edits.filter == FilterType.NATURAL) layoutPhotoBoxes(docId, pageId, edits) else emptyList()
+        val rendered = processor.render(original, workEdits, progress, photos)
         try {
             currentCoroutineContext().ensureActive()
             val thumb = BitmapIO.thumbnail(rendered, THUMB_SIDE)

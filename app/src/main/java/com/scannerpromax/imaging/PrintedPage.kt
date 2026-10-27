@@ -328,7 +328,7 @@ internal object PrintedPage {
      * Render de [rgb] (8UC3) con [style]. [fast] = vista previa (sin ampliación). [maxPixels] = límite de píxeles
      * de la salida (la ampliación de la letra pequeña no lo supera). COLOR -> 8UC3, BLACK_WHITE -> 8UC1.
      */
-    fun render(rgb: Mat, style: TextRegions.Style, fast: Boolean, maxPixels: Int, stats: Stats? = null, sheetSides: Int = 0): Mat = MatBag().use { bag ->
+    fun render(rgb: Mat, style: TextRegions.Style, fast: Boolean, maxPixels: Int, stats: Stats? = null, sheetSides: Int = 0, layoutImages: List<FloatArray> = emptyList()): Mat = MatBag().use { bag ->
         val st = stats ?: analyze(rgb)
         val w = rgb.cols(); val h = rgb.rows()
         val color = style == TextRegions.Style.COLOR
@@ -508,7 +508,7 @@ internal object PrintedPage {
             out
         } else if (natBuf != null) {
             try {
-                NaturalColor.compose(NaturalColor.Inputs(out, natBuf, lh, 0.0, images = images, exclude = outsideFull, excludeForeign = true, orig = rgb))
+                NaturalColor.compose(NaturalColor.Inputs(out, natBuf, lh, 0.0, images = images + NaturalColor.layoutRects(layoutImages, ow, oh), exclude = outsideFull, excludeForeign = true, orig = rgb))
             } finally { out.release() }
         } else out
     }
