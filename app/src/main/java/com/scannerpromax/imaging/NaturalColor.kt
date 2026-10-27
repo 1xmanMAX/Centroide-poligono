@@ -287,6 +287,9 @@ internal object NaturalColor {
         /** Zona de escritura del cuaderno (8UC1, 255 = dentro; cualquier tamaño, misma geometría) o null: fuera de ella (marco,
          * margen y bandas impresas, tapa) no se añade color ni figuras, sólo queda la tinta del B/N. */
         val writing: Mat? = null,
+        /** Fotos de la página ([com.scannerpromax.domain.PageEdits.photoMode]): 0 auto, 1 recortadas como rectángulos enteros
+         * con su color ([photoRects]), 2 sin trato de foto (se procesan como el resto de la página). */
+        val photoMode: Int = 0,
     ) { val bridgeOnly: Boolean get() = bridge > 0 }
 
     private class Global(
@@ -376,6 +379,39 @@ internal object NaturalColor {
                 g.gain[0], g.gain[1], g.gain[2], g.black, g.white, g.t0, (System.nanoTime() - t0) / 1e6))
             out
         } finally { g.release() }
+    }
+
+    /**
+     * Rectángulos de foto a la escala de análisis ([Inputs.photoMode] = 1): lo que no es papel (más oscuro que él o con
+     * color), sin los trazos finos del texto (apertura de ~0,6 renglón), cerrado y agrupado; se acepta una zona de al
+     * menos 5x5 renglones cubierta en su mayor parte (un párrafo, una tabla o una banda de título no lo están).
+     */
+    internal fun photoRects(lum: Mat, chroma: Mat, paper: Mat, foreign: Mat?, lhS: Double, cLo: Double, bag: MatBag): List<Rect> {
+        val w = lum.cols(); val h = lum.rows()
+        val pl = if (Core.countNonZero(paper) > 0.05 * lum.total()) Cv.percentile(Cv.histogram(lum, paper), 0.5).toDouble() else 235.0
+        val np = bag.mat(); Imgproc.threshold(lum, np, pl - 28.0, 255.0, Imgproc.THRESH_BINARY_INV)
+        val cm = bag.mat(); Imgproc.threshold(chroma, cm, 3.0 * cLo, 255.0, Imgproc.THRESH_BINARY); cm.convertTo(cm, CvType.CV_8U)
+        Core.bitwise_or(np, cm, np)
+        foreign?.let { f -> val nf = bag.mat(); Core.bitwise_not(f, nf); Core.bitwise_and(np, nf, np) }
+        val ko = Cv.odd(max(3, (0.6 * lhS).roundToInt()))
+        Imgproc.morphologyEx(np, np, Imgproc.MORPH_OPEN, Cv.kernel(Imgproc.MORPH_RECT, ko))
+        val solid = bag.mat(); np.copyTo(solid)
+        Imgproc.morphologyEx(np, np, Imgproc.MORPH_CLOSE, Cv.kernel(Imgproc.MORPH_RECT, Cv.odd(max(3, (1.2 * lhS).roundToInt()))))
+        val labels = bag.mat(); val stats = bag.mat(); val cent = bag.mat()
+        val n = Imgproc.connectedComponentsWithStats(np, labels, stats, cent, 8, CvType.CV_32S)
+        val out = ArrayList<Rect>()
+        val minSide = 5.0 * lhS
+        for (i in 1 until n) {
+            val x = stats.get(i, 0)[0].toInt(); val y = stats.get(i, 1)[0].toInt()
+            val rw = stats.get(i, 2)[0].toInt(); val rh = stats.get(i, 3)[0].toInt()
+            if (rw < minSide || rh < minSide || rw * rh > 0.9 * w * h) continue
+            val r = Rect(x, y, rw, rh)
+            val sub = solid.submat(r); val cover = Core.countNonZero(sub).toDouble() / r.area(); sub.release()
+            if (cover < 0.5) continue
+            val m = (0.3 * lhS).roundToInt()
+            out += Cv.clampRect(Rect(x - m, y - m, rw + 2 * m, rh + 2 * m), w, h)
+        }
+        return out
     }
 
     /** ¿Hay algún píxel activo de la máscara a baja resolución dentro del rectángulo de salida? */
@@ -575,13 +611,19 @@ internal object NaturalColor {
                     fillHoles(figures, bag)
                 }
             }
-            if (!inp.bridgeOnly) for (r in inp.images) {
+            if (!inp.bridgeOnly && inp.photoMode == 2) figures.setTo(Scalar(0.0))
+            if (!inp.bridgeOnly && inp.photoMode != 2) for (r in inp.images) {
                 // (un bloque de imagen que es sobre todo fondo ajeno -la mesa o los cantos en una esquina- no es una figura)
                 val rr = Cv.clampRect(Rect((r.x * s).toInt(), (r.y * s).toInt(), max(1, (r.width * s).roundToInt()), max(1, (r.height * s).roundToInt())), sw, shh)
                 if (rr.width <= 0 || rr.height <= 0) continue
                 if (softAll != null) { val sub = softAll.submat(rr); val fr = Core.countNonZero(sub).toDouble() / rr.area(); sub.release(); if (fr > 0.3) continue }
                 Imgproc.rectangle(figures, org.opencv.core.Point(r.x * s, r.y * s), org.opencv.core.Point((r.x + r.width) * s - 1, (r.y + r.height) * s - 1), Scalar(255.0), -1)
                 Imgproc.rectangle(photos, org.opencv.core.Point(r.x * s, r.y * s), org.opencv.core.Point((r.x + r.width) * s - 1, (r.y + r.height) * s - 1), Scalar(255.0), -1)
+            }
+            // Fotos recortadas: cada zona de foto (masa de tonos medios o color, no trazos) pasa ENTERA como rectángulo
+            if (!inp.bridgeOnly && inp.photoMode == 1) for (r in photoRects(lum, chroma, paper, noExtras, lhS, cLo, bag)) {
+                Imgproc.rectangle(figures, r.tl(), org.opencv.core.Point(r.x + r.width - 1.0, r.y + r.height - 1.0), Scalar(255.0), -1)
+                Imgproc.rectangle(photos, r.tl(), org.opencv.core.Point(r.x + r.width - 1.0, r.y + r.height - 1.0), Scalar(255.0), -1)
             }
             // (la foto se pinta desde el original: nunca sobre el fondo ajeno -fuera de la hoja, mesa-)
             foreignAll2?.let { f -> val nf = bag.mat(); Core.bitwise_not(f, nf); Core.bitwise_and(photos, nf, photos); Core.bitwise_and(figures, nf, figures) }

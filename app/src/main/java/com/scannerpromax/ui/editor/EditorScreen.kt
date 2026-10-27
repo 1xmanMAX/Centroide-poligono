@@ -286,13 +286,14 @@ fun EditorScreen(
                     bulkMessage = "Aplicando a la página ${i + 1} de ${others.size}…"
                     val e = p.edits
                     val updated = when (kind) {
-                        BulkKind.FILTER -> e.copy(filter = src.filter, adjustments = src.adjustments)
+                        BulkKind.FILTER -> e.copy(filter = src.filter, adjustments = src.adjustments, photoMode = src.photoMode)
                         BulkKind.CLEAN -> e.copy(
                             autoRemoveLines = src.autoRemoveLines,
                             autoDenoise = src.autoDenoise,
                             autoDeskew = src.autoDeskew,
                             autoDewarp = src.autoDewarp,
                             keepRuling = src.keepRuling,
+                            photoMode = src.photoMode,
                             // Cambiar el enderezado mueve la geometría: los trazos de esa página dejarían de coincidir.
                             eraseStrokes = if (e.autoDeskew != src.autoDeskew || e.autoDewarp != src.autoDewarp) emptyList() else e.eraseStrokes,
                         )
@@ -802,6 +803,28 @@ private fun FiltersPanel(session: EditorSession, onApplyAll: (() -> Unit)?) {
                     selected = selected,
                     onClick = { if (edits.filter != f) session.setFilter(f) },
                 )
+            }
+        }
+        // Fotos de la página (sólo "Color natural"): recortarlas enteras con su color o tratarlas como el resto
+        if (selectedFilter == FilterType.NATURAL) {
+            val mode = edits.photoMode ?: 0
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 2.dp)) {
+                Text("Fotos:", color = Color.White.copy(alpha = 0.6f), fontSize = 13.sp)
+                for ((m, label) in listOf(0 to "Auto", 1 to "Recortar", 2 to "Como el resto")) {
+                    val sel = mode == m
+                    Text(
+                        label,
+                        color = if (sel) Color.Black else Color.White.copy(alpha = 0.75f),
+                        fontSize = 13.sp,
+                        fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Medium,
+                        modifier = Modifier
+                            .padding(start = 6.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(if (sel) Color.White else Color.White.copy(alpha = 0.12f))
+                            .selectable(selected = sel, role = Role.RadioButton) { if (!sel) session.update(edits.copy(photoMode = m.takeIf { it != 0 })) }
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                    )
+                }
             }
         }
         val adj = edits.adjustments

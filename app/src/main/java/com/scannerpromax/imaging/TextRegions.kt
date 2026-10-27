@@ -1027,7 +1027,7 @@ object TextRegions {
      * Render del filtro sobre [rgb] (8UC3, resolución completa; no se modifica). COLOR: 8UC3 (tinta con su
      * color reforzado sobre blanco puro); BLACK_WHITE: 8UC1 (tinta negra con bordes suaves sobre blanco puro).
      */
-    internal fun render(rgb: Mat, style: Style, fast: Boolean = false, keepRuling: Boolean = true, layoutImages: List<FloatArray> = emptyList()): Mat = MatBag().use { bag ->
+    internal fun render(rgb: Mat, style: Style, fast: Boolean = false, keepRuling: Boolean = true, layoutImages: List<FloatArray> = emptyList(), photoMode: Int = 0): Mat = MatBag().use { bag ->
         val natural = style == Style.NATURAL
         val p = prepare(rgb, bgSide = if (fast) 256 else 384, refineSide = if (fast) 320 else 512, shadowColor = style != Style.BLACK_WHITE, separateColor = natural)
         try {
@@ -1062,7 +1062,7 @@ object TextRegions {
                                 images = lay.regions.filter { it.kind == Kind.IMAGE }.map { Rect(it.left, it.top, it.width, it.height) } +
                                     NaturalColor.layoutRects(layoutImages, bw.cols(), bw.rows()),
                                 allowed = lay.regions.map { Rect(it.left, it.top, it.width, it.height) },
-                                exclude = p.ruling, exclude2 = lay.blank, gridColor = p.rulingColor, orig = rgb, writing = region?.second))
+                                exclude = p.ruling, exclude2 = lay.blank, gridColor = p.rulingColor, orig = rgb, writing = region?.second, photoMode = photoMode))
                         } finally { bw.release() }
                         // (lo de color fuera de la escritura que el B/N no tenía: misma limpieza de bordes)
                         runCatching { EdgeClean.clean(out, rgb, lay.letterHeight, region?.second) }.onFailure { if (Cv.isOutOfMemory(it)) throw it }

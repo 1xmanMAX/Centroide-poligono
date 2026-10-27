@@ -536,7 +536,7 @@ internal class EditorSession(
             fastGeo = geo
             fastGeoKey = key
         }
-        return ImageEnhancer.apply(geo, e.filter, e.adjustments, tier, true, e.keepRuling)
+        return ImageEnhancer.apply(geo, e.filter, e.adjustments, tier, true, e.keepRuling, e.photoMode ?: 0)
     }
 
     /** Miniaturas de cada filtro (~200 px) en segundo plano. Solo se rehacen si cambia la geometría. */

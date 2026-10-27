@@ -62,6 +62,8 @@ object ImageEnhancer {
          * sólo la detección clásica.
          */
         val layoutImages: List<FloatArray> = emptyList(),
+        /** Fotos de la página ([com.scannerpromax.domain.PageEdits.photoMode]; 0 automático). */
+        val photoMode: Int = 0,
     ) {
         companion object {
             fun default(): Options {
@@ -112,9 +114,9 @@ object ImageEnhancer {
         applyBitmap(src, filter, adjustments, Options.default())
 
     /** Variante con perfil del dispositivo: [fast] = vista previa (sin des-ruido costoso ni super-resolución). */
-    fun apply(src: Bitmap, filter: FilterType, adjustments: Adjustments, tier: DeviceTier, fast: Boolean, keepRuling: Boolean = true): Bitmap {
+    fun apply(src: Bitmap, filter: FilterType, adjustments: Adjustments, tier: DeviceTier, fast: Boolean, keepRuling: Boolean = true, photoMode: Int = 0): Bitmap {
         Cv.configureThreads(tier)
-        return applyBitmap(src, filter, adjustments, Options.of(tier, fast).copy(keepRuling = keepRuling))
+        return applyBitmap(src, filter, adjustments, Options.of(tier, fast).copy(keepRuling = keepRuling, photoMode = photoMode))
     }
 
     /**
@@ -524,15 +526,15 @@ object ImageEnhancer {
         }
         if (stats != null && stats.printed) {
             val k = base.cols().toDouble() / max(1, rgb.cols())
-            return@use PrintedPage.render(base, style, opt.fast, opt.maxPixels, if (k != 1.0) stats.scaled(k) else stats, sheetSides = opt.sheetSides, layoutImages = opt.layoutImages).also { cleanEdges(it, base, opt.sheetSides) }
+            return@use PrintedPage.render(base, style, opt.fast, opt.maxPixels, if (k != 1.0) stats.scaled(k) else stats, sheetSides = opt.sheetSides, layoutImages = opt.layoutImages, photoMode = opt.photoMode).also { cleanEdges(it, base, opt.sheetSides) }
         }
         // Si la segmentación de cuaderno falla con una imagen atípica (no por memoria), la ruta que conserva todo
         try {
-            TextRegions.render(base, style, opt.fast, opt.keepRuling, opt.layoutImages)
+            TextRegions.render(base, style, opt.fast, opt.keepRuling, opt.layoutImages, opt.photoMode)
         } catch (e: Exception) {
             if (Cv.isOutOfMemory(e)) throw e
             val k = base.cols().toDouble() / max(1, rgb.cols())
-            PrintedPage.render(base, style, opt.fast, opt.maxPixels, stats?.let { if (k != 1.0) it.scaled(k) else it }, sheetSides = opt.sheetSides, layoutImages = opt.layoutImages).also { cleanEdges(it, base, opt.sheetSides) }
+            PrintedPage.render(base, style, opt.fast, opt.maxPixels, stats?.let { if (k != 1.0) it.scaled(k) else it }, sheetSides = opt.sheetSides, layoutImages = opt.layoutImages, photoMode = opt.photoMode).also { cleanEdges(it, base, opt.sheetSides) }
         }
     }
 

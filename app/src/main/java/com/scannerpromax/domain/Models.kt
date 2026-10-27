@@ -131,6 +131,11 @@ data class PageEdits(
      * automático; al ser null no se serializa y el hash de las ediciones ya guardadas no cambia.
      */
     val manualQuad: Boolean? = null,
+    /**
+     * Fotos de la página en "Color natural": null = automático, 1 = recortadas (cada foto pasa entera, como rectángulo, con
+     * su color), 2 = como el resto de la página (sin trato de foto). null no se serializa: el hash guardado no cambia.
+     */
+    val photoMode: Int? = null,
 )
 
 @Serializable
