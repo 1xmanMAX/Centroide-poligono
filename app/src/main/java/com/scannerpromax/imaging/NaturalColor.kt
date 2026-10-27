@@ -156,10 +156,15 @@ internal object NaturalMath {
  * - continuidad del trazo: cierre morfológico del alfa aceptado sólo donde la foto muestra tinta (gris o color) e
  *   histéresis (lo tenue pegado a un trazo firme entra) -> el texto no se ve fragmentado;
  * - tinta de color clara (resaltador, bolígrafo pálido, lápiz de color) que el B/N pierde: máscara por croma;
- * - figuras/fotos/logos de color: regiones grandes de color pasan enteras;
- * - realce natural: balance de blancos con el papel, punto negro/blanco moderados, saturación x[SATURATION] y
- *   lo casi neutro sin dominante; el color de cada píxel de borde es el del centro del trazo (sin halo claro).
- * Trabaja por teselas (memoria acotada; las teselas sin tinta salen blancas sin cálculo).
+ * - procesado POR ZONAS: figuras/logos de color pasan enteros; los bloques de imagen (fotos, ilustraciones) reciben
+ *   un tratamiento de foto desde la foto original ([photoZone]); los rellenos lisos (bandas y celdas de tabla,
+ *   recuadros sombreados) pasan como fondo con su color y la tinta del B/N encima ([detectFills], [localFill]); el
+ *   fondo ajeno (madera, mesa, cantos de hojas) se quita ([foreignMask], [edgeLines]);
+ * - tinta NEUTRA (gris plomo por la cámara, desenfoque) -> negro profundo, clasificada por zonas de ~1 letra por su
+ *   pureza (croma relativo a la oscuridad); tinta de COLOR: densidad Beer-Lambert y croma con tope relativo al suyo
+ *   (mismo tono, sin saturar de más); balance de blancos con el papel y niveles moderados; el color de cada píxel de
+ *   borde es el del centro del trazo (sin halo claro) y el alfa se re-afila.
+ * Trabaja por teselas en 8 bits (memoria acotada; las teselas sin nada salen blancas sin cálculo), en paralelo.
  */
 internal object NaturalColor {
     internal var log: ((String) -> Unit)? = null
