@@ -185,6 +185,7 @@ internal fun PageViewerDialog(
     startIndex: Int,
     onDismiss: () -> Unit,
     onEdit: (Page) -> Unit,
+    onRetake: ((Page) -> Unit)? = null,
 ) {
     var index by remember { mutableIntStateOf(startIndex.coerceIn(0, max(0, pages.size - 1))) }
     val page = pages.getOrNull(index)
@@ -343,6 +344,7 @@ internal fun PageViewerDialog(
                 onToggleRebuilt = { showRebuilt = !showRebuilt },
                 onClose = onDismiss,
                 onEdit = { onEdit(page) },
+                onRetake = onRetake?.let { r -> { r(page) } },
             )
             val hintText = when {
                 showRebuilt || live.range != null -> null
@@ -388,6 +390,7 @@ internal fun ViewerTopBar(
     onClose: () -> Unit,
     onEdit: () -> Unit,
     modifier: Modifier = Modifier,
+    onRetake: (() -> Unit)? = null,
 ) {
     Row(
         modifier
@@ -404,6 +407,10 @@ internal fun ViewerTopBar(
         Spacer(Modifier.weight(1f))
         if (rebuiltLabel != null) {
             ViewerTextButton(rebuiltLabel, onToggleRebuilt)
+            Spacer(Modifier.width(8.dp))
+        }
+        if (onRetake != null) {
+            ViewerTextButton("Reescanear", onRetake)
             Spacer(Modifier.width(8.dp))
         }
         Text(

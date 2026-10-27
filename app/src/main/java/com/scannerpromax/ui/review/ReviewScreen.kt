@@ -181,6 +181,8 @@ fun ReviewScreen(
     onBack: () -> Unit,
     onEditPage: (pageId: String) -> Unit,
     onAddPages: (ScanMode) -> Unit,
+    /** Volver a escanear una página (desde el visor): la nueva captura ocupa su lugar. */
+    onRetakePage: ((pageId: String) -> Unit)? = null,
     /** [pageIds] = solo esas páginas (modo selección), en el orden del documento; null = todas. */
     onExport: (pageIds: List<String>?) -> Unit,
     /**
@@ -616,6 +618,7 @@ fun ReviewScreen(
                 startIndex = start,
                 onDismiss = { viewerIndex = null },
                 onEdit = { p -> viewerIndex = null; reopenViewerPageId = p.id; onEditPage(p.id) },
+                onRetake = onRetakePage?.let { r -> { p: Page -> viewerIndex = null; r(p.id) } },
             )
         }
         // Vuelta del editor: se reabre el visor en la página editada (ya con su procesado nuevo). Solo en la composición

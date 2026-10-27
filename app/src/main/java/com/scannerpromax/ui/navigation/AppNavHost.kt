@@ -200,6 +200,7 @@ fun AppNavHost(
                 arguments = listOf(
                     navArgument("docId") { type = NavType.StringType; defaultValue = "" },
                     navArgument("mode") { type = NavType.StringType; defaultValue = ScanMode.DOCUMENT.name },
+                    navArgument("replace") { type = NavType.StringType; defaultValue = "" },
                 ),
                 // La vista previa de la cámara es costosa de escalar: en gama baja solo fundido.
                 enterTransition = {
@@ -218,7 +219,10 @@ fun AppNavHost(
                 val docId = entry.arguments?.getString("docId")?.takeIf { it.isNotBlank() }
                 val modeName = entry.arguments?.getString("mode")
                 val mode = ScanMode.entries.firstOrNull { it.name == modeName } ?: ScanMode.DOCUMENT
+                val replace = entry.arguments?.getString("replace")?.takeIf { it.isNotBlank() }
                 CameraScreen(
+                    replacePageId = replace,
+                    singleShot = replace != null,
                     container = container,
                     docId = docId,
                     mode = mode,
@@ -243,6 +247,7 @@ fun AppNavHost(
                     onBack = { entry.ifActive(nav) { nav.backTo(Routes.HOME) } },
                     onEditPage = { pageId -> entry.ifActive(nav) { nav.navigate(Routes.editor(docId, pageId)) } },
                     onAddPages = { mode -> entry.ifActive(nav) { nav.navigate(Routes.camera(mode, docId)) } },
+                    onRetakePage = { pageId -> entry.ifActive(nav) { nav.navigate(Routes.camera(ScanMode.DOCUMENT, docId, pageId)) } },
                     onExport = { ids -> entry.ifActive(nav) { nav.navigate(Routes.export(docId, ids)) } },
                     onOpenCloudAi = { entry.ifActive(nav) { nav.navigate(Routes.CLOUD_AI) { launchSingleTop = true } } },
                 )

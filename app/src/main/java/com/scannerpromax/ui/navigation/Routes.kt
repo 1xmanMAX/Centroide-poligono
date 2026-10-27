@@ -5,7 +5,7 @@ import com.scannerpromax.domain.ScanMode
 /** Rutas de navegación (contrato compartido por todas las pantallas). */
 object Routes {
     const val HOME = "home"
-    const val CAMERA = "camera?docId={docId}&mode={mode}"
+    const val CAMERA = "camera?docId={docId}&mode={mode}&replace={replace}"
     const val REVIEW = "review/{docId}"
     const val EDITOR = "editor/{docId}/{pageId}"
     const val EXPORT = "export/{docId}?pages={pages}"
@@ -15,8 +15,9 @@ object Routes {
     const val CLOUD_AI = "settings/cloud-ai"
 
     /** [docId] null = documento nuevo. */
-    fun camera(mode: ScanMode = ScanMode.DOCUMENT, docId: String? = null) =
-        "camera?docId=${docId ?: ""}&mode=${mode.name}"
+    /** [replacePageId] = volver a escanear esa página: una sola captura que ocupa su lugar. */
+    fun camera(mode: ScanMode = ScanMode.DOCUMENT, docId: String? = null, replacePageId: String? = null) =
+        "camera?docId=${docId ?: ""}&mode=${mode.name}&replace=${replacePageId ?: ""}"
     fun review(docId: String) = "review/$docId"
     fun editor(docId: String, pageId: String) = "editor/$docId/$pageId"
     /**

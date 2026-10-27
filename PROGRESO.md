@@ -131,3 +131,5 @@ Maqueta en lienzo de diseño: https://claude.ai/artifact/1axPwJgQ3TRA16puB75DTG 
 - Agente en worktree agent-aad41f00daf066d6a (rama cn-fase3) desde ccr-4d2f0b52-3ktfkq.
 - 2026-10-27: Recorte manual respetado (PageEdits.manualQuad: DwBorder no amplía el recorte a cantos de hojas de debajo). Color natural FASE 3 integrada (cn-fase3 94554a4: cantos fuera de la hoja, luz cálida local, zona de escritura del cuaderno, gris claro conservado, cajas PP-DocLayoutV3 → Inputs.images; FM 78,16→77,98 por ACCV, DIBCO 79,3). Selector "Fotos: Auto / Recortar / Como el resto" (PageEdits.photoMode; Recortar = fotos enteras como rectángulos, photoRects + completar fragmentos). v26 compilada.
 - En curso: agente "alinear margen izquierdo" (inicio de renglones recto y vertical; notas /tmp/claude-0/bench/notes_alinear.md, base ecc3add).
+- Visor: botón "Reescanear" (Routes.camera(..., replace=pageId), CameraScreen singleShot + replaceWithNew: la nueva captura ocupa el lugar y se borra la antigua).
+- En curso: agente "líneas de tablas" (redibujar líneas de tabla en su sitio; notas /tmp/claude-0/bench/notes_tablas.md, base 5e30d6a). Al terminar ambos agentes: merge, v27.

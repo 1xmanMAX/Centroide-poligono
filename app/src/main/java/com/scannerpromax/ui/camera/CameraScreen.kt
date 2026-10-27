@@ -229,6 +229,8 @@ fun CameraScreen(
      * revisión para retocar en el modo directo para otra app, donde "Adjuntar" entrega sin revisión).
      */
     onOpenBatch: ((docId: String) -> Unit)? = null,
+    /** Volver a escanear esta página de [docId]: la nueva captura ocupa su lugar y la antigua se borra. */
+    replacePageId: String? = null,
 ) {
     val context = LocalContext.current
     var granted by remember { mutableStateOf(context.hasCameraPermission()) }
@@ -267,7 +269,7 @@ fun CameraScreen(
     }
 
     if (granted) {
-        CameraContent(container, docId, mode, onFinished, onBack, singleShot, doneLabel, onOpenBatch)
+        CameraContent(container, docId, mode, onFinished, onBack, singleShot, doneLabel, onOpenBatch, replacePageId)
     } else {
         PermissionScreen(
             permanentlyDenied = permanentlyDenied,
@@ -316,6 +318,7 @@ private fun CameraContent(
     singleShot: Boolean = false,
     doneLabel: String? = null,
     onOpenBatch: ((String) -> Unit)? = null,
+    replacePageId: String? = null,
 ) {
     val context = LocalContext.current
     val appContext = context.applicationContext
@@ -342,6 +345,9 @@ private fun CameraContent(
     var mode by rememberSaveable { mutableStateOf(initialMode) }
     var flash by rememberSaveable { mutableStateOf(FlashSetting.OFF) }
     var currentDocId by rememberSaveable { mutableStateOf(docId) }
+    // Páginas que ya tenía el documento al abrir la cámara (para volver a escanear una página)
+    var initialPageIds by rememberSaveable { mutableStateOf<List<String>?>(null) }
+    LaunchedEffect(docId) { if (docId != null && initialPageIds == null) initialPageIds = container.documents.get(docId)?.pages?.map { it.id }.orEmpty() }
     val createdHere = docId == null
     val docMutex = remember { Mutex() }
     val jobs = remember { mutableListOf<Job>() }
@@ -602,6 +608,8 @@ private fun CameraContent(
         workScope.launch {
             jobs.toList().joinAll()
             val id = currentDocId
+            // Volver a escanear: las páginas nuevas ocupan el lugar de la sustituida, que se borra
+            if (id != null && replacePageId != null) runCatching { replaceWithNew(container, id, replacePageId, initialPageIds) }
             val hasPages = id != null && (container.documents.get(id)?.pages?.isNotEmpty() == true)
             if (id != null && !hasPages && createdHere) runCatching { container.documents.delete(id) }
             // Si la app pasó a segundo plano mientras se procesaba, se espera a volver antes de navegar
@@ -1034,3 +1042,17 @@ private fun modeHint(mode: ScanMode) = when (mode) {
     ScanMode.PHOTO -> "Foto a color, sin recorte automático"
 }
 
+
+/**
+ * Volver a escanear: las páginas añadidas en esta sesión (las que no estaban en [before]) pasan al lugar de
+ * [oldPageId], que se borra. Sin captura nueva, no se toca nada.
+ */
+private suspend fun replaceWithNew(container: AppContainer, docId: String, oldPageId: String, before: List<String>?) {
+    val known = before ?: return
+    val doc = container.documents.get(docId) ?: return
+    val added = doc.pages.map { it.id }.filter { it !in known }
+    if (added.isEmpty() || doc.pages.none { it.id == oldPageId }) return
+    val order = doc.pages.map { it.id }.filter { it !in added }.flatMap { if (it == oldPageId) added + it else listOf(it) }
+    container.documents.reorderPages(docId, order)
+    container.documents.deletePage(docId, oldPageId)
+}
