@@ -526,7 +526,11 @@ object ImageEnhancer {
         }
         if (stats != null && stats.printed) {
             val k = base.cols().toDouble() / max(1, rgb.cols())
-            return@use PrintedPage.render(base, style, opt.fast, opt.maxPixels, if (k != 1.0) stats.scaled(k) else stats, sheetSides = opt.sheetSides, layoutImages = opt.layoutImages, photoMode = opt.photoMode).also { cleanEdges(it, base, opt.sheetSides) }
+            val st = if (k != 1.0) stats.scaled(k) else stats
+            return@use PrintedPage.render(base, style, opt.fast, opt.maxPixels, st, sheetSides = opt.sheetSides, layoutImages = opt.layoutImages, photoMode = opt.photoMode).also {
+                cleanEdges(it, base, opt.sheetSides)
+                if (opt.keepRuling) restoreTableLines(it, base, st, opt)
+            }
         }
         // Si la segmentación de cuaderno falla con una imagen atípica (no por memoria), la ruta que conserva todo
         try {
@@ -534,8 +538,23 @@ object ImageEnhancer {
         } catch (e: Exception) {
             if (Cv.isOutOfMemory(e)) throw e
             val k = base.cols().toDouble() / max(1, rgb.cols())
-            PrintedPage.render(base, style, opt.fast, opt.maxPixels, stats?.let { if (k != 1.0) it.scaled(k) else it }, sheetSides = opt.sheetSides, layoutImages = opt.layoutImages, photoMode = opt.photoMode).also { cleanEdges(it, base, opt.sheetSides) }
+            val st = stats?.let { if (k != 1.0) it.scaled(k) else it }
+            PrintedPage.render(base, style, opt.fast, opt.maxPixels, st, sheetSides = opt.sheetSides, layoutImages = opt.layoutImages, photoMode = opt.photoMode).also {
+                cleanEdges(it, base, opt.sheetSides)
+                if (opt.keepRuling && st != null) restoreTableLines(it, base, st, opt)
+            }
         }
+    }
+
+    /**
+     * Líneas de tabla limpias y continuas en su sitio ([TableLines]); con "Conservar cuadrícula / renglones"
+     * ([Options.keepRuling]), igual que la cuadrícula del cuaderno. Nada sobre las fotos de la página.
+     */
+    private fun restoreTableLines(out: Mat, src: Mat, st: PrintedPage.Stats, opt: Options) {
+        runCatching {
+            val avoid = st.pictures + opt.layoutImages.map { b -> DoubleArray(4) { b[it].toDouble() } }
+            TableLines.restore(out, src, st.letterHeight, avoid)
+        }.onFailure { if (Cv.isOutOfMemory(it)) throw it }
     }
 
     /** Bordes del resultado: lo que no es contenido junto al borde (sombra del canto, fondo, manchas) -> blanco ([EdgeClean]). */
