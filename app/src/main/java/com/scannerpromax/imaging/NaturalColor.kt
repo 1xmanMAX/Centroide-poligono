@@ -85,8 +85,18 @@ internal object NaturalMath {
         return inBand && long >= 4 * lh && area / long <= 0.6 * lh
     }
 
-    /** ¿Fondo ajeno que se quita entero (madera, mesa: vetas densas en el B/N o nada) y no sólo lo añadido (hay escritura)? */
-    fun foreignIsHard(inkFrac: Double): Boolean = inkFrac < 0.005 || inkFrac >= 0.15
+    /**
+     * ¿Tono de fondo ajeno (madera, mesa)? Un solo tono ([conc] = |Σ(a,b)| / Σ croma >= 0.75), croma medio <= 25 y poca
+     * variación de luminancia (σ L* <= 16): una foto o una ilustración tienen colores vivos o contrastes fuertes.
+     */
+    fun foreignHue(conc: Double, meanChroma: Double, sdL: Double): Boolean = conc >= 0.75 && meanChroma <= 25.0 && sdL <= 16.0
+
+    /**
+     * ¿Fondo ajeno que se quita entero (sin nada del B/N: mesa lisa) y no sólo lo añadido? Con tinta en el B/N -escritura
+     * en una banda de color o en una sombra cálida, o las vetas de la madera- se conserva lo del B/N (no se puede
+     * distinguir con seguridad una página densa de las vetas).
+     */
+    fun foreignIsHard(inkFrac: Double): Boolean = inkFrac < 0.005
 
     /**
      * PUREZA media de la tinta (croma / (100 - L*), zona de ~1 letra) por debajo de la cual es NEUTRA (-> negro):
@@ -396,20 +406,16 @@ internal object NaturalColor {
         val lhS = max(2.0, inp.letterHeight * s)
         // Fondo ajeno (madera, mesa, carcasa, cantos): ni tinta, ni color, ni figuras, ni rellenos
         val softF = arrayOfNulls<Mat>(1)
-        val foreignAll: Mat? = run {
-            val fo = if (inp.bridge == 0 && inp.orig != null && OFF and 8 == 0) foreignMask(inp.orig, sm.size(), bws, lhS, bag, softF) else null
-            val ex = if (inp.excludeForeign) excludeMask(inp.exclude, sm.size(), bag) else null
-            when {
-                fo != null && ex != null -> { Core.bitwise_or(fo, ex, fo); fo }
-                fo != null -> fo
-                ex != null -> ex.clone()
-                else -> null
-            }
-        }
-        // Cantos de hojas / borde de la mesa lejos del borde de la imagen (fuera de la mancha de texto)
-        val foreignAll2 = edgeLines(bws, cEr, lhS, cLo, bag)?.let { el -> if (foreignAll != null) { Core.bitwise_or(foreignAll, el, foreignAll); el.release(); foreignAll } else el } ?: foreignAll
-        // (para lo añadido -color, figuras, rellenos- también cuenta la zona ajena "blanda")
-        val noExtras: Mat? = softF[0]?.let { sf -> bag.add(sf); if (foreignAll2 != null) bag.mat().also { Core.bitwise_or(foreignAll2, sf, it) } else sf } ?: foreignAll2
+        // (propio: madera/mesa por color + cantos; se quita en la composición. El fondo ajeno del render impreso
+        // -[Inputs.exclude] con excludeForeign- sólo veta componentes, como antes: puede cubrir una ilustración que sus
+        // bloques de imagen sí conservan)
+        var own: Mat? = if (inp.bridge == 0 && inp.orig != null && OFF and 8 == 0) foreignMask(inp.orig, sm.size(), bws, lhS, bag, softF,
+            inp.images.map { Rect((it.x * s).toInt(), (it.y * s).toInt(), max(1, (it.width * s).roundToInt()), max(1, (it.height * s).roundToInt())) }) else null
+        edgeLines(bws, cEr, lhS, cLo, bag)?.let { el -> own = own?.also { Core.bitwise_or(it, el, it); el.release() } ?: el }
+        val foreignAll2 = own
+        val softAll: Mat? = softF[0]?.let { sf -> bag.add(sf); if (foreignAll2 != null) bag.mat().also { Core.bitwise_or(foreignAll2, sf, it) } else sf } ?: foreignAll2
+        val exF = if (inp.excludeForeign) excludeMask(inp.exclude, sm.size(), bag) else null
+        val noExtras: Mat? = if (exF != null && softAll != null) bag.mat().also { Core.bitwise_or(softAll, exF, it) } else exF ?: softAll
         NcProf.mark("g.foreign")
         val support = Mat.zeros(sm.size(), CvType.CV_8U)
         val figures = Mat.zeros(sm.size(), CvType.CV_8U)
@@ -478,7 +484,7 @@ internal object NaturalColor {
                 // (un bloque de imagen que es sobre todo fondo ajeno -la mesa o los cantos en una esquina- no es una figura)
                 val rr = Cv.clampRect(Rect((r.x * s).toInt(), (r.y * s).toInt(), max(1, (r.width * s).roundToInt()), max(1, (r.height * s).roundToInt())), sw, shh)
                 if (rr.width <= 0 || rr.height <= 0) continue
-                if (noExtras != null) { val sub = noExtras.submat(rr); val fr = Core.countNonZero(sub).toDouble() / rr.area(); sub.release(); if (fr > 0.3) continue }
+                if (softAll != null) { val sub = softAll.submat(rr); val fr = Core.countNonZero(sub).toDouble() / rr.area(); sub.release(); if (fr > 0.3) continue }
                 Imgproc.rectangle(figures, org.opencv.core.Point(r.x * s, r.y * s), org.opencv.core.Point((r.x + r.width) * s - 1, (r.y + r.height) * s - 1), Scalar(255.0), -1)
             }
         }
@@ -593,7 +599,7 @@ internal object NaturalColor {
      * color se aparta del papel en CROMATICIDAD ([NaturalMath.isForeignColor]: madera, mesa de color; una sombra sobre
      * el papel, aunque sea muy oscura, conserva la del papel), gruesas (>= 3 letras). null si no hay.
      */
-    private fun foreignMask(orig: Mat, size: Size, bws: Mat, lhS: Double, bag: MatBag, softOut: Array<Mat?>): Mat? {
+    private fun foreignMask(orig: Mat, size: Size, bws: Mat, lhS: Double, bag: MatBag, softOut: Array<Mat?>, images: List<Rect>): Mat? {
         val w = size.width.toInt(); val h = size.height.toInt(); val n = w * h
         val o = bag.mat(); areaDown(orig, o, size, bag)
         Imgproc.medianBlur(o, o, 5)
@@ -632,7 +638,32 @@ internal object NaturalColor {
         // Con escritura dentro (tinta del B/N de densidad de texto: 0.5-15 %) es una banda impresa o una sombra de color
         // sobre la hoja: sólo se quita lo añadido (color, figuras, rellenos), no la tinta del B/N ([soft]); la madera o la
         // mesa (vetas: tinta muy densa, o nada) se quitan enteras
-        val inkN = IntArray(nc); for (i in 0 until n) if (keep[la[i]] && (bwB[i].toInt() and 0xFF) < 128) inkN[la[i]]++
+        // Madera / mesa: UN tono (concentración del tono >= 0.75) y croma moderado; una ilustración o una foto de color
+        // pegada al borde (libro infantil, revista) tiene muchos tonos o mucho croma -> no es fondo ajeno
+        run {
+            val lab = bag.mat(); Imgproc.cvtColor(o, lab, Imgproc.COLOR_RGB2Lab)
+            val lb = ByteArray(n * 3); lab.get(0, 0, lb)
+            val sa = DoubleArray(nc); val sb2 = DoubleArray(nc); val sc = DoubleArray(nc); val sl = DoubleArray(nc); val sl2 = DoubleArray(nc)
+            val inImg = IntArray(nc)
+            val imgM = ByteArray(n)
+            for (r in images) for (yy in max(0, r.y) until min(h, r.y + r.height)) for (xx in max(0, r.x) until min(w, r.x + r.width)) imgM[yy * w + xx] = 1
+            for (i in 0 until n) {
+                val l = la[i]; if (!keep[l]) continue
+                val L = (lb[i * 3].toInt() and 0xFF) * 100.0 / 255
+                val a = (lb[i * 3 + 1].toInt() and 0xFF) - 128.0; val b = (lb[i * 3 + 2].toInt() and 0xFF) - 128.0
+                sa[l] += a; sb2[l] += b; sc[l] += kotlin.math.sqrt(a * a + b * b); sl[l] += L; sl2[l] += L * L
+                if (imgM[i].toInt() != 0) inImg[l]++
+            }
+            for (c in 1 until nc) if (keep[c]) {
+                val ar = max(1, st[c * 5 + 4]).toDouble()
+                val conc = kotlin.math.sqrt(sa[c] * sa[c] + sb2[c] * sb2[c]) / max(1e-6, sc[c])
+                val sdL = kotlin.math.sqrt(max(0.0, sl2[c] / ar - (sl[c] / ar) * (sl[c] / ar)))
+                // (un bloque de imagen -foto, ilustración- pegado al borde no es fondo ajeno)
+                if (!NaturalMath.foreignHue(conc, sc[c] / ar, sdL) || inImg[c] >= 0.1 * ar) keep[c] = false
+            }
+        }
+        // (tinta del B/N a esta escala: < 200 -el texto fino se aclara al reducir-)
+        val inkN = IntArray(nc); for (i in 0 until n) if (keep[la[i]] && (bwB[i].toInt() and 0xFF) < 200) inkN[la[i]]++
         val hard = BooleanArray(nc) { c -> keep[c] && NaturalMath.foreignIsHard(inkN[c].toDouble() / max(1, st[c * 5 + 4])) }
         val fb = ByteArray(n); val sb = ByteArray(n); var any = false; var anyS = false
         for (i in 0 until n) { val l = la[i]; if (hard[l]) { fb[i] = -1; any = true } else if (keep[l]) { sb[i] = -1; anyS = true } }
