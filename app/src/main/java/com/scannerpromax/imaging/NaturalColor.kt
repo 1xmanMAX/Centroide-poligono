@@ -257,6 +257,8 @@ internal object NaturalColor {
         /** Rellenos lisos (8U, 255 = relleno) y su color (8UC3) a la escala de análisis, o null. */
         val fills: Mat? = null, val fillCol: Mat? = null, val fillT: Double = FILL_DE,
         val cPaper: Double = 3.0,
+        /** Blanco del papel (RGB) en la foto original, o null. */
+        val origWhite: DoubleArray? = null,
         /** Fondo ajeno (8U, 255) a la escala de análisis, o null. */
         val foreign: Mat? = null,
         /** Zona ajena con escritura (banda impresa, sombra de color): sin lo añadido, con la tinta del B/N; o null. */
@@ -356,6 +358,13 @@ internal object NaturalColor {
         for (exM in listOf(inp.exclude, inp.exclude2)) excludeMask(exM, sm.size(), bag)?.let { ex -> Core.bitwise_not(ex, t); Core.bitwise_and(paper, t, paper) }
         val enough = Core.countNonZero(paper) > 0.05 * sm.total()
         val pc = DoubleArray(3) { c -> if (enough) Cv.percentile(Cv.histogram(ch[c], paper), 0.6).toDouble() else Cv.PAPER_LEVEL }
+        // Blanco del papel en la foto ORIGINAL (para las zonas de imagen, que se tratan desde ella: la normalización por
+        // el fondo blanquea el cielo o las zonas claras de una foto)
+        val origWhite: DoubleArray? = if (inp.orig == null || !enough) null else {
+            val o = bag.mat(); areaDown(inp.orig, o, sm.size(), bag)
+            val oc = ArrayList<Mat>(3); Core.split(o, oc); oc.forEach { bag.add(it) }
+            DoubleArray(3) { c -> max(60.0, Cv.percentile(Cv.histogram(oc[c], paper), 0.6).toDouble()) }
+        }
         NcProf.mark("g.paper")
         val gain = NaturalMath.whiteGains(pc)
         // Imagen balanceada (8 bits) a la escala de análisis
@@ -499,7 +508,7 @@ internal object NaturalColor {
         fl?.let { (f, _) -> val nf = bag.mat(); Core.bitwise_not(figures, nf); Core.bitwise_and(f, nf, f) }
         NcProf.mark("g.fills")
         debug?.let { d -> fl?.let { d("fills", it.first) }; foreignAll2?.let { d("foreign", it) }; softF[0]?.let { d("foreign_soft", it) } }
-        return Global(gain, black, white, t0, support, figures, s, cLo, tF, fl?.first, fl?.second, max(FILL_DE, 2.5 * noise), cPaper, foreignAll2,
+        return Global(gain, black, white, t0, support, figures, s, cLo, tF, fl?.first, fl?.second, max(FILL_DE, 2.5 * noise), cPaper, origWhite, foreignAll2,
             softF[0]?.clone())
     }
 
@@ -1134,7 +1143,7 @@ internal object NaturalColor {
         val c8 = bag.add(Mat(hh, hw, CvType.CV_8UC3)); c8.put(0, 0, c8A)
         NcProf.mark("color")
         writeOut(c8, a, fm, fillUp, outer, inner, crop, out, bag)
-        if (fig != null && OFF and 16 == 0) photoZone(fig, nrmT, g, outer, inner, crop, out, bag)
+        if (fig != null && OFF and 16 == 0) photoZone(fig, nrmT, inp.orig, g, outer, inner, crop, out, bag)
         NcProf.mark("compose")
     }
 
@@ -1170,11 +1179,11 @@ internal object NaturalColor {
 
     /**
      * Zonas de IMAGEN (foto, logo, gráfico, ilustración): tratamiento de foto a resolución completa en vez del de la
-     * tinta -sin binarizar ni blanquear su interior-: el color normalizado (balance de blancos de la página), niveles
-     * suaves, saturación x[PHOTO_SAT], des-ruido leve (bilateral) y nitidez moderada (máscara de enfoque). Se mezcla
+     * tinta -sin binarizar ni blanquear su interior-: el color de la foto ORIGINAL con el balance de blancos del papel
+     * (la normalización por el fondo blanquearía el cielo o las zonas claras), contraste suave, saturación x[PHOTO_SAT], des-ruido leve (bilateral) y nitidez moderada (máscara de enfoque). Se mezcla
      * con lo ya compuesto según la máscara de la figura (borde suave, sin costura).
      */
-    private fun photoZone(fig: Mat, nrmT: Mat, g: Global, outer: Rect, inner: Rect, crop: Rect, out: Mat, bag: MatBag) {
+    private fun photoZone(fig: Mat, nrmT: Mat, orig: Mat?, g: Global, outer: Rect, inner: Rect, crop: Rect, out: Mat, bag: MatBag) {
         // sólo el rectángulo de la figura dentro de la parte útil de la tesela
         val fc = bag.add(fig.submat(crop))
         val pts = bag.mat(); Core.findNonZero(fc, pts)
@@ -1184,12 +1193,22 @@ internal object NaturalColor {
         val ox = crop.x + bb.x; val oy = crop.y + bb.y
         val x0 = max(0, ox - pad); val y0 = max(0, oy - pad)
         val x1 = min(outer.width, ox + bb.width + pad); val y1 = min(outer.height, oy + bb.height + pad)
-        val src = bag.add(nrmT.submat(y0, y1, x0, x1))
-        val p = bag.mat(); Core.multiply(src, Scalar(g.gain[0] * 255.0 / g.white, g.gain[1] * 255.0 / g.white, g.gain[2] * 255.0 / g.white), p)
+        val p = bag.mat()
+        val ow = g.origWhite
+        if (orig != null && ow != null) {
+            // desde la foto ORIGINAL (misma geometría, otra escala), con el balance de blancos del papel
+            val sx = orig.cols().toDouble() / out.cols(); val sy = orig.rows().toDouble() / out.rows()
+            val r = Cv.clampRect(Rect(((outer.x + x0) * sx).toInt(), ((outer.y + y0) * sy).toInt(), max(1, ((x1 - x0) * sx).roundToInt()), max(1, ((y1 - y0) * sy).roundToInt())), orig.cols(), orig.rows())
+            if (r.width <= 0 || r.height <= 0) return
+            Imgproc.resize(orig.submat(r).also { bag.add(it) }, p, Size((x1 - x0).toDouble(), (y1 - y0).toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR)
+            Core.multiply(p, Scalar(255.0 / ow[0], 255.0 / ow[1], 255.0 / ow[2]), p)
+        } else {
+            val src = bag.add(nrmT.submat(y0, y1, x0, x1))
+            Core.multiply(src, Scalar(g.gain[0] * 255.0 / g.white, g.gain[1] * 255.0 / g.white, g.gain[2] * 255.0 / g.white), p)
+        }
         val dn = bag.mat(); Imgproc.bilateralFilter(p, dn, 5, 18.0, 3.0)
-        // niveles suaves: el negro de la página a la mitad (una foto no es tinta: sus sombras no se aplastan)
-        val b = 0.5 * g.black
-        dn.convertTo(dn, -1, 255.0 / (255.0 - b), -b * 255.0 / (255.0 - b))
+        // contraste suave (una foto no es tinta: sus sombras no se aplastan): estiramiento leve de 3 % por abajo
+        dn.convertTo(dn, -1, 255.0 / (255.0 - 8.0), -8.0 * 255.0 / (255.0 - 8.0))
         // saturación suave en HSV
         val hsv = bag.mat(); Imgproc.cvtColor(dn, hsv, Imgproc.COLOR_RGB2HSV)
         val sCh = bag.mat(); Core.extractChannel(hsv, sCh, 1); sCh.convertTo(sCh, -1, PHOTO_SAT); Core.insertChannel(sCh, hsv, 1)
