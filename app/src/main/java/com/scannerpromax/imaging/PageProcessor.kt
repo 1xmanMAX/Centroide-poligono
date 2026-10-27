@@ -165,8 +165,11 @@ class PageProcessor(val tier: DeviceTier) {
                 val small = shrunk(src, quad, side)
                 val red = reducedRectified(small, w, h, quad, rot, side)
                 try {
-                    val est = if (edits.autoDewarp) dewarpModel(red, quadKey(quad, w, h), rot, cacheable = !preview) {
-                        if (quad != null) borderInput(small, w, h, quad, rot, side, red.cols(), red.rows()) else null
+                    // Recorte a mano: se respeta exacto (sin cantos de la hoja buscados fuera de él)
+                    val manual = edits.manualQuad == true
+                    val key = quadKey(quad, w, h)?.let { if (manual) it + 1 else it }
+                    val est = if (edits.autoDewarp) dewarpModel(red, key, rot, cacheable = !preview) {
+                        if (quad != null && !manual) borderInput(small, w, h, quad, rot, side, red.cols(), red.rows()) else null
                     } else null
                     model = est?.model
                     // Ángulo: renglones + márgenes del texto si son coherentes; si no, perfiles de proyección

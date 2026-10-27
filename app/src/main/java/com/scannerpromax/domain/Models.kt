@@ -125,6 +125,12 @@ data class PageEdits(
      * el hash de las ediciones ya guardadas NO cambia.
      */
     val aiHint: String? = null,
+    /**
+     * true = el usuario ajustó el recorte a mano: se respeta EXACTO (el enderezado de hoja curvada no busca los cantos
+     * de la hoja fuera del recorte, que con hojas apiladas o funda tomaría el canto de lo de debajo). null = recorte
+     * automático; al ser null no se serializa y el hash de las ediciones ya guardadas no cambia.
+     */
+    val manualQuad: Boolean? = null,
 )
 
 @Serializable

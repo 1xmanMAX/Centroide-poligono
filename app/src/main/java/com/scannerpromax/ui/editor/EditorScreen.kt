@@ -374,7 +374,7 @@ fun EditorScreen(
                     tool == EditorTool.CROP -> CropTool(
                         image = src,
                         quad = session.workingQuad(),
-                        onQuadChange = { session.setWorkingQuad(it, refresh = false) },
+                        onQuadChange = { session.setWorkingQuad(it, refresh = false, manual = true) },
                         primary = primary,
                         secondary = secondary,
                         error = errorColor,
@@ -443,7 +443,7 @@ fun EditorScreen(
                                 }
                             },
                             onFull = { session.setWorkingQuad(null) },
-                            onReset = { session.update(session.edits.copy(quad = session.savedEdits.quad), refresh = false) },
+                            onReset = { session.update(session.edits.copy(quad = session.savedEdits.quad, manualQuad = session.savedEdits.manualQuad), refresh = false) },
                         )
                         EditorTool.FILTERS -> FiltersPanel(session, onApplyAll = if (canApplyAll) ({ applyToAll(BulkKind.FILTER) }) else null)
                         EditorTool.CLEAN -> CleanPanel(

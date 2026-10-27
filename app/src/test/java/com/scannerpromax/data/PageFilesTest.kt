@@ -90,4 +90,11 @@ class PageFilesTest {
             assertTrue(bw === PageFiles.migrateFilter(dir, bw))
         } finally { dir.deleteRecursively() }
     }
+
+    @Test fun recorteManualCambiaElHashYElAutomaticoNo() {
+        val q = Quad.of(listOf(Pt(10f, 10f), Pt(90f, 10f), Pt(90f, 120f), Pt(10f, 120f)))
+        val auto = PageEdits(quad = q)
+        assertEquals(PageFiles.editsHash(auto), PageFiles.editsHash(auto.copy(manualQuad = null)))
+        assertNotEquals(PageFiles.editsHash(auto), PageFiles.editsHash(auto.copy(manualQuad = true)))
+    }
 }

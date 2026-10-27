@@ -340,9 +340,9 @@ internal class EditorSession(
     fun workingQuad(): Quad? = edits.quad?.let { scaleQuad(it, workScale) }
 
     /** Fija el quad desde coordenadas de trabajo. */
-    fun setWorkingQuad(q: Quad?, refresh: Boolean = false) {
+    fun setWorkingQuad(q: Quad?, refresh: Boolean = false, manual: Boolean = false) {
         val original = q?.let { scaleQuad(it, 1f / workScale) }
-        update(edits.copy(quad = original), refresh)
+        update(edits.copy(quad = original, manualQuad = if (manual && original != null) true else null), refresh)
     }
 
     /** Resultado de validar el recorte antes de guardarlo. */
