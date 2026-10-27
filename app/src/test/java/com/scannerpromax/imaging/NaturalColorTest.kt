@@ -84,7 +84,7 @@ class NaturalColorTest {
         assertFalse("sombra cálida lisa", NaturalMath.foreignHue(1.0, 18.0, 5.5))
         assertFalse("ilustración", NaturalMath.foreignHue(0.55, 32.0, 14.0))
         // canto: largo y fino en la franja del 5 %; una letra junto al borde no
-        assertTrue(NaturalMath.borderStroke(980, 100, 6, 400, 1500, 1000, 1000, lh))
+        assertTrue(NaturalMath.borderStroke(980, 100, 6, 400, 1200, 1000, 1000, lh))
         assertFalse(NaturalMath.borderStroke(980, 100, 6, 8, 40, 1000, 1000, lh))
         assertFalse("en el interior", NaturalMath.borderStroke(500, 100, 6, 400, 1500, 1000, 1000, lh))
         // pureza a partir de la cual la tinta es de color
