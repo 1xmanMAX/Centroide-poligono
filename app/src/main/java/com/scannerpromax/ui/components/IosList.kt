@@ -56,7 +56,7 @@ val SeparatorInsetPlain: Dp = 16.dp
  * Grupo de una lista agrupada iOS. Márgenes laterales de 20 dp (ajústalos con [horizontalPadding]).
  *
  *     InsetGroup(header = "Escaneo", footer = "…") {
- *         item { NavigationRow("Filtro por defecto", value = "Texto resaltado", icon = AppIcons.FilterHalf, iconTint = …) { … } }
+ *         item { NavigationRow("Filtro por defecto", value = "Color natural", icon = AppIcons.FilterHalf, iconTint = …) { … } }
  *         item { ToggleRow("Captura automática", checked, { … }, icon = AppIcons.Bolt, iconTint = SystemOrange) }
  *     }
  */

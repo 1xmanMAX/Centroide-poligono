@@ -1,6 +1,7 @@
 package com.scannerpromax.data
 
 import com.scannerpromax.domain.FilterType
+import com.scannerpromax.domain.Page
 import com.scannerpromax.domain.PageEdits
 import com.scannerpromax.domain.Pt
 import com.scannerpromax.domain.Quad
@@ -10,6 +11,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 
 class PageFilesTest {
 
@@ -26,7 +28,7 @@ class PageFilesTest {
 
     @Test fun bnSeGuardaEnPng() {
         assertTrue(PageFiles.processedName("p", PageEdits(filter = FilterType.BLACK_WHITE)).endsWith(".png"))
-        assertTrue(PageFiles.processedName("p", PageEdits(filter = FilterType.MAGIC)).endsWith(".jpg"))
+        assertTrue(PageFiles.processedName("p", PageEdits(filter = FilterType.NATURAL)).endsWith(".jpg"))
     }
 
     @Test fun cadaEdicionTieneSuPropioProcesadoYMiniatura() {
@@ -65,5 +67,27 @@ class PageFilesTest {
             f.delete()
         }
         assertEquals(null, VersionedFile.of(null))
+    }
+
+    @Test fun textoResaltadoSeMigraConservandoEdicionesOcrYMaquetacion() {
+        val dir = java.nio.file.Files.createTempDirectory("mig").toFile()
+        try {
+            val old = edits.copy(filter = FilterType.MAGIC, rotation = 90, keepRuling = false)
+            File(dir, "ocr").mkdirs(); File(dir, "processed").mkdirs()
+            File(dir, PageFiles.ocrName("p", old)).writeText("{}")
+            File(dir, PageFiles.layoutName("p", old)).writeText("{}")
+            val page = Page(id = "p", originalFile = "original/p.jpg", width = 10, height = 10, edits = old,
+                ocrFile = PageFiles.ocrName("p", old), ocrEditedText = "corregido")
+            val m = PageFiles.migrateFilter(dir, page)
+            assertEquals(old.copy(filter = FilterType.NATURAL), m.edits)   // sólo cambia el filtro
+            assertEquals("corregido", m.ocrEditedText)
+            assertEquals(PageFiles.ocrName("p", m.edits), m.ocrFile)
+            assertTrue(File(dir, m.ocrFile!!).exists())
+            assertTrue(File(dir, PageFiles.layoutName("p", m.edits)).exists())
+            assertNotEquals(PageFiles.processedName("p", old), PageFiles.processedName("p", m.edits))   // se reprocesa
+            // Otros filtros: la página no cambia (ni su hash)
+            val bw = page.copy(edits = old.copy(filter = FilterType.BLACK_WHITE))
+            assertTrue(bw === PageFiles.migrateFilter(dir, bw))
+        } finally { dir.deleteRecursively() }
     }
 }

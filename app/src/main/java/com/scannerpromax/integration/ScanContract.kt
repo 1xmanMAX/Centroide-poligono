@@ -9,7 +9,7 @@ package com.scannerpromax.integration
  *  - [EXTRA_MODE]      String: document | book | id | receipt | whiteboard | photo   (por defecto document)
  *  - [EXTRA_FORMAT]    String: pdf | jpeg (jpg) | png                               (por defecto pdf)
  *  - [EXTRA_MULTI_PAGE] Boolean: permitir varias páginas                             (por defecto true)
- *  - [EXTRA_FILTER]    String: auto | enhanced (texto resaltado) | bw | original      (por defecto el de Ajustes)
+ *  - [EXTRA_FILTER]    String: auto | enhanced (Color natural) | natural | bw | original      (por defecto el de Ajustes)
  *  - [EXTRA_OCR]       Boolean: reconocer texto → EXTRA_TEXT y PDF buscable          (por defecto false)
  *  - [EXTRA_TITLE]     String: nombre del archivo/documento (máx. [MAX_TITLE] caracteres)
  *  - [EXTRA_REVIEW]    Boolean: mostrar la pantalla de revisión antes de adjuntar     (por defecto false = directo)

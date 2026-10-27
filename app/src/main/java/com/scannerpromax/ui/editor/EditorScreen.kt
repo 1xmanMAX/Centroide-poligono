@@ -130,7 +130,6 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.semantics.contentDescription
 import kotlinx.coroutines.CancellationException
@@ -793,8 +792,8 @@ private fun FiltersPanel(session: EditorSession, onApplyAll: (() -> Unit)?) {
     // Los filtros antiguos de páginas guardadas se muestran como su equivalente visible.
     val selectedFilter = edits.filter.uiFilter
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-        // (cuatro filtros: caben en 360 dp; en pantallas más estrechas, desplazables)
-        Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // (tres filtros: Blanco y negro, Color natural, Color original)
+        Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
             for (f in FilterType.visible) {
                 val selected = selectedFilter == f
                 FilterThumb(
@@ -835,7 +834,7 @@ private fun FiltersPanel(session: EditorSession, onApplyAll: (() -> Unit)?) {
 internal fun FilterThumb(label: String, thumb: ImageBitmap?, selected: Boolean, onClick: () -> Unit, placeholder: @Composable () -> Unit = {}) {
     Column(
         Modifier
-            .width(80.dp)
+            .width(96.dp)
             .clip(RoundedCornerShape(12.dp))
             .selectable(selected = selected, role = Role.RadioButton, onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally,

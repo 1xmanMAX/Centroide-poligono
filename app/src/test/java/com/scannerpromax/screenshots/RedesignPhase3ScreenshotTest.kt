@@ -114,7 +114,7 @@ class RedesignPhase3ScreenshotTest {
     private val reviewPages = List(6) { i ->
         Page(
             id = "p$i", originalFile = "p$i.jpg", width = 2480, height = 3508,
-            edits = PageEdits(filter = if (i == 2) FilterType.BLACK_WHITE else FilterType.MAGIC),
+            edits = PageEdits(filter = if (i == 2) FilterType.BLACK_WHITE else FilterType.NATURAL),
             ocrText = "texto",
         )
     }
