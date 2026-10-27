@@ -79,6 +79,7 @@ internal object TableLines {
         val gap = Cv.odd(max(9, (2.0 * lhA).roundToInt()))
         val thr = max(8.0, 3.0 * noise)
         val cands = ArrayList<TableLinesMath.Cand>()
+        val nvB = ByteArray(nv.total().toInt()); nv.get(0, 0, nvB)
         val prm = TableLinesMath.Params(
             search = ceil(2.0 / s).toInt() + 2,
             paperExtra = max(4, (0.6 * lh).roundToInt()),
@@ -123,7 +124,26 @@ internal object TableLines {
                 val tr = TableLinesMath.track(at, across, nAlong, seedB, a0, a1, prm) ?: continue
                 // de la banda a coordenadas de la página
                 val centers = DoubleArray(tr.centers.size) { tr.centers[it] + c0 }
-                val t2 = TableLinesMath.Track(tr.a0, tr.a1, centers, tr.thick, tr.amp, tr.inkFrac, tr.maxGap, tr.dashed, tr.rms, tr.embedded, tr.touching, tr.maxRun, tr.irregular, tr.noDraw, tr.blockedFrac, tr.blockedRuns)
+                // objetos oscuros que CRUZAN la línea (barras de un gráfico, columnas sombreadas): oscuro a ambos lados
+                // en la imagen normalizada, a ~0.3 letras del centro
+                val dA = max(2.0, 0.3 * lhA + tr.thick * s)
+                fun crossing(k: Double) = BooleanArray(centers.size) { q ->
+                    val ia = ((tr.a0 + q + 0.5) * s - 0.5).roundToInt(); val ca = (centers[q] + 0.5) * s - 0.5
+                    fun dark(off: Double): Boolean {
+                        val j = (ca + off).roundToInt()
+                        val x = if (hor) ia else j; val y = if (hor) j else ia
+                        if (x < 0 || y < 0 || x >= aw || y >= ah) return false
+                        return (nvB[y * aw + x].toInt() and 0xFF) < pm - k * inkRef
+                    }
+                    dark(-dA) && dark(dA)
+                }
+                // oscuro (no se pinta encima) / algo oscuro (barras claras: cuentan para reconocer un gráfico)
+                val crossed = crossing(0.5)
+                val (cf, cr) = TableLinesMath.crossedRuns(crossing(0.3), max(3, (0.4 * lh).roundToInt()))
+                val nd = (tr.noDraw ?: BooleanArray(centers.size)).copyOf()
+                val dil = ceil(tr.thick).toInt() + 2
+                for (q in crossed.indices) if (crossed[q]) for (z in max(0, q - dil)..min(nd.size - 1, q + dil)) nd[z] = true
+                val t2 = TableLinesMath.Track(tr.a0, tr.a1, centers, tr.thick, tr.amp, tr.inkFrac, tr.maxGap, tr.dashed, tr.rms, tr.embedded, tr.touching, tr.maxRun, tr.irregular, nd, cf, cr)
                 cands.add(TableLinesMath.Cand(hor, tr.a0.toDouble(), tr.a1.toDouble(), t2.mean, t2))
             }
         }

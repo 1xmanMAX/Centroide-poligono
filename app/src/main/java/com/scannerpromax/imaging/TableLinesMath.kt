@@ -29,6 +29,8 @@ internal object TableLinesMath {
         val side2 = DoubleArray(n)
         /** Objeto oscuro grande sobre la línea (barra, relleno): ahí no se dibuja. */
         val blocked = BooleanArray(n)
+        /** Bloqueada por un objeto que CRUZA la línea (oscuro a ambos lados). */
+        val crossed = BooleanArray(n)
         fun valid(k: Int) = !center[k].isNaN()
     }
 
@@ -55,7 +57,7 @@ internal object TableLinesMath {
         for (k in 0 until p.n) {
             val i = a0 + k
             measureOne(at, across, nAlong, i, pred(i), search, paperExtra, win)?.let { r ->
-                if (r[5] > 0) { p.blocked[k] = true; return@let }
+                if (r[5] > 0) { p.blocked[k] = true; if (r[5] > 1.5) p.crossed[k] = true; return@let }
                 p.amp[k] = r[0]; p.center[k] = r[1]; p.width[k] = r[2]; p.side[k] = r[3]; p.side2[k] = r[4]
             }
         }
@@ -88,15 +90,16 @@ internal object TableLinesMath {
         var r1 = bq; while (r1 + 1 < n && !v[r1 + 1].isNaN() && paper - v[r1 + 1] >= half) r1++
         // la región a media altura no debe tocar el borde de la búsqueda (escalón de un relleno, foto)
         // región oscura que llena la ventana (barra de un gráfico, relleno, letra pegada): posición BLOQUEADA
-        if (r0 == 0 || r1 >= n - 1 || r0 < s0 - paperExtra / 2 || r1 > s1 + paperExtra / 2)
-            return doubleArrayOf(best, Double.NaN, 0.0, best, best, 1.0)
-        var sw = 0.0; var sj = 0.0
-        for (q in r0..r1) { val d = paper - v[q]; sw += d; sj += d * q }
-        val center = lo + sj / sw
-        // anchura equivalente: área (hasta 1/4 del pico) / pico
+        val lowT = r0 == 0 || r0 < s0 - paperExtra / 2; val highT = r1 >= n - 1 || r1 > s1 + paperExtra / 2
+        // (2 = el objeto cruza la línea: oscuro a ambos lados, como la barra de un gráfico)
+        if (lowT || highT) return doubleArrayOf(best, Double.NaN, 0.0, best, best, if (lowT && highT) 2.0 else 1.0)
+        // anchura equivalente: área (hasta 1/4 del pico) / pico; centro = centroide de esa misma región (el de la
+        // región a media altura se sesga hacia el píxel más cubierto)
         var e0 = r0; while (e0 - 1 >= 0 && !v[e0 - 1].isNaN() && paper - v[e0 - 1] >= best * 0.25) e0--
         var e1 = r1; while (e1 + 1 < n && !v[e1 + 1].isNaN() && paper - v[e1 + 1] >= best * 0.25) e1++
-        var area = 0.0; for (q in e0..e1) area += max(0.0, paper - v[q])
+        var area = 0.0; var sj = 0.0
+        for (q in e0..e1) { val d = max(0.0, paper - v[q]); area += d; sj += d * q }
+        val center = lo + sj / area
         // oscuridad de los lados (más allá de la línea)
         fun sideMean(qa: Int, qb: Int): Double {
             var s = 0.0; var m = 0
@@ -163,7 +166,7 @@ internal object TableLinesMath {
         val irregular: Boolean = true,
         /** Posiciones (a0..a1) donde no se dibuja. */
         val noDraw: BooleanArray? = null,
-        /** Fracción de posiciones bloqueadas por objetos oscuros grandes y número de tramos bloqueados. */
+        /** Fracción de posiciones cruzadas por objetos oscuros grandes y número de tramos cruzados. */
         val blockedFrac: Double = 0.0,
         val blockedRuns: Int = 0,
     ) {
@@ -304,12 +307,22 @@ internal object TableLinesMath {
         val gapAmp = if (gn > 0) gs / gn else 0.0
         val dashed = isRegularDash(dashes, gaps, thick, inkFrac, gapAmp, amp)
         // posiciones bloqueadas (ensanchadas el grosor + 2 px): la línea no se pinta encima de barras ni rellenos
-        var bl = 0; var blRuns = 0
-        for (k in 0 until n) if (prof.blocked[k]) { bl++; if (k == 0 || !prof.blocked[k - 1]) blRuns++ }
         val noDraw = BooleanArray(n)
         val dil = ceil(thick).toInt() + 2
         for (k in 0 until n) if (prof.blocked[k]) for (q in max(0, k - dil)..min(n - 1, k + dil)) noDraw[q] = true
-        return Track(lo, hi, centers, thick, amp, inkFrac, maxGap, dashed, rmsLocal, emb.toDouble() / max(1, cand), touch.toDouble() / max(1, cand), maxRun, irregular, noDraw, bl.toDouble() / n, blRuns)
+        return Track(lo, hi, centers, thick, amp, inkFrac, maxGap, dashed, rmsLocal, emb.toDouble() / max(1, cand), touch.toDouble() / max(1, cand), maxRun, irregular, noDraw)
+    }
+
+    /** (fracción, número) de tramos de [flags] de al menos [minRun] posiciones seguidas. */
+    fun crossedRuns(flags: BooleanArray, minRun: Int): Pair<Double, Int> {
+        var tot = 0; var runs = 0; var k = 0
+        while (k < flags.size) {
+            if (!flags[k]) { k++; continue }
+            var e = k; while (e < flags.size && flags[e]) e++
+            if (e - k >= minRun) { tot += e - k; runs++ }
+            k = e
+        }
+        return (if (flags.isEmpty()) 0.0 else tot.toDouble() / flags.size) to runs
     }
 
     private fun isInk(p: Profile, k: Int, thr: Double, poly: Poly, tol: Double): Boolean =
