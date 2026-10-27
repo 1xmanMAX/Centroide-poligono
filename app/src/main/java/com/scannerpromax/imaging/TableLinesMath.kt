@@ -443,7 +443,8 @@ internal object TableLinesMath {
      *  - es una regla LARGA (>= 30 % del lado) con apoyo alto, o
      *  - forma parte de una tabla: >= 2 paralelas solapadas (filas/columnas) o cruza >= 2 perpendiculares aceptables.
      * Las rayas discontinuas impresas a propósito no se tocan. Una línea de la que la salida no muestra casi nada sólo
-     * se redibuja si está dentro de la estructura de la tabla (cruza >= 2 líneas que sí se ven).
+     * se redibuja si es inequívoca (casi continua, contraste >= [FAINT_MIN] de la tinta) y está dentro de la estructura
+     * de una tabla (>= 2 paralelas o >= 2 perpendiculares); la transparencia del reverso es más pálida y no pasa.
      */
     /** Tinta a un lado (fracción del contraste de la línea) a partir de la cual una posición no cuenta como línea. */
     @JvmField var TOUCH_K = 0.4
@@ -452,7 +453,7 @@ internal object TableLinesMath {
     @JvmField var RMS_MAX = 0.7
     @JvmField var RMS_MAX_CONT = 1.2
     /** Contraste mínimo (fracción del de la tinta de la página) de una línea que la salida no muestra. */
-    @JvmField var FAINT_MIN = 0.08
+    @JvmField var FAINT_MIN = 0.12
 
     fun accept(c: List<Cand>, w: Int, h: Int, lh: Double, maxThick: Double, inkRef: Double = 0.0): BooleanArray {
         val n = c.size
@@ -507,7 +508,8 @@ internal object TableLinesMath {
                 visible[k] -> longRule || table
                 // la salida no la muestra: sólo dentro de la estructura de una tabla
                 strong[k] -> parS >= 2 || crS >= 2
-                else -> cr >= 2 && l.tr.inkFrac >= 0.5
+                // ni se ve ni es inequívoca (transparencia del reverso): no
+                else -> false
             }
         }
         return ok
