@@ -121,7 +121,7 @@ internal object TableLines {
                 val across = c1 - c0
                 val at: (Int, Int) -> Int = if (hor) { i, j -> bb[j * w + i].toInt() and 0xFF } else { i, j -> bb[i * across + j].toInt() and 0xFF }
                 val seedB = TableLinesMath.Poly(seed.c0 - c0, seed.c1, seed.c2, seed.mid, seed.scale)
-                val tr = TableLinesMath.track(at, across, nAlong, seedB, a0, a1, prm) ?: continue
+                for (tr in TableLinesMath.trackAll(at, across, nAlong, seedB, a0, a1, prm)) {
                 // de la banda a coordenadas de la página
                 val centers = DoubleArray(tr.centers.size) { tr.centers[it] + c0 }
                 // objetos oscuros que CRUZAN la línea (barras de un gráfico, columnas sombreadas): oscuro a ambos lados
@@ -145,6 +145,7 @@ internal object TableLines {
                 for (q in crossed.indices) if (crossed[q]) for (z in max(0, q - dil)..min(nd.size - 1, q + dil)) nd[z] = true
                 val t2 = TableLinesMath.Track(tr.a0, tr.a1, centers, tr.thick, tr.amp, tr.inkFrac, tr.maxGap, tr.dashed, tr.rms, tr.embedded, tr.touching, tr.maxRun, tr.irregular, nd, cf, cr)
                 cands.add(TableLinesMath.Cand(hor, tr.a0.toDouble(), tr.a1.toDouble(), t2.mean, t2))
+                }
             }
         }
         if (cands.isEmpty()) return@use 0
@@ -167,7 +168,7 @@ internal object TableLines {
         for ((idx, l) in kept.withIndex()) {
             log?.invoke("cand ${if (l.hor) "H" else "V"} a=%.0f..%.0f c=%.1f len=%.0f thick=%.2f amp=%.0f ink=%.2f gap=${l.tr.maxGap} dash=${l.tr.dashed} rms=%.2f emb=%.2f touch=%.2f run=${l.tr.maxRun} irr=${l.tr.irregular} blk=%.2f/${l.tr.blockedRuns} out=%.2f -> ${ok[idx]}".format(l.a0, l.a1, l.c, l.len, l.tr.thick, l.tr.amp, l.tr.inkFrac, l.tr.rms, l.tr.embedded, l.tr.touching, l.tr.blockedFrac, l.outCov))
             if (!ok[idx]) continue
-            val color = lineColor(colors[l], chn)
+            val color = lineColor(colors[l] ?: (if (chn >= 3) sourceColor(src, l, lh) else null), chn)
             val tOut = max(1.0, l.tr.thick * k).coerceAtMost(maxThick * k)
             withOutBand(out, l, k, write = true) { buf, bw, bh, cc, u0, u1, ctr, i0 ->
                 TableLinesMath.drawBand(buf, bw, bh, cc, l.hor, u0, u1, ctr, tOut, color) { u -> !l.tr.drawable((u + i0 + 0.5) / k - 0.5) }
@@ -182,6 +183,34 @@ internal object TableLines {
     }
 
     /** Color de la línea: el medido en la salida (núcleo), oscurecido si queda muy claro; por defecto gris oscuro. */
+    /**
+     * Color real de la línea en la foto (para una línea que la salida en color no muestra): mediana, a lo largo de la
+     * línea, de píxel / papel vecino por canal (el papel, a media letra a cada lado: el más claro de los dos).
+     */
+    private fun sourceColor(src: Mat, l: TableLinesMath.Cand, lh: Double): IntArray? {
+        val w = src.cols(); val h = src.rows()
+        val off = l.tr.thick / 2 + 0.5 * lh
+        val rs = ArrayList<DoubleArray>()
+        val px = ByteArray(3); val pa = ByteArray(3); val pb = ByteArray(3)
+        var i = l.tr.a0
+        while (i <= l.tr.a1) {
+            val c = l.tr.centerAt(i.toDouble())
+            fun at(acr: Double, buf: ByteArray): Boolean {
+                val j = acr.roundToInt(); val x = if (l.hor) i else j; val y = if (l.hor) j else i
+                if (x < 0 || y < 0 || x >= w || y >= h) return false
+                src.get(y, x, buf); return true
+            }
+            if (l.tr.drawable(i.toDouble()) && at(c, px) && at(c - off, pa) && at(c + off, pb)) {
+                fun lum(b: ByteArray) = (b[0].toInt() and 0xFF) + (b[1].toInt() and 0xFF) + (b[2].toInt() and 0xFF)
+                val p = if (lum(pa) >= lum(pb)) pa else pb
+                rs.add(DoubleArray(3) { q -> (px[q].toInt() and 0xFF) / max(1.0, (p[q].toInt() and 0xFF).toDouble()) })
+            }
+            i += 4
+        }
+        if (rs.size < 8) return null
+        return IntArray(3) { q -> val v = rs.map { it[q] }.sorted(); (255 * v[v.size / 2]).roundToInt().coerceIn(0, 255) }
+    }
+
     private fun lineColor(measured: IntArray?, ch: Int): IntArray {
         val c = measured ?: IntArray(ch) { 70 }
         val lum = if (ch >= 3) (c[0] * 299 + c[1] * 587 + c[2] * 114) / 1000.0 else c[0].toDouble()

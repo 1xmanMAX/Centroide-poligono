@@ -187,10 +187,14 @@ internal object TableLinesMath {
      * extremos mientras siga habiendo tinta alineada (huecos <= [Params.gapMax]) y vuelve a medir con búsqueda
      * estrecha alrededor del ajuste. null si no hay suficiente apoyo.
      */
-    fun track(at: (Int, Int) -> Int, across: Int, nAlong: Int, seed: Poly, s0: Int, s1: Int, prm: Params): Track? {
+    fun track(at: (Int, Int) -> Int, across: Int, nAlong: Int, seed: Poly, s0: Int, s1: Int, prm: Params): Track? =
+        trackAll(at, across, nAlong, seed, s0, s1, prm).maxByOrNull { it.inkFrac * it.length }
+
+    /** Como [track], pero devuelve cada tramo separado por huecos grandes (p. ej. dos tablas alineadas) por separado. */
+    fun trackAll(at: (Int, Int) -> Int, across: Int, nAlong: Int, seed: Poly, s0: Int, s1: Int, prm: Params): List<Track> {
         val b0 = s0.coerceIn(0, nAlong - 1); val b1 = s1.coerceIn(b0, nAlong - 1)
         var prof = measure(at, across, nAlong, b0, b1, { seed.at(it.toDouble()) }, prm.search, prm.paperExtra)
-        var poly = robustFit(prof, prm, seed, 2.0 * prm.search) ?: return null
+        var poly = robustFit(prof, prm, seed, 2.0 * prm.search) ?: return emptyList()
         // prolongación de los extremos
         val one = DoubleArray(2 * (prm.search + prm.paperExtra) + 3)
         val thr0 = threshold(prof, prm)
@@ -199,7 +203,7 @@ internal object TableLinesMath {
             // extremos reales dentro del tramo sembrado
             var f = -1; var l = -1
             for (k in 0 until prof.n) if (isInk(prof, k, thr0, poly, prm.search.toDouble())) { if (f < 0) f = k; l = k }
-            if (f < 0) return null
+            if (f < 0) return emptyList()
             lo = b0 + f; hi = b0 + l
         }
         val tight = max(2, ceil(prm.maxThick / 2).toInt() + 1)
@@ -231,7 +235,24 @@ internal object TableLinesMath {
                 else -> pf.at(i.toDouble())
             }
         }
-        prof = measure(at, across, nAlong, lo, hi, pred, tight, prm.paperExtra)
+        return finish(at, across, nAlong, lo, hi, pred, tight, prm, true)
+    }
+
+    private fun finish(at: (Int, Int) -> Int, across: Int, nAlong: Int, lo: Int, hi: Int, pred: (Int) -> Double, tight: Int, prm: Params, split: Boolean): List<Track> {
+        if (!split) return listOfNotNull(finishOne(at, across, nAlong, lo, hi, pred, tight, prm, null))
+        val pieces = ArrayList<IntArray>()
+        val t = finishOne(at, across, nAlong, lo, hi, pred, tight, prm, pieces)
+        if (pieces.isEmpty()) return listOfNotNull(t)
+        return pieces.mapNotNull { finishOne(at, across, nAlong, lo + it[0], lo + it[1], pred, tight, prm, null) }
+    }
+
+    /**
+     * Medida final de la línea entre [lo] y [hi] alrededor de [pred]. Con [split], si un hueco SIN tinta supera
+     * [Params.gapMax] (dos tablas alineadas una sobre otra, un palo de letra alineado más allá del borde), se queda el
+     * tramo con más tinta y se vuelve a medir: una línea no salta de una tabla a otra.
+     */
+    private fun finishOne(at: (Int, Int) -> Int, across: Int, nAlong: Int, lo: Int, hi: Int, pred: (Int) -> Double, tight: Int, prm: Params, pieces: MutableList<IntArray>?): Track? {
+        val prof = measure(at, across, nAlong, lo, hi, pred, tight, prm.paperExtra)
         val thr = threshold(prof, prm)
         val n = prof.n
         val ink = BooleanArray(n)
@@ -252,6 +273,21 @@ internal object TableLinesMath {
             }
         }
         if (m < 8) return null
+        if (pieces != null) {
+            // tramos de tinta separados por huecos > gapMax (cada uno se mide aparte); también recorta los extremos
+            // sin tinta que la prolongación pudo dejar
+            var a = -1; var last = -1; var cnt = 0
+            val ps = ArrayList<IntArray>()
+            for (k in 0..n) {
+                val isInk = k < n && ink[k]
+                if (k == n || (isInk && last >= 0 && k - last > prm.gapMax)) {
+                    if (a >= 0 && cnt >= 8) ps.add(intArrayOf(a, last))
+                    a = -1; cnt = 0
+                }
+                if (isInk) { if (a < 0) a = k; last = k; cnt++ }
+            }
+            if (ps.size > 1 || (ps.size == 1 && (ps[0][0] > 0 || ps[0][1] < n - 1))) { pieces.addAll(ps); return null }
+        }
         val mid = (lo + hi) / 2.0; val sc = max(1.0, (hi - lo) / 2.0)
         val deg = if (hi - lo >= nAlong * 0.2) 2 else 1
         var g = fit(xs, ys, ws, m, deg, mid, sc) ?: return null
