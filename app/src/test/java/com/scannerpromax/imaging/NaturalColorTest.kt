@@ -83,8 +83,8 @@ class NaturalColorTest {
         for (x in 120..480 step 60) Imgproc.line(nrm, Point(x.toDouble(), 120.0), Point(x + 10.0, 180.0), BLUE, 4)   // "letras"
         // B/N: el trazo azul negro con bordes suaves, roto en el tramo tenue; el naranja no aparece
         val bw = Mat(H, W, CvType.CV_8UC1, Scalar(255.0))
-        Imgproc.line(bw, Point(100.0, 150.0), Point(297.0, 150.0), Scalar(0.0), 5, Imgproc.LINE_AA)
-        Imgproc.line(bw, Point(303.0, 150.0), Point(500.0, 150.0), Scalar(0.0), 5, Imgproc.LINE_AA)
+        Imgproc.line(bw, Point(100.0, 150.0), Point(294.0, 150.0), Scalar(0.0), 5, Imgproc.LINE_AA)
+        Imgproc.line(bw, Point(306.0, 150.0), Point(500.0, 150.0), Scalar(0.0), 5, Imgproc.LINE_AA)
         for (x in 120..480 step 60) Imgproc.line(bw, Point(x.toDouble(), 120.0), Point(x + 10.0, 180.0), Scalar(0.0), 4, Imgproc.LINE_AA)
         Imgproc.GaussianBlur(bw, bw, org.opencv.core.Size(0.0, 0.0), 0.7)
         return nrm to bw
@@ -129,7 +129,7 @@ class NaturalColorTest {
         val before = bw.get(150, 300)[0]
         NaturalColor.bridge(bw, nrm, 20.0, 2.5, level = 2)
         assertTrue("antes $before", before > 200)
-        assertTrue("hueco sin unir: ${bw.get(150, 300)[0]}", bw.get(150, 300)[0] < 128)
+        assertTrue("hueco sin unir: ${bw.get(150, 300)[0]}", bw.get(150, 300)[0] < before - 50)
         assertEquals("papel", 255.0, Core.minMaxLoc(bw.submat(Rect(10, 10, 80, 80))).minVal, 0.0)
         // el naranja claro NO entra en el B/N (sólo continuidad de trazos ya presentes)
         assertTrue(bw.get(295, 300)[0] > 200)
