@@ -231,10 +231,19 @@ object GridDewarp {
             borderInfo = r.second
             if (r.first != null) fit = Fit(r.first, "aplicado", fit.lines)
         }
+        // Márgenes tras la malla: la hoja curvada ya enderezada puede conservar una cizalla/trapecio (los renglones salen
+        // rectos pero el margen inclinado): se mide sobre la salida reducida y la corrección se COMPONE en el mapa del
+        // modelo (sigue habiendo un único remuestreo y el mismo lienzo: nunca se amplía)
+        var postInfo = ""
+        val fm = fit.model
+        if (fm != null && textRows && MarginAlign.enabled && MarginAlign.afterMesh) {
+            val r = runCatching { alignAfterModel(sm, fm, longSide, bag) }.getOrNull()
+            if (r != null) { postInfo = " | tras la malla: ${r.second}"; r.first?.let { fit = Fit(it, fit.reason, fit.lines, fit.after) } }
+        }
         debug?.msSolve = (System.nanoTime() - t1) / 1e6
         lastInfo = "${fit.reason} ${fit.model?.info ?: ""} | $borderInfo"
         if (DewarpMath.trace) println("  estimación ${w}x$h: ${fit.reason} ${fit.model?.info ?: ""} ángulo=$skew márgenes=${align?.info}")
-        lastAlign = (align?.info ?: "") + tiltInfo
+        lastAlign = (align?.info ?: "") + tiltInfo + postInfo
         Estimate(fit.model, skew, align)
     }
 
@@ -253,7 +262,8 @@ object GridDewarp {
         if (!MarginAlign.meshGuide || p == null) return null
         val l = align?.left ?: return null
         val n = p.size / 2
-        if (n < 6) return null
+        // Sólo columnas muy claras: una guía falsa en la malla tuerce el texto
+        if (n < 10 || l.support < 0.75) return null
         val ys = FloatArray(n) { p[2 * it + 1] }; val xs = FloatArray(n) { p[2 * it] }
         val tol = (0.4 * tl.med).toFloat().coerceAtLeast(1.5f)
         for (g in tl.guides) {
@@ -266,6 +276,29 @@ object GridDewarp {
         val sm = DewarpMath.robustSmooth(DewarpMath.Chain(ys, xs), win = 2.6f * pitch, outTol = tol, minInlier = 0.7f) ?: return null
         if (sm.size < 6) return null
         return DewarpMath.LineObs(false, sm.c, sm.t, weight = 1.0, noise = l.rms, guide = true)
+    }
+
+    /**
+     * [MarginAlign] sobre la imagen de estimación [sm] ya enderezada por [model]: modelo con la corrección compuesta en su
+     * mapa (o null) y el motivo. Sólo si la corrección mueve poco las esquinas (≤ 4 % del lado): el lienzo no se amplía.
+     */
+    private fun alignAfterModel(sm: Mat, model: Model, longSide: Double, bag: MatBag): Pair<Model?, String>? {
+        val out = bag.add(apply(sm, model, Imgproc.INTER_LINEAR))
+        val ow = out.cols(); val oh = out.rows()
+        val ink = inkMap(out, bag)
+        val bin = bag.mat()
+        Imgproc.threshold(ink, bin, inkThreshold(ink), 255.0, Imgproc.THRESH_BINARY)
+        val tl = textLayout(bin, max(ow, oh).toDouble(), bag) ?: return null
+        if (tl.segs.isEmpty()) return null
+        val al = MarginAlign.estimate(tl.segs, tl.rowSlopes, tl.rowLens, tl.med, tl.pitch, ow.toDouble(), oh.toDouble()) ?: return null
+        val k = al.m ?: return null to al.info
+        if (!MarginAlign.small(k, ow.toDouble(), oh.toDouble(), 0.04)) return null to "${al.info} (esquinas > 4 %)"
+        val map = MarginAlign.composeMap(model.map, model.gw, model.gh, ow.toDouble(), oh.toDouble(), k) ?: return null to al.info
+        val m2 = Model(
+            model.gw, model.gh, map, model.confidence, model.info + " márgenes", model.x0, model.y0, model.x1, model.y1,
+            model.paper, model.paperW, model.paperH, model.beyond, model.sheetSides,
+        )
+        return m2 to al.info
     }
 
     /** Pliegues por placa delgada reponderada ([DewarpMath.foldWeights]); desactivable en el banco de pruebas. */

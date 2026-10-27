@@ -36,6 +36,9 @@ internal object MarginAlign {
     /** Activable en el banco de pruebas. */
     @Volatile internal var enabled = true
 
+    /** Corrección de márgenes también sobre la hoja curvada ya enderezada por la malla (banco de pruebas). */
+    @Volatile internal var afterMesh = true
+
     /** La columna principal entra como guía vertical en el ajuste de malla (banco de pruebas). */
     @Volatile internal var meshGuide = true
 
@@ -88,7 +91,7 @@ internal object MarginAlign {
         segs: List<TextGuides.Seg>, rowSlopes: DoubleArray, rowLens: DoubleArray,
         med: Double, pitch: Double, w: Double, h: Double,
     ): Result? {
-        if (!enabled || rowSlopes.size < 8 || segs.size < 8) return null
+        if (!enabled || rowSlopes.size < 10 || segs.size < 10) return null
         val ang = DoubleArray(rowSlopes.size) { Math.toDegrees(atan(rowSlopes[it])) }
         val angle = TextGuides.weightedMedian(ang, rowLens)
         val mad = TextGuides.weightedMedian(DoubleArray(ang.size) { abs(ang[it] - angle) }, rowLens)
@@ -114,8 +117,8 @@ internal object MarginAlign {
         val textTop = sy.minOrNull() ?: 0.0; val textBot = sy.maxOrNull() ?: 0.0
         val textH = max(1.0, textBot - textTop)
         val tol = max(0.4 * med, 1.5)
-        val maxRms = 0.12 * med + 0.6
-        val minN = max(6, (0.3 * nRows).toInt())
+        val maxRms = 0.16 * med + 0.6
+        val minN = max(8, (0.35 * nRows).toInt())
         val minSpan = max(4 * pitch, 0.25 * textH)
         val log = StringBuilder("renglones=$nRows ángulo=%.2f".format(angle))
 
@@ -319,6 +322,56 @@ internal object MarginAlign {
             if (m[6] * x + m[7] * y + m[8] <= 0.2) return false
         }
         return true
+    }
+
+    /** La corrección [m] (centrada) mueve cada esquina de un lienzo [w] x [h] como mucho [frac] de su lado. */
+    fun small(m: DoubleArray, w: Double, h: Double, frac: Double): Boolean {
+        val o = DoubleArray(2)
+        for ((x, y) in listOf(0.0 to 0.0, w to 0.0, w to h, 0.0 to h)) {
+            apply(m, x, y, o)
+            if (abs(o[0] - x) > frac * w || abs(o[1] - y) > frac * h) return false
+        }
+        return true
+    }
+
+    /**
+     * Compone la corrección [k] (px de una salida de [ow] x [oh]) DESPUÉS de un mapa inverso normalizado [map] (rejilla
+     * [gw] x [gh] sobre esa salida, valores = posición fuente normalizada; ver [GridDewarp.Model]): nuevo mapa(P) =
+     * mapa(k⁻¹·P), con extrapolación lineal fuera de la rejilla. null si k no es invertible.
+     */
+    fun composeMap(map: FloatArray, gw: Int, gh: Int, ow: Double, oh: Double, k: DoubleArray): FloatArray? {
+        val ki = inv3(k) ?: return null
+        val out = FloatArray(map.size)
+        val o = DoubleArray(2)
+        fun at(i: Int, j: Int, c: Int) = map[2 * (j * gw + i) + c].toDouble()
+        for (b in 0 until gh) for (a in 0 until gw) {
+            val px = a * (ow - 1) / (gw - 1); val py = b * (oh - 1) / (gh - 1)
+            apply(ki, px, py, o)
+            val gx = o[0] * (gw - 1) / (ow - 1); val gy = o[1] * (gh - 1) / (oh - 1)
+            // Celda (la última si cae fuera: la interpolación bilineal extrapola linealmente)
+            val i0 = kotlin.math.floor(gx).toInt().coerceIn(0, gw - 2); val j0 = kotlin.math.floor(gy).toInt().coerceIn(0, gh - 2)
+            val fx = gx - i0; val fy = gy - j0
+            for (c in 0..1) {
+                val v = at(i0, j0, c) * (1 - fx) * (1 - fy) + at(i0 + 1, j0, c) * fx * (1 - fy) +
+                    at(i0, j0 + 1, c) * (1 - fx) * fy + at(i0 + 1, j0 + 1, c) * fx * fy
+                out[2 * (b * gw + a) + c] = v.toFloat()
+            }
+        }
+        return out
+    }
+
+    /** Inversa 3x3 (null si es singular). */
+    fun inv3(m: DoubleArray): DoubleArray? {
+        val a = m[0]; val b = m[1]; val c = m[2]; val d = m[3]; val e = m[4]; val f = m[5]; val g = m[6]; val h = m[7]; val i = m[8]
+        val c0 = e * i - f * h; val c1 = -(d * i - f * g); val c2 = d * h - e * g
+        val det = a * c0 + b * c1 + c * c2
+        if (abs(det) < 1e-12) return null
+        val k = 1.0 / det
+        return doubleArrayOf(
+            c0 * k, -(b * i - c * h) * k, (b * f - c * e) * k,
+            c1 * k, (a * i - c * g) * k, -(a * f - c * d) * k,
+            c2 * k, -(a * h - b * g) * k, (a * e - b * d) * k,
+        )
     }
 
     /** Matriz para una imagen de [w] x [h] (mismo encuadre que la de estimación) y su lienzo. */
