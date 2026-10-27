@@ -27,6 +27,8 @@ internal object TableLinesMath {
         val side = DoubleArray(n)
         /** Oscuridad del lado MÁS oscuro: un renglón de texto tiene las letras pegadas a un lado de su "línea". */
         val side2 = DoubleArray(n)
+        /** Objeto oscuro grande sobre la línea (barra, relleno): ahí no se dibuja. */
+        val blocked = BooleanArray(n)
         fun valid(k: Int) = !center[k].isNaN()
     }
 
@@ -53,6 +55,7 @@ internal object TableLinesMath {
         for (k in 0 until p.n) {
             val i = a0 + k
             measureOne(at, across, nAlong, i, pred(i), search, paperExtra, win)?.let { r ->
+                if (r[5] > 0) { p.blocked[k] = true; return@let }
                 p.amp[k] = r[0]; p.center[k] = r[1]; p.width[k] = r[2]; p.side[k] = r[3]; p.side2[k] = r[4]
             }
         }
@@ -84,8 +87,9 @@ internal object TableLinesMath {
         var r0 = bq; while (r0 - 1 >= 0 && !v[r0 - 1].isNaN() && paper - v[r0 - 1] >= half) r0--
         var r1 = bq; while (r1 + 1 < n && !v[r1 + 1].isNaN() && paper - v[r1 + 1] >= half) r1++
         // la región a media altura no debe tocar el borde de la búsqueda (escalón de un relleno, foto)
-        if (r0 == 0 || r1 >= n - 1) return null
-        if (r0 < s0 - paperExtra / 2 || r1 > s1 + paperExtra / 2) return null
+        // región oscura que llena la ventana (barra de un gráfico, relleno, letra pegada): posición BLOQUEADA
+        if (r0 == 0 || r1 >= n - 1 || r0 < s0 - paperExtra / 2 || r1 > s1 + paperExtra / 2)
+            return doubleArrayOf(best, Double.NaN, 0.0, best, best, 1.0)
         var sw = 0.0; var sj = 0.0
         for (q in r0..r1) { val d = paper - v[q]; sw += d; sj += d * q }
         val center = lo + sj / sw
@@ -102,7 +106,7 @@ internal object TableLinesMath {
         val gap = 2
         val above = sideMean(e0 - gap - paperExtra, e0 - gap)
         val below = sideMean(e1 + gap, e1 + gap + paperExtra)
-        return doubleArrayOf(best, center, area / best, min(above, below), max(above, below))
+        return doubleArrayOf(best, center, area / best, min(above, below), max(above, below), 0.0)
     }
 
     /** Ajuste por mínimos cuadrados ponderados de grado [deg] (0..2). */
@@ -157,7 +161,15 @@ internal object TableLinesMath {
         val maxRun: Int = 0,
         /** Trazos y huecos de longitudes irregulares (raya continua rota por la cámara, no puntos guía ni texto alineado). */
         val irregular: Boolean = true,
+        /** Posiciones (a0..a1) donde no se dibuja. */
+        val noDraw: BooleanArray? = null,
+        /** Fracción de posiciones bloqueadas por objetos oscuros grandes y número de tramos bloqueados. */
+        val blockedFrac: Double = 0.0,
+        val blockedRuns: Int = 0,
     ) {
+        /** Cruzada por objetos oscuros grandes (barras de un gráfico, columnas sombreadas). */
+        val chartLike get() = blockedRuns >= 2 && blockedFrac >= 0.06
+        fun drawable(i: Double): Boolean { val nd = noDraw ?: return true; val k = (i - a0).roundToInt(); return k !in nd.indices || !nd[k] }
         val length get() = a1 - a0 + 1
         fun centerAt(i: Double): Double {
             val k = (i - a0).coerceIn(0.0, (centers.size - 1).toDouble())
@@ -228,7 +240,7 @@ internal object TableLinesMath {
             val i = lo + k
             if (prof.amp[k] >= thr && abs(prof.center[k] - pred(i)) <= tight && prof.width[k] <= prm.maxThick * 1.5) {
                 cand++
-                if (prof.side[k] >= prof.amp[k] * 0.5) emb++
+                if (prof.side[k] >= prof.amp[k] * 0.5) { emb++; prof.blocked[k] = true }
                 // tinta pegada a un lado (letras): esa posición no cuenta como línea (renglones, bordes de columnas
                 // de texto alineado, tachados)
                 if (prof.side2[k] >= prof.amp[k] * TOUCH_K) { touch++; continue }
@@ -291,7 +303,13 @@ internal object TableLinesMath {
         for (k in 0 until n) if (!ink[k]) { gs += if (prof.valid(k)) prof.amp[k] else 0.0; gn++ }
         val gapAmp = if (gn > 0) gs / gn else 0.0
         val dashed = isRegularDash(dashes, gaps, thick, inkFrac, gapAmp, amp)
-        return Track(lo, hi, centers, thick, amp, inkFrac, maxGap, dashed, rmsLocal, emb.toDouble() / cand, touch.toDouble() / cand, maxRun, irregular)
+        // posiciones bloqueadas (ensanchadas el grosor + 2 px): la línea no se pinta encima de barras ni rellenos
+        var bl = 0; var blRuns = 0
+        for (k in 0 until n) if (prof.blocked[k]) { bl++; if (k == 0 || !prof.blocked[k - 1]) blRuns++ }
+        val noDraw = BooleanArray(n)
+        val dil = ceil(thick).toInt() + 2
+        for (k in 0 until n) if (prof.blocked[k]) for (q in max(0, k - dil)..min(n - 1, k + dil)) noDraw[q] = true
+        return Track(lo, hi, centers, thick, amp, inkFrac, maxGap, dashed, rmsLocal, emb.toDouble() / max(1, cand), touch.toDouble() / max(1, cand), maxRun, irregular, noDraw, bl.toDouble() / n, blRuns)
     }
 
     private fun isInk(p: Profile, k: Int, thr: Double, poly: Poly, tol: Double): Boolean =
@@ -424,14 +442,19 @@ internal object TableLinesMath {
             val l = c[k]
             val side = if (l.hor) w else h
             var par = 0; var cr = 0
-            var parS = 0; var crS = 0
+            var parS = 0; var crS = 0; var crLong = 0; var parChart = 0
             for (q in 0 until n) if (q != k) {
-                if (visible[q]) { if (parallel(l, c[q])) par++; if (crosses(l, c[q])) cr++ }
+                if (visible[q]) { if (parallel(l, c[q])) par++; if (crosses(l, c[q])) { cr++; if (c[q].len >= 8 * lh) crLong++ } }
+                if (c[q].tr.chartLike && c[q].hor == l.hor && abs(c[q].c - l.c) <= 15 * lh &&
+                    min(c[q].a1, l.a1) - max(c[q].a0, l.a0) >= 0.3 * min(c[q].len, l.len)) parChart++
                 if (support[q]) { if (parallel(l, c[q])) parS++; if (crosses(l, c[q])) crS++ }
             }
             val longRule = l.len >= 0.3 * side && l.tr.inkFrac >= 0.6
             val table = par >= 2 || cr >= 2
             ok[k] = when {
+                // rejilla de un gráfico (barras que la cruzan y ninguna línea fina perpendicular): no se toca. Una
+                // tabla con columnas sombreadas sí tiene sus verticales finas
+                (l.tr.chartLike || parChart >= 2) && crLong < 2 -> false
                 visible[k] -> longRule || table
                 // la salida no la muestra: sólo dentro de la estructura de una tabla
                 strong[k] -> parS >= 2 || crS >= 2
@@ -449,13 +472,13 @@ internal object TableLinesMath {
      * posición u a lo largo (px de la banda), para u en [u0, u1]. [thick] = grosor (px de salida). [color] por canal.
      * Anti-aliasing por cobertura; sólo oscurece (el texto que cruza queda encima).
      */
-    fun drawBand(buf: ByteArray, bw: Int, bh: Int, ch: Int, hor: Boolean, u0: Double, u1: Double, center: (Double) -> Double, thick: Double, color: IntArray) {
+    fun drawBand(buf: ByteArray, bw: Int, bh: Int, ch: Int, hor: Boolean, u0: Double, u1: Double, center: (Double) -> Double, thick: Double, color: IntArray, skip: ((Int) -> Boolean)? = null) {
         val nAlong = if (hor) bw else bh; val nAcross = if (hor) bh else bw
         val half = thick / 2
         val ia = max(0, floor(u0 - 0.5).toInt()); val ib = min(nAlong - 1, ceil(u1 + 0.5).toInt())
         for (u in ia..ib) {
             val endCov = (min(u + 0.5, u1 + 0.5) - max(u - 0.5, u0 - 0.5)).coerceIn(0.0, 1.0)
-            if (endCov <= 0) continue
+            if (endCov <= 0 || skip?.invoke(u) == true) continue
             val cy = center(u.toDouble().coerceIn(u0, u1))
             // dentro de un relleno (los dos lados ya oscuros en la salida) no se dibuja
             if (sideDark(buf, bw, ch, hor, u, cy - half - 3, nAcross) && sideDark(buf, bw, ch, hor, u, cy + half + 3, nAcross)) continue

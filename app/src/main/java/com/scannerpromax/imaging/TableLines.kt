@@ -123,7 +123,7 @@ internal object TableLines {
                 val tr = TableLinesMath.track(at, across, nAlong, seedB, a0, a1, prm) ?: continue
                 // de la banda a coordenadas de la página
                 val centers = DoubleArray(tr.centers.size) { tr.centers[it] + c0 }
-                val t2 = TableLinesMath.Track(tr.a0, tr.a1, centers, tr.thick, tr.amp, tr.inkFrac, tr.maxGap, tr.dashed, tr.rms, tr.embedded, tr.touching, tr.maxRun, tr.irregular)
+                val t2 = TableLinesMath.Track(tr.a0, tr.a1, centers, tr.thick, tr.amp, tr.inkFrac, tr.maxGap, tr.dashed, tr.rms, tr.embedded, tr.touching, tr.maxRun, tr.irregular, tr.noDraw, tr.blockedFrac, tr.blockedRuns)
                 cands.add(TableLinesMath.Cand(hor, tr.a0.toDouble(), tr.a1.toDouble(), t2.mean, t2))
             }
         }
@@ -145,12 +145,12 @@ internal object TableLines {
         val drawn = ArrayList<DoubleArray>()
         val chn = out.channels()
         for ((idx, l) in kept.withIndex()) {
-            log?.invoke("cand ${if (l.hor) "H" else "V"} a=%.0f..%.0f c=%.1f len=%.0f thick=%.2f amp=%.0f ink=%.2f gap=${l.tr.maxGap} dash=${l.tr.dashed} rms=%.2f emb=%.2f touch=%.2f run=${l.tr.maxRun} irr=${l.tr.irregular} out=%.2f -> ${ok[idx]}".format(l.a0, l.a1, l.c, l.len, l.tr.thick, l.tr.amp, l.tr.inkFrac, l.tr.rms, l.tr.embedded, l.tr.touching, l.outCov))
+            log?.invoke("cand ${if (l.hor) "H" else "V"} a=%.0f..%.0f c=%.1f len=%.0f thick=%.2f amp=%.0f ink=%.2f gap=${l.tr.maxGap} dash=${l.tr.dashed} rms=%.2f emb=%.2f touch=%.2f run=${l.tr.maxRun} irr=${l.tr.irregular} blk=%.2f/${l.tr.blockedRuns} out=%.2f -> ${ok[idx]}".format(l.a0, l.a1, l.c, l.len, l.tr.thick, l.tr.amp, l.tr.inkFrac, l.tr.rms, l.tr.embedded, l.tr.touching, l.tr.blockedFrac, l.outCov))
             if (!ok[idx]) continue
             val color = lineColor(colors[l], chn)
             val tOut = max(1.0, l.tr.thick * k).coerceAtMost(maxThick * k)
-            withOutBand(out, l, k, write = true) { buf, bw, bh, cc, u0, u1, ctr, _ ->
-                TableLinesMath.drawBand(buf, bw, bh, cc, l.hor, u0, u1, ctr, tOut, color)
+            withOutBand(out, l, k, write = true) { buf, bw, bh, cc, u0, u1, ctr, i0 ->
+                TableLinesMath.drawBand(buf, bw, bh, cc, l.hor, u0, u1, ctr, tOut, color) { u -> !l.tr.drawable((u + i0 + 0.5) / k - 0.5) }
             }
             val ca = (l.tr.centerAt(l.a0) + 0.5) * k - 0.5; val cb = (l.tr.centerAt(l.a1) + 0.5) * k - 0.5
             val pa = (l.a0 + 0.5) * k - 0.5; val pb = (l.a1 + 0.5) * k - 0.5
@@ -193,7 +193,7 @@ internal object TableLines {
             val buf = ByteArray(r.width * r.height * chn)
             sub.get(0, 0, buf)
             val ctr: (Double) -> Double = { u -> (l.tr.centerAt((u + i0 + 0.5) / k - 0.5) + 0.5) * k - 0.5 - j0 }
-            val res = f(buf, r.width, r.height, chn, u0 - i0, u1 - i0, ctr, j0)
+            val res = f(buf, r.width, r.height, chn, u0 - i0, u1 - i0, ctr, i0)
             if (write) sub.put(0, 0, buf)
             return res
         } finally { sub.release() }
