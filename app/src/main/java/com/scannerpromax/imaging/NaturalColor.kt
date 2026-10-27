@@ -220,12 +220,19 @@ internal object NaturalColor {
     const val NEUTRAL_LO = 4.0
     const val NEUTRAL_HI = 11.0
     const val MAX_BLACK = 70.0
+    /** Luz local ([localLight]): celdas en el lado largo, dominante mínima de la luz (Δab del papel original) y k máximo. */
+    const val LWB_CELLS = 24
+    const val LWB_T0 = 5.0
+    const val LWB_KMAX = 2.5
+    const val LWB_MIN_CELLS = 8
     /** Tinta neutra más clara que la típica (L* de la mediana + LO..HI): conserva su gris (rampa). */
     @JvmField var NEUTRAL_KEEP_LO = 15.0
     @JvmField var NEUTRAL_KEEP_HI = 30.0
     /** Relleno liso: ΔE mínimo frente al papel blanco y desviación típica máxima de L* (5x5) ([detectFills]). */
     const val FILL_DE = 7.0
     const val FILL_SD = 4.0
+    /** Relleno que es resto de una sombra: salto de color en la foto original >= K veces el de la normalizada. */
+    const val SHADOW_FILL_K = 2.0
     /** Rampa relativa al máximo local del trazo ([relRamp]). */
     /** Componente sin tinta en el B/N: su croma u oscuridad media debe ser >= VIVID_K veces el umbral. */
     const val VIVID_K = 1.6
@@ -283,10 +290,14 @@ internal object NaturalColor {
         /** L* (0..100) de la tinta típica del B/N (mediana), o 100 si no hay: la tinta neutra mucho más clara que ella
          * (transparencia del reverso, manchas) conserva su gris en vez de pasar a negro. */
         val inkL: Double = 100.0,
+        /** Luz local ([localLight]): desplazamiento (a, b) de Lab a restar de la tinta (32FC2) en una rejilla de celdas de
+         * [lwCell] px de la escala de análisis, o null. */
+        val lw: Mat? = null,
+        val lwCell: Double = 1.0,
     ) {
         /** Ganancia de la luminancia (balance de blancos aplicado a la oscuridad sin copia balanceada). */
         val lumGain: Double get() = 0.299 * gain[0] + 0.587 * gain[1] + 0.114 * gain[2]
-        fun release() { support.release(); figures.release(); fills?.release(); fillCol?.release(); foreign?.release(); foreignSoft?.release(); photos?.release() }
+        fun release() { support.release(); figures.release(); fills?.release(); fillCol?.release(); foreign?.release(); foreignSoft?.release(); photos?.release(); lw?.release() }
     }
 
     /** Compone "Color natural" (8UC3 nuevo). */
@@ -413,7 +424,40 @@ internal object NaturalColor {
             Core.multiply(er, Scalar(gain[0], gain[1], gain[2]), er)
         }
         NcProf.mark("g.erode")
-        val cm = bag.mat(); val cEr = chromaOf(er, bag)
+        val cEr0 = chromaOf(er, bag)
+        val lhS = max(2.0, inp.letterHeight * s)
+        // Fondo ajeno (madera, mesa, carcasa, cantos): ni tinta, ni color, ni figuras, ni rellenos
+        val softF = arrayOfNulls<Mat>(1)
+        // (propio: madera/mesa por color + cantos; se quita en la composición. El fondo ajeno del render impreso
+        // -[Inputs.exclude] con excludeForeign- sólo veta componentes, como antes: puede cubrir una ilustración que sus
+        // bloques de imagen sí conservan)
+        var own: Mat? = if (inp.bridge == 0 && inp.orig != null && OFF and 8 == 0) foreignMask(inp.orig, sm.size(), bws, lhS, bag, softF,
+            inp.images.map { Rect((it.x * s).toInt(), (it.y * s).toInt(), max(1, (it.width * s).roundToInt()), max(1, (it.height * s).roundToInt())) }) else null
+        edgeLines(bws, cEr0, lhS, cLo, bag)?.let { el -> own = own?.also { Core.bitwise_or(it, el, it); el.release() } ?: el }
+        val foreignAll2 = own
+        val softAll: Mat? = softF[0]?.let { sf -> bag.add(sf); if (foreignAll2 != null) bag.mat().also { Core.bitwise_or(foreignAll2, sf, it) } else sf } ?: foreignAll2
+        val exF = if (inp.excludeForeign) excludeMask(inp.exclude, sm.size(), bag) else null
+        val noExtras: Mat? = if (exF != null && softAll != null) bag.mat().also { Core.bitwise_or(softAll, exF, it) } else exF ?: softAll
+        NcProf.mark("g.foreign")
+        // Rellenos lisos de color o gris (bandas de tabla, celdas sombreadas): pasan enteros con su color
+        // (no en cuadernos: las bandas impresas del cuaderno -cabecera, pie- no son contenido)
+        val fl = if (inp.bridge != 0 || inp.gridColor != null || OFF and 4 != 0) null else detectFills(smw, lhS, noise, noExtras, bag)
+        // (un "relleno" que en la foto original es un salto de luz mucho mayor -borde de una sombra- es un resto de la sombra)
+        if (fl != null && inp.orig != null) dropShadowFills(fl.first, smw, inp.orig, lhS, bag)
+        NcProf.mark("g.fills")
+        // Balance de blancos LOCAL (sombra cálida, luz de color en parte de la hoja): la tinta en la zona conserva su tono
+        val lw: Mat? = if (inp.bridge != 0 || inp.orig == null || OFF and 128 != 0) null else {
+            val np = bag.mat()
+            if (fl != null && noExtras != null) Core.bitwise_or(fl.first, noExtras, np) else (fl?.first ?: noExtras)?.copyTo(np)
+            localLight(smw, inp.orig, bws, if (np.empty()) null else np, bag)
+        }
+        val cEr = if (lw == null) cEr0 else {
+            val c = bag.mat(); Imgproc.resize(lw, c, sm.size(), 0.0, 0.0, Imgproc.INTER_LINEAR)
+            shiftLab(er, c, bag)
+            chromaOf(er, bag)
+        }
+        NcProf.mark("g.lwb")
+        val cm = bag.mat()
         Imgproc.threshold(cEr, cm, cLo, 255.0, Imgproc.THRESH_BINARY); cm.convertTo(cm, CvType.CV_8U)
         val lumEr = bag.add(Cv.gray(er))
         Imgproc.threshold(lumEr, t, 255.0 * (1 - tF), 255.0, Imgproc.THRESH_BINARY_INV)
@@ -433,20 +477,6 @@ internal object NaturalColor {
             Core.bitwise_and(cm, al, cm)
         }
         NcProf.mark("g.cand")
-        val lhS = max(2.0, inp.letterHeight * s)
-        // Fondo ajeno (madera, mesa, carcasa, cantos): ni tinta, ni color, ni figuras, ni rellenos
-        val softF = arrayOfNulls<Mat>(1)
-        // (propio: madera/mesa por color + cantos; se quita en la composición. El fondo ajeno del render impreso
-        // -[Inputs.exclude] con excludeForeign- sólo veta componentes, como antes: puede cubrir una ilustración que sus
-        // bloques de imagen sí conservan)
-        var own: Mat? = if (inp.bridge == 0 && inp.orig != null && OFF and 8 == 0) foreignMask(inp.orig, sm.size(), bws, lhS, bag, softF,
-            inp.images.map { Rect((it.x * s).toInt(), (it.y * s).toInt(), max(1, (it.width * s).roundToInt()), max(1, (it.height * s).roundToInt())) }) else null
-        edgeLines(bws, cEr, lhS, cLo, bag)?.let { el -> own = own?.also { Core.bitwise_or(it, el, it); el.release() } ?: el }
-        val foreignAll2 = own
-        val softAll: Mat? = softF[0]?.let { sf -> bag.add(sf); if (foreignAll2 != null) bag.mat().also { Core.bitwise_or(foreignAll2, sf, it) } else sf } ?: foreignAll2
-        val exF = if (inp.excludeForeign) excludeMask(inp.exclude, sm.size(), bag) else null
-        val noExtras: Mat? = if (exF != null && softAll != null) bag.mat().also { Core.bitwise_or(softAll, exF, it) } else exF ?: softAll
-        NcProf.mark("g.foreign")
         val support = Mat.zeros(sm.size(), CvType.CV_8U)
         val figures = Mat.zeros(sm.size(), CvType.CV_8U)
         // (zonas de FOTO: sólo los bloques de imagen de la maquetación -fotos, ilustraciones-; una figura deducida de una
@@ -526,15 +556,174 @@ internal object NaturalColor {
         log?.invoke("global cPaper=%.1f cLo=%.1f tF=%.3f paper=%.0f,%.0f,%.0f noise=%.1f ink=$nInk inkFrac=%.3f color=%.4f fig=%.4f".format(cPaper, cLo, tF, pc[0], pc[1], pc[2], noise,
             nInk.toDouble() / sm.total(), Core.countNonZero(support).toDouble() / sm.total(), Core.countNonZero(figures).toDouble() / sm.total()))
         debug?.let { d -> d("cand", cm); d("support", support); d("figures", figures); val bgr = Mat(); Imgproc.cvtColor(smw, bgr, Imgproc.COLOR_RGB2BGR); d("smw", bgr); bgr.release() }
-        // Rellenos lisos de color o gris (bandas de tabla, celdas sombreadas): pasan enteros con su color
-        // (no en cuadernos: las bandas impresas del cuaderno -cabecera, pie- no son contenido)
-        val fl = if (inp.bridge != 0 || inp.gridColor != null || OFF and 4 != 0) null else detectFills(smw, lhS, noise, noExtras, bag)
         // (una figura -foto, logo- no es un relleno liso: pasa con su propio color)
         fl?.let { (f, _) -> val nf = bag.mat(); Core.bitwise_not(figures, nf); Core.bitwise_and(f, nf, f) }
-        NcProf.mark("g.fills")
+        NcProf.mark("g.figfill")
         debug?.let { d -> fl?.let { d("fills", it.first) }; foreignAll2?.let { d("foreign", it) }; softF[0]?.let { d("foreign_soft", it) } }
         return Global(gain, black, white, t0, support, figures, s, cLo, tF, fl?.first, fl?.second, max(FILL_DE, 2.5 * noise), cPaper, origWhite, photos, foreignAll2,
-            softF[0]?.clone(), inkL = inkL)
+            softF[0]?.clone(), inkL = inkL, lw = lw?.clone(), lwCell = lwCellOf(sw, shh).toDouble())
+    }
+
+    /** Lado (px de la escala de análisis) de las celdas de [localLight]. */
+    private fun lwCellOf(w: Int, h: Int): Int = max(8, max(w, h) / LWB_CELLS)
+
+    /**
+     * Balance de blancos LOCAL de la tinta (sombra cálida, luz de color sobre parte de la hoja). La división por el fondo deja
+     * el papel neutro pero NO la tinta: con la luz tenue de la sombra la tinta oscura conserva la dominante de la luz (velo,
+     * respuesta de la cámara) y la tinta negra o azul sale marrón. Por celdas (~[LWB_CELLS] en el lado largo): color del papel
+     * en la foto ORIGINAL (mediana de los píxeles blancos en el B/N, fuera de [notPaper]) -> dominante de la luz T respecto al
+     * papel de toda la página; dominante de la tinta del B/N en la imagen normalizada [smw]. La parte de la dominante de la
+     * tinta en la dirección de T es k·T con un único k para toda la página (mediana de las celdas con luz de color: la tinta de
+     * color de unas pocas celdas no lo cambia). Devuelve el desplazamiento (a, b) de Lab a RESTAR del color de la tinta
+     * (32FC2, rejilla; mediana 3x3: una banda de color no es la luz) o null si la luz es uniforme.
+     */
+    private fun localLight(smw: Mat, orig: Mat, bws: Mat, notPaper: Mat?, bag: MatBag): Mat? {
+        val w = smw.cols(); val h = smw.rows(); val n = w * h
+        val cell = lwCellOf(w, h)
+        val gw = (w + cell - 1) / cell; val gh = (h + cell - 1) / cell; val gn = gw * gh
+        if (gw < 3 || gh < 3) return null
+        val o = bag.mat(); areaDown(orig, o, smw.size(), bag)
+        val labO = bag.mat(); Imgproc.cvtColor(o, labO, Imgproc.COLOR_RGB2Lab)
+        val labS = bag.mat(); Imgproc.cvtColor(smw, labS, Imgproc.COLOR_RGB2Lab)
+        val lo = ByteArray(n * 3); labO.get(0, 0, lo)
+        val ls = ByteArray(n * 3); labS.get(0, 0, ls)
+        val bb = ByteArray(n); bws.get(0, 0, bb)
+        val np = notPaper?.let { m -> ByteArray(n).also { m.get(0, 0, it) } }
+        // medianas por histograma (a y b de 8 bits)
+        val pA = FloatArray(gn); val pB = FloatArray(gn); val pOk = BooleanArray(gn)
+        val iA = FloatArray(gn); val iB = FloatArray(gn); val iOk = BooleanArray(gn)
+        val hp = IntArray(512); val hi = IntArray(512); val gp = IntArray(512)
+        fun median(hh: IntArray, off: Int, cnt: Int): Float { var acc = 0; var v = 0; while (v < 255 && acc + hh[off + v] < (cnt + 1) / 2) { acc += hh[off + v]; v++ }; return v - 128f }
+        var gCnt = 0
+        for (cy in 0 until gh) for (cx in 0 until gw) {
+            java.util.Arrays.fill(hp, 0); java.util.Arrays.fill(hi, 0); var cp = 0; var ci = 0
+            val y1 = min(h, (cy + 1) * cell); val x1 = min(w, (cx + 1) * cell)
+            for (y in cy * cell until y1) for (x in cx * cell until x1) {
+                val i = y * w + x; val v = bb[i].toInt() and 0xFF
+                if (v >= 252) {
+                    if (np != null && np[i].toInt() != 0) continue
+                    hp[lo[i * 3 + 1].toInt() and 0xFF]++; hp[256 + (lo[i * 3 + 2].toInt() and 0xFF)]++; cp++
+                } else if (v < 128) {
+                    hi[ls[i * 3 + 1].toInt() and 0xFF]++; hi[256 + (ls[i * 3 + 2].toInt() and 0xFF)]++; ci++
+                }
+            }
+            val k = cy * gw + cx
+            if (cp >= 0.2 * (y1 - cy * cell) * (x1 - cx * cell)) {
+                pOk[k] = true; pA[k] = median(hp, 0, cp); pB[k] = median(hp, 256, cp)
+                for (q in 0 until 512) gp[q] += hp[q]; gCnt += cp
+            }
+            if (ci >= 20) { iOk[k] = true; iA[k] = median(hi, 0, ci); iB[k] = median(hi, 256, ci) }
+        }
+        if (gCnt < 0.05 * n) return null
+        val gA = median(gp, 0, gCnt); val gB = median(gp, 256, gCnt)
+        // k de la página: proyección de la dominante de la tinta sobre la de la luz, en las celdas con luz de color
+        val ks = ArrayList<Double>()
+        var tinted = 0
+        for (k in 0 until gn) {
+            if (!pOk[k]) continue
+            val ta = (pA[k] - gA).toDouble(); val tb = (pB[k] - gB).toDouble(); val t2 = ta * ta + tb * tb
+            if (t2 < LWB_T0 * LWB_T0) continue
+            tinted++
+            if (iOk[k]) ks.add((iA[k] * ta + iB[k] * tb) / t2)
+        }
+        if (ks.size < LWB_MIN_CELLS) { if (tinted > 0) log?.invoke("luz local: $tinted celdas con luz de color, sin tinta para medirla"); return null }
+        ks.sort()
+        val kk = ks[ks.size / 2].coerceIn(0.0, LWB_KMAX)
+        log?.invoke("luz local: celdas ${gw}x$gh, con luz de color $tinted, k=%.2f (n=${ks.size})".format(kk))
+        if (kk < 0.2) return null
+        // desplazamiento por celda (celdas sin papel: el de sus vecinas)
+        val sh = FloatArray(gn * 2); val ok = pOk.copyOf()
+        for (k in 0 until gn) if (ok[k]) {
+            val ta = (pA[k] - gA).toDouble(); val tb = (pB[k] - gB).toDouble()
+            val r = NaturalMath.ramp(kotlin.math.sqrt(ta * ta + tb * tb), LWB_T0 * 0.6, LWB_T0)
+            sh[k * 2] = (kk * ta * r).toFloat(); sh[k * 2 + 1] = (kk * tb * r).toFloat()
+        }
+        var nOk = ok.count { it }
+        while (nOk < gn) {
+            val add = ArrayList<Int>()
+            for (k in 0 until gn) {
+                if (ok[k]) continue
+                val cx = k % gw; val cy = k / gw; var c = 0; var sa = 0f; var sb = 0f
+                for (dy in -1..1) for (dx in -1..1) {
+                    val x = cx + dx; val y = cy + dy
+                    if (x < 0 || y < 0 || x >= gw || y >= gh || !ok[y * gw + x]) continue
+                    val j = y * gw + x; sa += sh[j * 2]; sb += sh[j * 2 + 1]; c++
+                }
+                if (c > 0) { sh[k * 2] = sa / c; sh[k * 2 + 1] = sb / c; add.add(k) }
+            }
+            if (add.isEmpty()) break
+            for (k in add) ok[k] = true
+            nOk += add.size
+        }
+        val out = bag.add(Mat(gh, gw, CvType.CV_32FC2)); out.put(0, 0, sh)
+        // (mediana 3x3: una banda o una mancha de color de una celda no es la luz; suavizado)
+        run {
+            val ch = ArrayList<Mat>(2); Core.split(out, ch)
+            for (c in ch) { bag.add(c); val m = bag.mat(); c.convertTo(m, CvType.CV_8U, 2.0, 128.0); Imgproc.medianBlur(m, m, 3); m.convertTo(c, CvType.CV_32F, 0.5, -64.0) }
+            Core.merge(ch, out)
+        }
+        Imgproc.GaussianBlur(out, out, Size(3.0, 3.0), 0.0, 0.0, Core.BORDER_REPLICATE)
+        debug?.let { d -> val ch = ArrayList<Mat>(2); Core.split(out, ch); val v = bag.mat(); ch[1].convertTo(v, CvType.CV_8U, 4.0, 128.0); Imgproc.resize(v, v, Size(w.toDouble(), h.toDouble()), 0.0, 0.0, Imgproc.INTER_NEAREST); d("light_b", v); ch.forEach { it.release() } }
+        return out
+    }
+
+    /** Resta el desplazamiento de Lab [shift] (32FC2, mismo tamaño) al color RGB 8UC3 [rgb] (en el sitio). */
+    private fun shiftLab(rgb: Mat, shift: Mat, bag: MatBag) {
+        val f = bag.mat(); rgb.convertTo(f, CvType.CV_32F, 1.0 / 255)
+        val lab = bag.mat(); Imgproc.cvtColor(f, lab, Imgproc.COLOR_RGB2Lab)
+        val ch = ArrayList<Mat>(3); Core.split(lab, ch); ch.forEach { bag.add(it) }
+        val sc = ArrayList<Mat>(2); Core.split(shift, sc); sc.forEach { bag.add(it) }
+        Core.subtract(ch[1], sc[0], ch[1]); Core.subtract(ch[2], sc[1], ch[2])
+        Core.merge(ch, lab); Imgproc.cvtColor(lab, f, Imgproc.COLOR_Lab2RGB)
+        f.convertTo(rgb, CvType.CV_8U, 255.0)
+    }
+
+    /**
+     * Quita de [fills] (en el sitio) los rellenos que son restos de una SOMBRA: el salto de color entre su interior y un anillo
+     * de ~1 letra alrededor es en la foto ORIGINAL mucho mayor (>= [SHADOW_FILL_K] veces y >= 15 ΔE) que en la normalizada
+     * [smw] (la normalización casi lo quitó: luz, no tinta); un relleno impreso salta lo mismo en las dos.
+     */
+    private fun dropShadowFills(fills: Mat, smw: Mat, orig: Mat, lhS: Double, bag: MatBag) {
+        val w = smw.cols(); val h = smw.rows(); val n = w * h
+        val lab = bag.mat(); val st = bag.mat(); val ce = bag.mat()
+        val nc = Imgproc.connectedComponentsWithStats(fills, lab, st, ce, 8, CvType.CV_32S)
+        if (nc <= 1) return
+        val lf = bag.mat(); lab.convertTo(lf, CvType.CV_32F)
+        val k = Cv.odd(max(3, lhS.roundToInt()))
+        val ring = bag.mat(); Imgproc.dilate(lf, ring, Cv.kernel(Imgproc.MORPH_ELLIPSE, k))
+        val la = IntArray(n); lab.get(0, 0, la)
+        val ra = FloatArray(n); ring.get(0, 0, ra)
+        val o = bag.mat(); areaDown(orig, o, smw.size(), bag)
+        val sums = Array(2) { DoubleArray(nc * 6) }; val cnt = Array(2) { IntArray(nc * 2) }   // [imagen][comp*2 + (0 dentro, 1 anillo)]
+        for ((m, src) in listOf(smw, o).withIndex()) {
+            val f = bag.mat(); src.convertTo(f, CvType.CV_32F, 1.0 / 255)
+            val l3 = bag.mat(); Imgproc.cvtColor(f, l3, Imgproc.COLOR_RGB2Lab)
+            val v = FloatArray(n * 3); l3.get(0, 0, v)
+            for (i in 0 until n) {
+                val c: Int; val r: Int
+                if (la[i] > 0) { c = la[i]; r = 0 } else if (ra[i] > 0f) { c = ra[i].toInt(); r = 1 } else continue
+                val j = (c * 2 + r) * 3
+                sums[m][j] += v[i * 3]; sums[m][j + 1] += v[i * 3 + 1]; sums[m][j + 2] += v[i * 3 + 2]; cnt[m][c * 2 + r]++
+            }
+        }
+        val drop = BooleanArray(nc)
+        for (c in 1 until nc) {
+            val de = DoubleArray(2)
+            for (m in 0..1) {
+                val ni = max(1, cnt[m][c * 2]); val nr = cnt[m][c * 2 + 1]
+                if (nr < 10) { de[m] = -1.0; continue }
+                var d2 = 0.0
+                for (q in 0 until 3) { val d = sums[m][(c * 2) * 3 + q] / ni - sums[m][(c * 2 + 1) * 3 + q] / nr; d2 += d * d }
+                de[m] = kotlin.math.sqrt(d2)
+            }
+            if (de[0] >= 0 && de[1] >= 15.0 && de[1] >= SHADOW_FILL_K * de[0]) drop[c] = true
+            if (logComps) log?.invoke("relleno ${st.get(c, 0)[0].toInt()},${st.get(c, 1)[0].toInt()} ΔE norm=%.1f orig=%.1f%s".format(de[0], de[1], if (drop[c]) " -> sombra" else ""))
+        }
+        if (drop.none { it }) return
+        val b = ByteArray(n); fills.get(0, 0, b)
+        for (i in 0 until n) if (drop[la[i]]) b[i] = 0
+        fills.put(0, 0, b)
+        log?.invoke("rellenos de sombra quitados: ${drop.count { it }}")
     }
 
     /**
@@ -959,7 +1148,17 @@ internal object NaturalColor {
         NcProf.mark("ramps")
         // Croma a media resolución (Lab de 8 bits) -> evidencia de color (también a media resolución) y peso del color
         val hs = Size(max(1.0, (outer.width / 2.0).roundToInt().toDouble()), max(1.0, (outer.height / 2.0).roundToInt().toDouble()))
-        val nbH = bag.mat(); areaDown(nrmT, nbH, hs, bag); Core.multiply(nbH, Scalar(g.gain[0], g.gain[1], g.gain[2]), nbH)
+        val nbG = bag.mat(); areaDown(nrmT, nbG, hs, bag); Core.multiply(nbG, Scalar(g.gain[0], g.gain[1], g.gain[2]), nbG)
+        // Balance de blancos local (sombra cálida): corrección por canal a media resolución -> color de la tinta y evidencia
+        // de color (los rellenos lisos conservan el balance global: su color es suyo, no de la luz)
+        val shH: Mat? = g.lw?.let { lw ->
+            val m = bag.mat()
+            val k = 2.0 * g.scale / g.lwCell
+            val aff = bag.add(Mat(2, 3, CvType.CV_64F)); aff.put(0, 0, k, 0.0, (outer.x + 1.0) * g.scale / g.lwCell - 0.5, 0.0, k, (outer.y + 1.0) * g.scale / g.lwCell - 0.5)
+            Imgproc.warpAffine(lw, m, aff, hs, Imgproc.INTER_LINEAR or Imgproc.WARP_INVERSE_MAP, Core.BORDER_REPLICATE)
+            m
+        }
+        val nbH = if (shH == null) nbG else bag.mat().also { nb -> nbG.copyTo(nb); shiftLab(nb, shH, bag) }
         val chH = bag.mat(); val labH = bag.mat()
         run {
             Imgproc.cvtColor(nbH, labH, Imgproc.COLOR_RGB2Lab)
@@ -1018,7 +1217,7 @@ internal object NaturalColor {
         }
         // Alfa del B/N y continuidad del trazo
         val aBW = bag.mat(); Core.bitwise_not(inp.bw.submat(outer).also { bag.add(it) }, aBW)
-        fm?.let { f -> fillUp = localFill(f, aBW, nbH, g, outer, hs, bag) }
+        fm?.let { f -> fillUp = localFill(f, aBW, nbG, g, outer, hs, bag) }
         val ev = if (inp.bridgeOnly) e else bag.mat().also { Core.max(e, ec, it) }
         val closeA = bag.mat(); Imgproc.morphologyEx(aBW, closeA, Imgproc.MORPH_CLOSE, Cv.kernel(Imgproc.MORPH_ELLIPSE, kc))
         Core.min(closeA, ev, closeA)
@@ -1118,6 +1317,18 @@ internal object NaturalColor {
             val fl = ((fillA[i] / 255f - FILL_LO.toFloat()) / (FILL_HI - FILL_LO).toFloat()).coerceIn(0f, 1f)
             noKC[j] = max(f, fl); figC[j] = f
             j++
+        }
+        // Luz local de color (sombra cálida): la dominante que la luz deja en la tinta se resta (la tinta negra o azul no
+        // sale marrón); antes de clasificarla en neutra o de color
+        if (shH != null) {
+            val shA = FloatArray(hn * 2); shH.get(0, 0, shA)
+            val cm0 = bag.add(Mat(n, 1, CvType.CV_32FC3)); cm0.put(0, 0, colC)
+            Core.multiply(cm0, Scalar.all(1.0 / 255), cm0); Core.min(cm0, Scalar.all(1.0), cm0)
+            val lb = bag.mat(); Imgproc.cvtColor(cm0, lb, Imgproc.COLOR_RGB2Lab)
+            val la = FloatArray(n * 3); lb.get(0, 0, la)
+            for (k in 0 until n) { val i = idx[k]; la[k * 3 + 1] -= shA[i * 2] * (1f - figC[k]); la[k * 3 + 2] -= shA[i * 2 + 1] * (1f - figC[k]) }
+            lb.put(0, 0, la); Imgproc.cvtColor(lb, cm0, Imgproc.COLOR_Lab2RGB)
+            cm0.get(0, 0, colC); for (k in 0 until n * 3) colC[k] = (colC[k] * 255f).coerceIn(0f, 255f)
         }
         // Tinta NEUTRA o DE COLOR, por zonas de ~1 letra (no por píxel: el borde de un trazo negro tiene franjas de
         // color de la lente y el desenfoque): croma medio del color del núcleo de los trazos, ponderado por el alfa
