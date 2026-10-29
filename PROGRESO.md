@@ -171,3 +171,4 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
 - Firmas y sellos: preguntas en la petición de página; zona de tinta suave en Color natural (NaturalColor.Inputs.soft).
 - QualityAnalyzer: desenfoque 60 -> 150.
 - Banco: JevIdeasEvalTest (-PjevIdeas), notas /tmp/claude-0/bench/notes_jev_impl.md. 547 tests OK.
+- 2026-10-29: ideas Jev INTEGRADAS (c5d950f): tipo→modo/filtro, carpetas (categoría + chips en Inicio), rescate de encuadre y "¿hay documento?", duplicados ORB+Jev, calidad→Reescanear, firmas/sellos. Umbral de desenfoque en vivo devuelto a 60 (150 sólo medido en fotos). 547 tests. v28 COMPILADA (una sola versión con todo).

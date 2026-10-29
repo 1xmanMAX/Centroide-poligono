@@ -23,7 +23,9 @@ object QualityAnalyzer {
      * movimiento frente a 200 sin desenfoque): con 60 solo se detectaba el 28 %; con 150, el 53 % sin falsos positivos.
      * En manifest_v3 (30 categorías reales x 40 fotos nítidas) el percentil 5 nunca baja de 333 y ninguna queda bajo 200.
      */
-    internal const val BLUR_LAPVAR = 150.0
+    // (sólo lo usa la cámara EN VIVO: 150 está medido sobre fotos, no sobre fotogramas de la vista previa; hasta medirlo
+    // allí se mantiene 60 para no frenar la autocaptura)
+    internal const val BLUR_LAPVAR = 60.0
 
     fun analyze(bitmap: Bitmap): QualityReport {
         val w = bitmap.width; val h = bitmap.height
