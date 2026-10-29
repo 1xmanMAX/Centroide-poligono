@@ -398,7 +398,8 @@ internal object PrintedPage {
         val oh = if (f > 1.0) (h * f).roundToInt() else h
         val lh = max(4.0, if (st.letterHeight > 0) st.letterHeight * f else oh / 250.0)
         // Bloques de imagen (logos, fotos: compactos y de color) -> en B/N se conservan en gris
-        val images = if (color) emptyList() else findImageBlocks(smNz, ow, oh, bag) + pictureBlocks(st, ow, oh)
+        val images = if (color) emptyList() else findImageBlocks(smNz, ow, oh, bag) + pictureBlocks(st, ow, oh) +
+            (if (photoMode == 2 || !TEXTURE_PHOTOS) emptyList() else textureBlocks(smNz, pm, ow, oh, bag))
         onImages?.invoke(images, ow, oh)
         val outsideFull = if (outside == null) null else bag.mat().also { Imgproc.resize(outside, it, Size(ow.toDouble(), oh.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR) }
         // Sombras: la división por el fondo amplifica el ruido del papel (ganancia g) -> el punto blanco local baja
@@ -842,8 +843,239 @@ internal object PrintedPage {
         val dk = bag.mat(); Core.compare(gq, Scalar(150.0), dk, Core.CMP_LT)
         Imgproc.morphologyEx(dk, dk, Imgproc.MORPH_OPEN, Cv.kernel(Imgproc.MORPH_RECT, 5))
         val dkBlocks = blocks(dk, q, ow, oh, maxAspect = 30.0, minFill = 0.6, bag = bag)
-        return blocks(m, q, ow, oh, maxAspect = 3.0, minFill = 0.3, bag = bag) + dkBlocks
+        return blocks(m, q, ow, oh, maxAspect = 3.0, minFill = 0.3, bag = bag) + dkBlocks + if (BANDS) bandBlocks(smN, ow, oh, bag) else emptyList()
     }
+
+    /** Bandas rellenas ([bandBlocks]); false = como antes (banco). */
+    @Volatile internal var BANDS = true
+    private const val BAND_SIDE = 700
+    private const val BAND_FILL = 0.8
+    private const val BAND_GRAY_MAX = 175.0
+    private const val BAND_MAX_DARK = 0.04
+    /** Relación mínima largo/alto (un logo o un rótulo compactos ya los trata [blocks]). */
+    private const val BAND_ASPECT = 6
+
+    /**
+     * BANDAS RELLENAS de color o gris medio con texto claro (cabecera azul de una tabla, banda de título): alargadas, así
+     * que [blocks] no las aceptaba (relación ≤ 3 para el color, y el gris < 150 no ve un azul claro) y salían a trozos -un
+     * pedazo entre palabra y palabra como imagen, el resto binarizado: el texto blanco se perdía o quedaba con manchas-.
+     * Máscara: gris medio (90..[BAND_GRAY_MAX]) a ~[BAND_SIDE] px; cierre horizontal para tapar el texto claro y
+     * apertura que quita letras y líneas finas; se aceptan las componentes alargadas (relación > 3, sólo las filas que
+     * cubren en ≥ 70 %), de al menos 3 px de alto y cuya caja es relleno en ≥ [BAND_FILL] antes del cierre.
+     */
+    internal fun bandBlocks(smN: Mat, ow: Int, oh: Int, bag: MatBag): List<Rect> {
+        val q = bag.mat(); Cv.downscale(smN, q, BAND_SIDE)
+        val gq = bag.add(Cv.gray(q))
+        // relleno: gris medio (azul, gris o color oscuros), ni papel ni tinta negra. El resaltador (amarillo, rosa, verde
+        // claros) es más claro: no es una banda (en B/N se limpia como siempre)
+        val m = bag.mat(); Core.inRange(gq, Scalar(90.0), Scalar(BAND_GRAY_MAX), m)
+        val fill = bag.mat(); m.copyTo(fill)
+        Imgproc.morphologyEx(m, m, Imgproc.MORPH_CLOSE, Cv.kernel(Imgproc.MORPH_RECT, 9, 5))
+        Imgproc.morphologyEx(m, m, Imgproc.MORPH_OPEN, Cv.kernel(Imgproc.MORPH_RECT, 7))
+        texDebug?.let { d -> val b = bag.mat(); Imgproc.cvtColor(q, b, Imgproc.COLOR_RGB2BGR); d("band_q", b); d("band_fill", fill); d("band_m", m) }
+        val labels = bag.mat(); val stats = bag.mat(); val cents = bag.mat()
+        val nc = Imgproc.connectedComponentsWithStats(m, labels, stats, cents, 8, CvType.CV_32S)
+        val st = IntArray(max(0, nc) * 5); if (nc > 0) stats.get(0, 0, st)
+        val kx = ow.toDouble() / q.cols(); val ky = oh.toDouble() / q.rows()
+        val out = ArrayList<Rect>()
+        val lb = IntArray(q.cols() * q.rows()); labels.get(0, 0, lb)
+        val qw = q.cols()
+        for (c in 1 until nc) {
+            val x = st[c * 5]; var y = st[c * 5 + 1]; val bw = st[c * 5 + 2]; var bh = st[c * 5 + 3]
+            if (st[c * 5 + 4] < 0.001 * q.total() || bw < 3 * bh / 2) continue
+            // (el cierre pega a la banda la raya de la fila de al lado: sólo las filas que la componente cubre en ≥ 70 %)
+            var y0 = -1; var y1 = -1
+            for (yy in y until y + bh) {
+                var k = 0; val o = yy * qw
+                for (xx in x until x + bw) if (lb[o + xx] == c) k++
+                if (k >= 0.7 * bw) { if (y0 < 0) y0 = yy; y1 = yy }
+            }
+            if (y0 < 0) continue
+            y = y0; bh = y1 - y0 + 1
+            if (bh < 3 || bw <= BAND_ASPECT * bh) continue
+            // (pegada al borde de la imagen: canto, mesa o franja de la página que el borde limpia; como antes)
+            val mx = 0.01 * q.cols(); val my = 0.01 * q.rows()
+            if (x <= mx || y <= my || x + bw >= q.cols() - mx || y + bh >= q.rows() - my) continue
+            val r = Rect(x, y, bw, bh)
+            // casi todo relleno (un renglón de texto cerrado es sobre todo papel: ≤ 0,5; una banda ≥ 0,9)
+            val fr = fill.submat(r); val ff = Core.countNonZero(fr).toDouble() / r.area(); fr.release()
+            val roi = gq.submat(r); val light = bag.mat(); Core.compare(roi, Scalar(200.0), light, Core.CMP_GE)
+            val dark = bag.mat(); Core.compare(roi, Scalar(80.0), dark, Core.CMP_LT); roi.release()
+            val df = Core.countNonZero(dark).toDouble() / r.area()
+            val lf = Core.countNonZero(light).toDouble() / r.area()
+            log?.invoke("banda cand $x,$y ${bw}x$bh relleno=%.2f claro=%.2f oscuro=%.2f".format(ff, lf, df))
+            // (texto NEGRO dentro: un renglón con resaltador o un sombreado claro con texto; ahí manda la binarización)
+            if (ff < BAND_FILL || df > BAND_MAX_DARK) continue
+            out.add(Cv.clampRect(Rect((x * kx).toInt(), (y * ky).toInt(), (bw * kx).roundToInt(), (bh * ky).roundToInt()), ow, oh))
+        }
+        log?.invoke("bandas: ${out.size} ${out.joinToString { "${it.x},${it.y} ${it.width}x${it.height}" }}")
+        return out
+    }
+
+    /** Fotos por textura ([textureBlocks]); false = como antes (banco). */
+    @Volatile internal var TEXTURE_PHOTOS = true
+    internal var texDebug: ((String, Mat) -> Unit)? = null
+
+    /**
+     * Fotos impresas por TEXTURA continua: [findImageBlocks] sólo ve el color saturado, y una foto de tonos apagados
+     * (calle, pared, tierra: beige y gris) pasaba a trozos -la parte saturada como imagen, el resto binarizado o lavado a
+     * blanco-. En una foto casi todas las celdas tienen grano o tono medio; en un párrafo o una tabla, entre renglón y
+     * renglón hay papel liso. Se marcan las celdas con grano (desviación local ≥ 3× la del papel) o más oscuras que el
+     * papel, se busca donde cubren ≥ 85 % de una ventana de ~3 renglones y se aceptan zonas grandes (≥ 12 % del lado
+     * largo por lado), compactas y casi sin papel blanco dentro (≤ 22 %: el texto denso deja 30–60 %). Rectángulos en
+     * coordenadas de salida ([ow]x[oh]).
+     */
+    internal fun textureBlocks(smN: Mat, pm: Double, ow: Int, oh: Int, bag: MatBag): List<Rect> {
+        val q = bag.mat(); Cv.downscale(smN, q, TEX_SIDE)
+        val g = bag.add(Cv.gray(q))
+        val f = bag.mat(); g.convertTo(f, CvType.CV_32F)
+        val mu = bag.mat(); Imgproc.blur(f, mu, Size(5.0, 5.0))
+        val sq = bag.mat(); Core.multiply(f, f, sq)
+        val mu2 = bag.mat(); Imgproc.blur(sq, mu2, Size(5.0, 5.0))
+        val m2 = bag.mat(); Core.multiply(mu, mu, m2)
+        val sd = bag.mat(); Core.subtract(mu2, m2, sd); Core.max(sd, Scalar(0.0), sd); Core.sqrt(sd, sd)
+        val w = g.cols(); val h = g.rows(); val n = w * h
+        val gb = ByteArray(n); g.get(0, 0, gb)
+        val sdA = FloatArray(n); sd.get(0, 0, sdA)
+        // ruido del papel: mediana de la desviación local en el papel
+        val pv = ArrayList<Float>()
+        for (i in 0 until n step 3) if ((gb[i].toInt() and 0xFF) > 0.94 * pm) pv.add(sdA[i])
+        if (pv.size < 0.05 * n / 3) return emptyList()
+        pv.sort()
+        val noise = pv[pv.size / 2].toDouble()
+        val tThr = max(4.0, 3.0 * noise)
+        val dark = 0.83 * pm
+        val tex = FloatArray(n)
+        for (i in 0 until n) if (sdA[i] > tThr || (gb[i].toInt() and 0xFF) < dark) tex[i] = 1f
+        val tm = bag.mat(); tm.create(h, w, CvType.CV_32F); tm.put(0, 0, tex)
+        val k = (TEX_SIDE * 0.025).roundToInt().coerceAtLeast(5).toDouble()
+        val dens = bag.mat(); Imgproc.blur(tm, dens, Size(k, k))
+        val m = bag.mat(); Imgproc.threshold(dens, m, 0.85, 255.0, Imgproc.THRESH_BINARY); m.convertTo(m, CvType.CV_8U)
+        Imgproc.morphologyEx(m, m, Imgproc.MORPH_OPEN, Cv.kernel(Imgproc.MORPH_RECT, Cv.odd((TEX_SIDE * 0.009).roundToInt().coerceAtLeast(3))))
+        texDebug?.let { d -> d("g", g); val t8 = bag.mat(); tm.convertTo(t8, CvType.CV_8U, 255.0); d("tex", t8); d("m", m) }
+        val labels = bag.mat(); val stats = bag.mat(); val cents = bag.mat()
+        val nc = Imgproc.connectedComponentsWithStats(m, labels, stats, cents, 8, CvType.CV_32S)
+        if (nc < 2) return emptyList()
+        val st = IntArray(nc * 5); stats.get(0, 0, st)
+        val lb = IntArray(n); labels.get(0, 0, lb)
+        val paperN = IntArray(nc)
+        val pThr = 0.95 * pm
+        val darkN = IntArray(nc); val midN = IntArray(nc)
+        for (i in 0 until n) {
+            val l = lb[i]; if (l == 0) continue
+            val v = gb[i].toInt() and 0xFF
+            if (v > pThr) paperN[l]++ else if (v < 0.6 * pm) darkN[l]++ else if (v < 0.9 * pm) midN[l]++
+        }
+        val side = max(w, h)
+        val kx = ow.toDouble() / w; val ky = oh.toDouble() / h
+        val out = ArrayList<Rect>()
+        for (c in 1 until nc) {
+            val x = st[c * 5]; val y = st[c * 5 + 1]; val bw = st[c * 5 + 2]; val bh = st[c * 5 + 3]; val a = st[c * 5 + 4]
+            if (bw < TEX_MIN_SIDE * side || bh < TEX_MIN_SIDE * side || bw * bh > 0.85 * n) continue
+            val gaps = rowGaps(tex, w, x, y, bw, bh)
+            log?.invoke("textura cand $x,$y ${bw}x$bh fill=%.2f papel=%.2f oscuro=%.2f medio=%.2f huecos=%.2f tramos=${gaps.second}".format(a.toDouble() / (bw * bh), paperN[c].toDouble() / a, darkN[c].toDouble() / a, midN[c].toDouble() / a, gaps.first))
+            if (max(bw, bh) > 4 * min(bw, bh) || a < TEX_MIN_FILL * bw * bh) continue
+            // casi sin papel liso dentro; con algo más de papel (foto pálida: pared, calzada), sólo si es grande; y sin
+            // huecos entre renglones (un párrafo o una tabla densos también tienen textura casi en todas partes)
+            val pf = paperN[c].toDouble() / a
+            if (pf > TEX_MAX_PAPER) continue
+            if (pf > TEX_PALE_PAPER && (bw < TEX_PALE_SIDE * side || bh < TEX_PALE_SIDE * side)) continue
+            if (gaps.first > TEX_MAX_GAPS) continue
+            // texto denso y borroso (foto de baja resolución: los renglones se funden y no dejan huecos): el perfil por
+            // filas oscila mucho (renglón / interlineado) y el de columnas casi nada; en una foto, poco y parecido
+            val an = profileAnisotropy(gb, w, x, y, bw, bh)
+            log?.invoke("textura cand perfiles filas=%.1f cols=%.1f".format(an[0], an[1]))
+            if (max(an[0], an[1]) >= TEX_TEXT_VAR && max(an[0], an[1]) >= TEX_TEXT_RATIO * max(1e-6, min(an[0], an[1]))) continue
+            // la densidad recorta los bordes (y una franja lisa de la foto -calle, cielo- queda fuera): se amplía cada lado
+            // mientras la fila/columna siguiente siga con textura en ≥ 75 % (hasta un 25 % del tamaño)
+            val g4 = trimPaper(gb, w, growRect(tex, w, h, x, y, bw, bh), pThr)
+            val r = Cv.clampRect(Rect((g4[0] * kx).toInt(), (g4[1] * ky).toInt(), ((g4[2] - g4[0]) * kx).roundToInt(), ((g4[3] - g4[1]) * ky).roundToInt()), ow, oh)
+            if (r.width > 0 && r.height > 0) out.add(r)
+        }
+        log?.invoke("textura: ruido=%.1f fotos=${out.size} ${out.joinToString { "${it.x},${it.y} ${it.width}x${it.height}" }}".format(noise))
+        return out
+    }
+
+    /**
+     * Renglones dentro de la zona: filas casi sin textura (< 25 %) = huecos entre renglones. (fracción de filas hueco,
+     * número de tramos de hueco). Un párrafo o una tabla tienen muchos tramos; una foto, ninguno o uno (cielo).
+     */
+    private fun rowGaps(tex: FloatArray, w: Int, x: Int, y: Int, bw: Int, bh: Int): Pair<Double, Int> {
+        var gapRows = 0; var runs = 0; var inGap = false
+        for (yy in y until y + bh) {
+            var s = 0.0; val o = yy * w
+            for (xx in x until x + bw) s += tex[o + xx]
+            val gap = s / bw < 0.25
+            if (gap) { gapRows++; if (!inGap) runs++ }
+            inGap = gap
+        }
+        return gapRows.toDouble() / max(1, bh) to runs
+    }
+
+    /** Amplía la caja (x0, y0, x1, y1 exclusivo) por los lados con textura ≥ [GROW_TEX] en la línea siguiente. */
+    /**
+     * Recorta de la caja (x0, y0, x1, y1) las filas/columnas de los bordes que son casi todo papel (≥ 50 % más claro que
+     * [pThr]): el pie de foto o el margen que la densidad de la ventana arrastraba (su texto quedaba gris, sin limpiar).
+     */
+    private fun trimPaper(g: ByteArray, w: Int, r: IntArray, pThr: Double): IntArray {
+        var (x0, y0, x1, y1) = r.toList()
+        fun rowP(yy: Int): Double { var k = 0; for (xx in x0 until x1) if ((g[yy * w + xx].toInt() and 0xFF) > pThr) k++; return k.toDouble() / max(1, x1 - x0) }
+        fun colP(xx: Int): Double { var k = 0; for (yy in y0 until y1) if ((g[yy * w + xx].toInt() and 0xFF) > pThr) k++; return k.toDouble() / max(1, y1 - y0) }
+        while (y1 - y0 > 8 && rowP(y0) >= 0.5) y0++
+        while (y1 - y0 > 8 && rowP(y1 - 1) >= 0.5) y1--
+        while (x1 - x0 > 8 && colP(x0) >= 0.5) x0++
+        while (x1 - x0 > 8 && colP(x1 - 1) >= 0.5) x1--
+        return intArrayOf(x0, y0, x1, y1)
+    }
+
+    private fun growRect(tex: FloatArray, w: Int, h: Int, x: Int, y: Int, bw: Int, bh: Int): IntArray {
+        var x0 = x; var y0 = y; var x1 = x + bw; var y1 = y + bh
+        fun rowF(yy: Int): Double { var s = 0.0; for (xx in x0 until x1) s += tex[yy * w + xx]; return s / max(1, x1 - x0) }
+        fun colF(xx: Int): Double { var s = 0.0; for (yy in y0 until y1) s += tex[yy * w + xx]; return s / max(1, y1 - y0) }
+        val my = (0.25 * bh).toInt(); val mx = (0.25 * bw).toInt()
+        var k = 0; while (k < my && y0 > 0 && rowF(y0 - 1) >= GROW_TEX_ROW) { y0--; k++ }
+        k = 0; while (k < my && y1 < h && rowF(y1) >= GROW_TEX_ROW) { y1++; k++ }
+        k = 0; while (k < mx && x0 > 0 && colF(x0 - 1) >= GROW_TEX) { x0--; k++ }
+        k = 0; while (k < mx && x1 < w && colF(x1) >= GROW_TEX) { x1++; k++ }
+        return intArrayOf(x0, y0, x1, y1)
+    }
+
+    /**
+     * Varianza del perfil de medias por filas y por columnas de la caja (gris [g], ancho [w]), sin la tendencia lenta
+     * (media móvil de 15 px): un bloque de texto oscila mucho en filas (renglones) y nada en columnas.
+     */
+    private fun profileAnisotropy(g: ByteArray, w: Int, x: Int, y: Int, bw: Int, bh: Int): DoubleArray {
+        val rows = DoubleArray(bh); val cols = DoubleArray(bw)
+        for (yy in 0 until bh) { val o = (y + yy) * w + x; for (xx in 0 until bw) { val v = (g[o + xx].toInt() and 0xFF).toDouble(); rows[yy] += v; cols[xx] += v } }
+        for (i in rows.indices) rows[i] /= bw
+        for (i in cols.indices) cols[i] /= bh
+        fun hpVar(p: DoubleArray): Double {
+            val k = 7; if (p.size <= 2 * k + 2) return 0.0
+            var s = 0.0; var s2 = 0.0; var n = 0
+            for (i in k until p.size - k) {
+                var m = 0.0; for (j in i - k..i + k) m += p[j]
+                val d = p[i] - m / (2 * k + 1); s += d; s2 += d * d; n++
+            }
+            return s2 / n - (s / n) * (s / n)
+        }
+        return doubleArrayOf(hpVar(rows), hpVar(cols))
+    }
+
+    /** Texto denso ([profileAnisotropy]): varianza mínima del perfil dominante y razón con el otro. */
+    private const val TEX_TEXT_VAR = 100.0
+    private const val TEX_TEXT_RATIO = 20.0
+
+    private const val TEX_SIDE = 1000
+    /** Textura mínima de la línea siguiente para ampliar la caja de una foto (un renglón de texto al lado no llega). */
+    private const val GROW_TEX = 0.75
+    /** Hacia arriba y abajo basta la mitad (un renglón de texto vecino se corta en el primer hueco entre renglones). */
+    private const val GROW_TEX_ROW = 0.5
+    private const val TEX_MIN_SIDE = 0.12
+    private const val TEX_MIN_FILL = 0.55
+    private const val TEX_MAX_PAPER = 0.45
+    private const val TEX_PALE_PAPER = 0.25
+    private const val TEX_PALE_SIDE = 0.2
+    private const val TEX_MAX_GAPS = 0.05
 
     private fun blocks(m: Mat, q: Mat, ow: Int, oh: Int, maxAspect: Double, minFill: Double, bag: MatBag): List<Rect> {
         val labels = bag.mat(); val stats = bag.mat(); val cents = bag.mat()

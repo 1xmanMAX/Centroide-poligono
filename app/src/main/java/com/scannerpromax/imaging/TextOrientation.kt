@@ -102,14 +102,21 @@ internal object TextOrientation {
         }
         if (tot < 30) return@use none
         val fh = hz.toDouble() / tot; val fv = vt.toDouble() / tot
-        val vertical = fv >= AXIS_MIN && fv >= AXIS_RATIO * fh
+        var vertical = fv >= AXIS_MIN && fv >= AXIS_RATIO * fh
         val horizontal = fh >= AXIS_MIN && fh >= AXIS_RATIO * fv
-        if (!vertical && !horizontal) return@use Result(0, null, 0.0, 0, false, fh, fv)
-        // 3) Renglones en horizontal (90° horario si eran verticales) y sentido
         val inkM = bag.mat(); inkM.create(h, w, CvType.CV_8UC1); inkM.put(0, 0, ink)
+        var c = max(3.0, median(if (vertical) ws else hs))
+        var fromStrips = false
+        if (!vertical && !horizontal) {
+            // Vecinos sin mayoría: fotos dentro de la página (su textura da "caracteres" en todas direcciones) o letras
+            // fundidas en palabras (foto de una página entera: el vecino de una palabra es el renglón de abajo). Se
+            // buscan RENGLONES a varias escalas de letra: tiras largas y bajas en una dirección y casi ninguna en la otra.
+            val sa = stripAxis(inkM, bag) ?: return@use Result(0, null, 0.0, 0, false, fh, fv)
+            vertical = sa.first; c = sa.second; fromStrips = true
+        }
+        // 3) Renglones en horizontal (90° horario si eran verticales) y sentido
         val im = bag.mat()
         if (vertical) Core.rotate(inkM, im, Core.ROTATE_90_CLOCKWISE) else inkM.copyTo(im)
-        val c = max(3.0, median(if (vertical) ws else hs))
         var best: DoubleArray? = null   // (up, upFlip, nLines)
         val angles = linkedSetOf(Math.round(projSkew(im) * 100) / 100.0, Math.round(nnSkew(im, bag) * 100) / 100.0)
         for (ang in angles) {
@@ -126,11 +133,13 @@ internal object TextOrientation {
         val bst = best ?: return@use Result(0, vertical, 0.0, 0, false, fh, fv)
         val up = (bst[0] - bst[1]) / 2; val nl = bst[2].toInt()
         val consistent = bst[0] * -bst[1] > 0
+        // Eje sacado de los renglones (los vecinos no decidían): página difícil, sentido con más evidencia y nunca 180°
+        val minUp = if (fromStrips) STRIP_MIN_UP else MIN_UP
         if (vertical) {
-            val sure = consistent && nl >= MIN_LINES && abs(up) >= MIN_UP
+            val sure = consistent && nl >= MIN_LINES && abs(up) >= minUp
             Result(if (sure) (if (up > 0) 90 else 270) else 0, true, up, nl, sure, fh, fv)
         } else {
-            val sure = consistent && nl >= MIN_LINES_180 && up <= -MIN_UP_180
+            val sure = !fromStrips && consistent && nl >= MIN_LINES_180 && up <= -MIN_UP_180
             Result(if (sure) 180 else 0, false, up, nl, sure || (consistent && nl >= MIN_LINES && up >= MIN_UP), fh, fv)
         }
     }
@@ -172,6 +181,51 @@ internal object TextOrientation {
     /** Modelo solo cuando el análisis de renglones no es seguro. */
     private const val MODEL_SURE = 0.7
 
+    /** Escalas de letra (px a ~[WORK_SIDE]) que prueba [stripAxis]. */
+    private val STRIP_SCALES = doubleArrayOf(4.0, 5.0, 6.0, 8.0, 10.0, 13.0, 16.0)
+    /** Renglones: longitud total mínima (en lados largos de la página) y ventaja de una dirección sobre la otra. */
+    private const val STRIP_MIN_LEN = 1.5
+    private const val STRIP_RATIO = 5.0
+    /** Evidencia de sentido exigida (90/270) cuando el eje sale de los renglones. */
+    private const val STRIP_MIN_UP = 0.4
+
+    /**
+     * Eje por RENGLONES cuando los vecinos no deciden: para cada escala de letra c se cierra la tinta en horizontal
+     * (~1,6 c) y se suma el largo de las tiras de renglón (≥ 6 c de largo, 0,6–2,2 c de alto, llenas ≥ 30 %), en la
+     * página y girada 90°. La textura de una foto da tiras cortas en las dos direcciones; el texto, muchas y largas en
+     * una sola. (vertical, c) de la escala con más renglones, o null si no hay renglones claros.
+     */
+    internal fun stripAxis(ink: Mat, bag: MatBag): Pair<Boolean, Double>? {
+        val side = max(ink.cols(), ink.rows())
+        val rot = bag.mat(); Core.rotate(ink, rot, Core.ROTATE_90_CLOCKWISE)
+        var best: DoubleArray? = null   // (largo dominante, largo de la otra dirección, c, vertical)
+        for (c in STRIP_SCALES) {
+            if (c * 40 > min(ink.cols(), ink.rows())) break
+            val hl = stripLength(ink, c, bag); val vl = stripLength(rot, c, bag)
+            val hi = max(hl, vl)
+            if (best == null || hi > best[0]) best = doubleArrayOf(hi, min(hl, vl), c, if (vl > hl) 1.0 else 0.0)
+        }
+        val b = best ?: return null
+        if (b[0] < STRIP_MIN_LEN * side || b[0] < STRIP_RATIO * b[1]) return null
+        return (b[3] > 0.5) to b[2]
+    }
+
+    /** Largo total (px) de las tiras de renglón horizontales de [ink] con letras de alto [c]. */
+    private fun stripLength(ink: Mat, c: Double, bag: MatBag): Double {
+        val kl = Cv.odd(max(3, (1.6 * c).roundToInt()))
+        val sm = bag.mat(); Imgproc.morphologyEx(ink, sm, Imgproc.MORPH_CLOSE, Cv.kernel(Imgproc.MORPH_RECT, kl, 1))
+        val lbl = bag.mat(); val st = bag.mat(); val ce = bag.mat()
+        val nc = Imgproc.connectedComponentsWithStats(sm, lbl, st, ce, 8, CvType.CV_32S)
+        if (nc < 2) return 0.0
+        val s = IntArray(nc * 5); st.get(0, 0, s)
+        var len = 0.0
+        for (k in 1 until nc) {
+            val bw = s[k * 5 + 2]; val bh = s[k * 5 + 3]; val a = s[k * 5 + 4]
+            if (bw >= 6 * c && bh >= 0.6 * c && bh <= 2.2 * c && a >= 0.3 * bw * bh) len += bw
+        }
+        return len
+    }
+
     private fun median(v: IntArray): Double { if (v.isEmpty()) return 0.0; val c = v.copyOf(); c.sort(); return c[c.size / 2].toDouble() }
 
     /** Vector al vecino más próximo de cada punto (rejilla de celdas de lado [cell]); null si no hay vecino cerca. */
@@ -183,7 +237,10 @@ internal object TextOrientation {
         for (i in 0 until n) { maxX = max(maxX, x[i]); maxY = max(maxY, y[i]) }
         val gw = (maxX / cell).toInt() + 1; val gh = (maxY / cell).toInt() + 1
         val buckets = HashMap<Int, MutableList<Int>>()
-        for (i in idx) buckets.getOrPut((y[i] / cell).toInt() * gw + (x[i] / cell).toInt()) { ArrayList(4) }.add(i)
+        // El vecino se busca entre TODOS los puntos (sólo se submuestrean las consultas): con la rejilla hecha sólo con la
+        // muestra, en páginas con muchos caracteres (> 2500) el "vecino" de una letra era la letra 4.ª o el renglón de
+        // al lado y el eje salía dudoso (fotos de páginas enteras con fotos o mucho texto: nunca se giraban)
+        for (i in 0 until n) buckets.getOrPut((y[i] / cell).toInt() * gw + (x[i] / cell).toInt()) { ArrayList(4) }.add(i)
         return Array(idx.size) { k ->
             val i = idx[k]
             val gx = (x[i] / cell).toInt(); val gy = (y[i] / cell).toInt()

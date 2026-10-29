@@ -246,7 +246,19 @@ class DocumentDetector(private val tier: DeviceTier) {
     private fun neuralArbitrate(rgbSmall: Mat, e: Candidate?, b: Buffers, fullW: Int, fullH: Int, nn: (() -> NeuralQuad?)?): Candidate? {
         if (nn == null || b.scanLike) return e
         val q = runCatching { nn() }.getOrNull() ?: return e
-        val d = arbitrate(e?.pts, e?.conf, q, rgbSmall.cols(), rgbSmall.rows(), fullW, fullH)
+        var d = arbitrate(e?.pts, e?.conf, q, rgbSmall.cols(), rgbSmall.rows(), fullW, fullH)
+        if (d == NeuralDecision.NEURAL && e != null && e.conf >= PAPER_USE_CONF && paperFit && insideFrame(e.pts, rgbSmall.cols(), rgbSmall.rows())) {
+            // La red no puede cortar una hoja que el contorno clásico ya encierra limpia (entera dentro de la foto, con fondo
+            // alrededor: si toca el borde, el "papel" puede ser la mesa clara y la red acierta con la tarjeta): si [e] tiene dentro toda la
+            // tinta y nada de fondo ajeno y el cuadrilátero de la red deja fuera texto Y buena parte (≥ 25 %) del papel de esa hoja (página con
+            // mucho blanco abajo: la red ponía el canto inferior a media hoja), se queda el clásico.
+            runCatching { DetPaper.analyze(rgbSmall) }.getOrNull()?.let { m ->
+                val fe = DetPaper.fit(m, e.pts)
+                val fn = DetPaper.fit(m, scaleNeural(q.pts, rgbSmall.cols(), rgbSmall.rows(), fullW, fullH))
+                debugLog?.invoke("nn: papel E ink=%.3f bg=%.3f cov=%.3f | NN ink=%.3f bg=%.3f cov=%.3f".format(java.util.Locale.ROOT, fe.inkIn, fe.bgIn, fe.cov, fn.inkIn, fn.bgIn, fn.cov))
+                if (nnCutsCleanSheet(fe.inkIn, fe.bgIn, fe.cov, fn.inkIn, fn.cov)) d = NeuralDecision.CLASSIC
+            }
+        }
         debugLog?.invoke("nn: s=%.2f conf=%s -> $d".format(java.util.Locale.ROOT, q.score, e?.conf?.let { "%.2f".format(java.util.Locale.ROOT, it) }))
         return when (d) {
             NeuralDecision.CLASSIC -> e
@@ -256,6 +268,13 @@ class DocumentDetector(private val tier: DeviceTier) {
                 max(e?.score ?: 0.0, 0.6), (0.36 + 0.6 * q.score).coerceIn(0.36, 0.96).toDouble(),
             )
         }
+    }
+
+    /** Las 4 esquinas a ≥ 2 % del borde de la imagen (la hoja entera, con fondo alrededor). */
+    private fun insideFrame(p: FloatArray, w: Int, h: Int): Boolean {
+        val mx = 0.02f * w; val my = 0.02f * h
+        for (i in 0 until 4) { val x = p[2 * i]; val y = p[2 * i + 1]; if (x < mx || y < my || x > w - 1 - mx || y > h - 1 - my) return false }
+        return true
     }
 
     /** Arbitraje por material de papel ([DetPaper]); desactivable en el banco de pruebas. */
@@ -1818,6 +1837,11 @@ class DocumentDetector(private val tier: DeviceTier) {
 
     companion object {
         /** Arbitraje por papel: ajuste limpio (tinta dentro, fondo ajeno dentro máx., hoja cubierta). */
+        /** La red no sustituye a un [e] limpio (tinta ≥, fondo ≤) si su cuadrilátero pierde esta fracción de la tinta. */
+        private const val NN_KEEP_E_INK = 0.95
+        private const val NN_KEEP_E_BG = 0.03
+        private const val NN_KEEP_INK_LOSS = 0.03
+        private const val NN_KEEP_COV = 0.75
         private const val PAPER_P_INK = 0.96
         private const val PAPER_P_BG = 0.05
         private const val PAPER_P_COV = 0.95
@@ -1942,6 +1966,13 @@ class DocumentDetector(private val tier: DeviceTier) {
          * Reglas de fusión del árbitro neuronal (puras, testeables): [ePts]/[eConf] el candidato clásico en px de la imagen
          * de trabajo [w]x[h] (null = ninguno), [q] la red en px de la imagen completa.
          */
+        /**
+         * ¿La red corta una hoja que el contorno clásico encierra limpia? [eInk]/[eBg]/[eCov] = tinta dentro, fondo ajeno
+         * dentro y papel cubierto por el cuadrilátero clásico ([DetPaper.fit]); [nInk]/[nCov] = lo mismo con el de la red.
+         */
+        internal fun nnCutsCleanSheet(eInk: Double, eBg: Double, eCov: Double, nInk: Double, nCov: Double): Boolean =
+            eInk >= NN_KEEP_E_INK && eBg <= NN_KEEP_E_BG && nInk < eInk - NN_KEEP_INK_LOSS && nCov < NN_KEEP_COV * eCov
+
         internal fun arbitrate(ePts: FloatArray?, eConf: Double?, q: NeuralQuad, w: Int, h: Int, fullW: Int, fullH: Int): NeuralDecision {
             val qn = scaleNeural(q.pts, w, h, fullW, fullH)
             val s = q.score

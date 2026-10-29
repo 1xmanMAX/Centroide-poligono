@@ -173,3 +173,20 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
 - Banco: JevIdeasEvalTest (-PjevIdeas), notas /tmp/claude-0/bench/notes_jev_impl.md. 547 tests OK.
 - 2026-10-29: ideas Jev INTEGRADAS (c5d950f): tipo→modo/filtro, carpetas (categoría + chips en Inicio), rescate de encuadre y "¿hay documento?", duplicados ORB+Jev, calidad→Reescanear, firmas/sellos. Umbral de desenfoque en vivo devuelto a 60 (150 sólo medido en fotos). 547 tests. v28 COMPILADA (una sola versión con todo).
 - 2026-10-29: 13 fotos REALES del informe Juliaca en /tmp/claude-0/bench/datasets_usuario/juliaca2 (NO al repo). Agente "juliaca2": cadena completa (detección, orientación, geometría, filtros, tablas, fotos, Jev, duplicados j09/j12), lista de defectos, correcciones generales, láminas /tmp/claude-0/bench/juliaca2_laminas, notas notes_juliaca2.md. Luego una sola versión (v29).
+
+## 2026-10-29: 13 fotos reales del informe (juliaca2) por la cadena completa — rama local del agente (sin push)
+- Fotos del usuario en /tmp/claude-0/bench/datasets_usuario/juliaca2 (PERSONALES, nunca al repo). Arnés scratchpad/jl
+  (JlRunner: DocAligner+DetPaper, Jev captura, doc_ori, geometría, Jev página, NATURAL/B/N, duplicados). Notas
+  /tmp/claude-0/bench/notes_juliaca2.md. Láminas /tmp/claude-0/bench/juliaca2_laminas/.
+- Corregido (general): orientación por renglones a varias escalas cuando los vecinos no deciden (paneles de fotos girados);
+  fotos de tonos apagados por TEXTURA (PrintedPage.textureBlocks; antes troceadas/binarizadas); bandas rellenas con texto
+  claro (cabeceras azules de tabla) como bloque entero (bandBlocks); rayas de tabla largas, finas y claras redibujadas
+  (TableLinesMath "long"); DocAligner ya no corta una hoja que el contorno clásico encierra limpia; duplicados exigen
+  parecido del CONTENIDO por celdas (las páginas de una misma plantilla ya no se avisan como duplicadas).
+- Arnés del banco: harness/compile.sh y env.sh compilan ai/jev (imaging depende de él desde la integración Jev).
+- FINAL (rama del agente, sin push): bancos sin regresiones relevantes — detección fallo 16,3 -> 16,2 %; orientación ok 511 ->
+  527/1200 (0 incoherencias nuevas); tablas sintéticas NAT 94,3 -> 97,4 %, B/N 93,6 -> 97,2 %; DIBCO FM 79,33 =, DRD 10,87 -> 10,86;
+  Color natural (11 cat.) B/N FM +0,04, MAGIC FM -0,03 (iluminación -0,12), B/N espurio +0,25 pp (fotos y bandas en gris);
+  duplicados: 0 falsos (antes 11 en juliaca), seguros del banco 22 -> 13/30 (resto a la zona gris de Jev). 556 tests OK.
+- Pendiente: celdas gris claro de tablas (ΔE < 7, no son relleno), fila de sección gris clara; pie de foto dentro del marco con
+  fondo claro entra en la caja de la foto (texto algo gris); "sólo B/N" deja las fotos en gris (decisión de diseño).
