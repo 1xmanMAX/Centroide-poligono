@@ -398,7 +398,8 @@ internal object PrintedPage {
         val oh = if (f > 1.0) (h * f).roundToInt() else h
         val lh = max(4.0, if (st.letterHeight > 0) st.letterHeight * f else oh / 250.0)
         // Bloques de imagen (logos, fotos: compactos y de color) -> en B/N se conservan en gris
-        val images = if (color) emptyList() else findImageBlocks(smNz, ow, oh, bag) + pictureBlocks(st, ow, oh)
+        val images = if (color) emptyList() else findImageBlocks(smNz, ow, oh, bag) + pictureBlocks(st, ow, oh) +
+            (if (photoMode == 2 || !TEXTURE_PHOTOS) emptyList() else textureBlocks(smNz, pm, ow, oh, bag))
         onImages?.invoke(images, ow, oh)
         val outsideFull = if (outside == null) null else bag.mat().also { Imgproc.resize(outside, it, Size(ow.toDouble(), oh.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR) }
         // Sombras: la división por el fondo amplifica el ruido del papel (ganancia g) -> el punto blanco local baja
@@ -844,6 +845,106 @@ internal object PrintedPage {
         val dkBlocks = blocks(dk, q, ow, oh, maxAspect = 30.0, minFill = 0.6, bag = bag)
         return blocks(m, q, ow, oh, maxAspect = 3.0, minFill = 0.3, bag = bag) + dkBlocks
     }
+
+    /** Fotos por textura ([textureBlocks]); false = como antes (banco). */
+    @Volatile internal var TEXTURE_PHOTOS = true
+    internal var texDebug: ((String, Mat) -> Unit)? = null
+
+    /**
+     * Fotos impresas por TEXTURA continua: [findImageBlocks] sólo ve el color saturado, y una foto de tonos apagados
+     * (calle, pared, tierra: beige y gris) pasaba a trozos -la parte saturada como imagen, el resto binarizado o lavado a
+     * blanco-. En una foto casi todas las celdas tienen grano o tono medio; en un párrafo o una tabla, entre renglón y
+     * renglón hay papel liso. Se marcan las celdas con grano (desviación local ≥ 3× la del papel) o más oscuras que el
+     * papel, se busca donde cubren ≥ 85 % de una ventana de ~3 renglones y se aceptan zonas grandes (≥ 12 % del lado
+     * largo por lado), compactas y casi sin papel blanco dentro (≤ 22 %: el texto denso deja 30–60 %). Rectángulos en
+     * coordenadas de salida ([ow]x[oh]).
+     */
+    internal fun textureBlocks(smN: Mat, pm: Double, ow: Int, oh: Int, bag: MatBag): List<Rect> {
+        val q = bag.mat(); Cv.downscale(smN, q, TEX_SIDE)
+        val g = bag.add(Cv.gray(q))
+        val f = bag.mat(); g.convertTo(f, CvType.CV_32F)
+        val mu = bag.mat(); Imgproc.blur(f, mu, Size(5.0, 5.0))
+        val sq = bag.mat(); Core.multiply(f, f, sq)
+        val mu2 = bag.mat(); Imgproc.blur(sq, mu2, Size(5.0, 5.0))
+        val m2 = bag.mat(); Core.multiply(mu, mu, m2)
+        val sd = bag.mat(); Core.subtract(mu2, m2, sd); Core.max(sd, Scalar(0.0), sd); Core.sqrt(sd, sd)
+        val w = g.cols(); val h = g.rows(); val n = w * h
+        val gb = ByteArray(n); g.get(0, 0, gb)
+        val sdA = FloatArray(n); sd.get(0, 0, sdA)
+        // ruido del papel: mediana de la desviación local en el papel
+        val pv = ArrayList<Float>()
+        for (i in 0 until n step 3) if ((gb[i].toInt() and 0xFF) > 0.94 * pm) pv.add(sdA[i])
+        if (pv.size < 0.05 * n / 3) return emptyList()
+        pv.sort()
+        val noise = pv[pv.size / 2].toDouble()
+        val tThr = max(4.0, 3.0 * noise)
+        val dark = 0.83 * pm
+        val tex = FloatArray(n)
+        for (i in 0 until n) if (sdA[i] > tThr || (gb[i].toInt() and 0xFF) < dark) tex[i] = 1f
+        val tm = bag.mat(); tm.create(h, w, CvType.CV_32F); tm.put(0, 0, tex)
+        val k = (TEX_SIDE * 0.025).roundToInt().coerceAtLeast(5).toDouble()
+        val dens = bag.mat(); Imgproc.blur(tm, dens, Size(k, k))
+        val m = bag.mat(); Imgproc.threshold(dens, m, 0.85, 255.0, Imgproc.THRESH_BINARY); m.convertTo(m, CvType.CV_8U)
+        Imgproc.morphologyEx(m, m, Imgproc.MORPH_OPEN, Cv.kernel(Imgproc.MORPH_RECT, Cv.odd((TEX_SIDE * 0.009).roundToInt().coerceAtLeast(3))))
+        texDebug?.let { d -> d("g", g); val t8 = bag.mat(); tm.convertTo(t8, CvType.CV_8U, 255.0); d("tex", t8); d("m", m) }
+        val labels = bag.mat(); val stats = bag.mat(); val cents = bag.mat()
+        val nc = Imgproc.connectedComponentsWithStats(m, labels, stats, cents, 8, CvType.CV_32S)
+        if (nc < 2) return emptyList()
+        val st = IntArray(nc * 5); stats.get(0, 0, st)
+        val lb = IntArray(n); labels.get(0, 0, lb)
+        val paperN = IntArray(nc)
+        val pThr = 0.95 * pm
+        val darkN = IntArray(nc); val midN = IntArray(nc)
+        for (i in 0 until n) {
+            val l = lb[i]; if (l == 0) continue
+            val v = gb[i].toInt() and 0xFF
+            if (v > pThr) paperN[l]++ else if (v < 0.6 * pm) darkN[l]++ else if (v < 0.9 * pm) midN[l]++
+        }
+        val side = max(w, h)
+        val kx = ow.toDouble() / w; val ky = oh.toDouble() / h
+        val out = ArrayList<Rect>()
+        for (c in 1 until nc) {
+            val x = st[c * 5]; val y = st[c * 5 + 1]; val bw = st[c * 5 + 2]; val bh = st[c * 5 + 3]; val a = st[c * 5 + 4]
+            if (bw < TEX_MIN_SIDE * side || bh < TEX_MIN_SIDE * side || bw * bh > 0.85 * n) continue
+            val gaps = rowGaps(tex, w, x, y, bw, bh)
+            log?.invoke("textura cand $x,$y ${bw}x$bh fill=%.2f papel=%.2f oscuro=%.2f medio=%.2f huecos=%.2f tramos=${gaps.second}".format(a.toDouble() / (bw * bh), paperN[c].toDouble() / a, darkN[c].toDouble() / a, midN[c].toDouble() / a, gaps.first))
+            if (max(bw, bh) > 4 * min(bw, bh) || a < TEX_MIN_FILL * bw * bh) continue
+            // casi sin papel liso dentro; con algo más de papel (foto pálida: pared, calzada), sólo si es grande; y sin
+            // huecos entre renglones (un párrafo o una tabla densos también tienen textura casi en todas partes)
+            val pf = paperN[c].toDouble() / a
+            if (pf > TEX_MAX_PAPER) continue
+            if (pf > TEX_PALE_PAPER && (bw < TEX_PALE_SIDE * side || bh < TEX_PALE_SIDE * side)) continue
+            if (gaps.first > TEX_MAX_GAPS) continue
+            val r = Cv.clampRect(Rect((x * kx).toInt(), (y * ky).toInt(), (bw * kx).roundToInt(), (bh * ky).roundToInt()), ow, oh)
+            if (r.width > 0 && r.height > 0) out.add(r)
+        }
+        log?.invoke("textura: ruido=%.1f fotos=${out.size} ${out.joinToString { "${it.x},${it.y} ${it.width}x${it.height}" }}".format(noise))
+        return out
+    }
+
+    /**
+     * Renglones dentro de la zona: filas casi sin textura (< 25 %) = huecos entre renglones. (fracción de filas hueco,
+     * número de tramos de hueco). Un párrafo o una tabla tienen muchos tramos; una foto, ninguno o uno (cielo).
+     */
+    private fun rowGaps(tex: FloatArray, w: Int, x: Int, y: Int, bw: Int, bh: Int): Pair<Double, Int> {
+        var gapRows = 0; var runs = 0; var inGap = false
+        for (yy in y until y + bh) {
+            var s = 0.0; val o = yy * w
+            for (xx in x until x + bw) s += tex[o + xx]
+            val gap = s / bw < 0.25
+            if (gap) { gapRows++; if (!inGap) runs++ }
+            inGap = gap
+        }
+        return gapRows.toDouble() / max(1, bh) to runs
+    }
+
+    private const val TEX_SIDE = 1000
+    private const val TEX_MIN_SIDE = 0.12
+    private const val TEX_MIN_FILL = 0.55
+    private const val TEX_MAX_PAPER = 0.45
+    private const val TEX_PALE_PAPER = 0.25
+    private const val TEX_PALE_SIDE = 0.2
+    private const val TEX_MAX_GAPS = 0.05
 
     private fun blocks(m: Mat, q: Mat, ow: Int, oh: Int, maxAspect: Double, minFill: Double, bag: MatBag): List<Rect> {
         val labels = bag.mat(); val stats = bag.mat(); val cents = bag.mat()

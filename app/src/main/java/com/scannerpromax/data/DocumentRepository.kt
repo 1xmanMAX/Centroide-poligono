@@ -963,7 +963,7 @@ class DocumentRepository(
                     val fa = dupFeaturesOf(docId, page) ?: return@launch
                     for (o in others) {
                         val fb = dupFeaturesOf(docId, o) ?: continue
-                        val dup = when (DuplicatePages.verdict(DuplicatePages.inliers(fa, fb))) {
+                        val dup = when (DuplicatePages.verdict(DuplicatePages.match(fa, fb))) {
                             DuplicatePages.Verdict.DUPLICATE -> true
                             DuplicatePages.Verdict.DIFFERENT -> false
                             DuplicatePages.Verdict.GRAY -> grayDuplicate(docId, page, o)
