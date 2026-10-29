@@ -849,7 +849,9 @@ internal object PrintedPage {
     /** Bandas rellenas ([bandBlocks]); false = como antes (banco). */
     @Volatile internal var BANDS = true
     private const val BAND_SIDE = 700
-    private const val BAND_FILL = 0.75
+    private const val BAND_FILL = 0.8
+    private const val BAND_GRAY_MAX = 175.0
+    private const val BAND_MAX_DARK = 0.04
     /** Relación mínima largo/alto (un logo o un rótulo compactos ya los trata [blocks]). */
     private const val BAND_ASPECT = 6
 
@@ -857,19 +859,16 @@ internal object PrintedPage {
      * BANDAS RELLENAS de color o gris medio con texto claro (cabecera azul de una tabla, banda de título): alargadas, así
      * que [blocks] no las aceptaba (relación ≤ 3 para el color, y el gris < 150 no ve un azul claro) y salían a trozos -un
      * pedazo entre palabra y palabra como imagen, el resto binarizado: el texto blanco se perdía o quedaba con manchas-.
-     * Máscara: croma (S ≥ 60) o gris medio (< 185) a la escala de [q]; cierre horizontal para tapar el texto claro y
+     * Máscara: gris medio (90..[BAND_GRAY_MAX]) a ~[BAND_SIDE] px; cierre horizontal para tapar el texto claro y
      * apertura que quita letras y líneas finas; se aceptan las componentes alargadas (relación > 3, sólo las filas que
      * cubren en ≥ 70 %), de al menos 3 px de alto y cuya caja es relleno en ≥ [BAND_FILL] antes del cierre.
      */
     internal fun bandBlocks(smN: Mat, ow: Int, oh: Int, bag: MatBag): List<Rect> {
         val q = bag.mat(); Cv.downscale(smN, q, BAND_SIDE)
-        val hsv = bag.mat(); Imgproc.cvtColor(q, hsv, Imgproc.COLOR_RGB2HSV)
-        val s = bag.mat(); Core.extractChannel(hsv, s, 1)
         val gq = bag.add(Cv.gray(q))
-        // relleno: con color (S ≥ 60) o gris medio (90..185), ni papel ni tinta negra
-        val m = bag.mat(); Core.compare(s, Scalar(60.0), m, Core.CMP_GE)
-        val g1 = bag.mat(); Core.inRange(gq, Scalar(90.0), Scalar(185.0), g1)
-        Core.bitwise_or(m, g1, m)
+        // relleno: gris medio (azul, gris o color oscuros), ni papel ni tinta negra. El resaltador (amarillo, rosa, verde
+        // claros) es más claro: no es una banda (en B/N se limpia como siempre)
+        val m = bag.mat(); Core.inRange(gq, Scalar(90.0), Scalar(BAND_GRAY_MAX), m)
         val fill = bag.mat(); m.copyTo(fill)
         Imgproc.morphologyEx(m, m, Imgproc.MORPH_CLOSE, Cv.kernel(Imgproc.MORPH_RECT, 9, 5))
         Imgproc.morphologyEx(m, m, Imgproc.MORPH_OPEN, Cv.kernel(Imgproc.MORPH_RECT, 7))
@@ -894,13 +893,19 @@ internal object PrintedPage {
             if (y0 < 0) continue
             y = y0; bh = y1 - y0 + 1
             if (bh < 3 || bw <= BAND_ASPECT * bh) continue
+            // (pegada al borde de la imagen: canto, mesa o franja de la página que el borde limpia; como antes)
+            val mx = 0.01 * q.cols(); val my = 0.01 * q.rows()
+            if (x <= mx || y <= my || x + bw >= q.cols() - mx || y + bh >= q.rows() - my) continue
             val r = Rect(x, y, bw, bh)
             // casi todo relleno (un renglón de texto cerrado es sobre todo papel: ≤ 0,5; una banda ≥ 0,9)
             val fr = fill.submat(r); val ff = Core.countNonZero(fr).toDouble() / r.area(); fr.release()
-            val roi = gq.submat(r); val light = bag.mat(); Core.compare(roi, Scalar(200.0), light, Core.CMP_GE); roi.release()
+            val roi = gq.submat(r); val light = bag.mat(); Core.compare(roi, Scalar(200.0), light, Core.CMP_GE)
+            val dark = bag.mat(); Core.compare(roi, Scalar(80.0), dark, Core.CMP_LT); roi.release()
+            val df = Core.countNonZero(dark).toDouble() / r.area()
             val lf = Core.countNonZero(light).toDouble() / r.area()
-            log?.invoke("banda cand $x,$y ${bw}x$bh relleno=%.2f claro=%.2f".format(ff, lf))
-            if (ff < BAND_FILL) continue
+            log?.invoke("banda cand $x,$y ${bw}x$bh relleno=%.2f claro=%.2f oscuro=%.2f".format(ff, lf, df))
+            // (texto NEGRO dentro: un renglón con resaltador o un sombreado claro con texto; ahí manda la binarización)
+            if (ff < BAND_FILL || df > BAND_MAX_DARK) continue
             out.add(Cv.clampRect(Rect((x * kx).toInt(), (y * ky).toInt(), (bw * kx).roundToInt(), (bh * ky).roundToInt()), ow, oh))
         }
         log?.invoke("bandas: ${out.size} ${out.joinToString { "${it.x},${it.y} ${it.width}x${it.height}" }}")
