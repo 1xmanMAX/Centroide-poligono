@@ -37,12 +37,23 @@ class PageProcessor(val tier: DeviceTier) {
     private val previewLock = Any()
 
     /** Renderizado final a calidad completa. */
-    fun render(original: Bitmap, edits: PageEdits, progress: ProgressCallback? = null, layoutImages: List<FloatArray> = emptyList(), tableHints: List<FloatArray> = emptyList()): Bitmap {
+    fun render(
+        original: Bitmap, edits: PageEdits, progress: ProgressCallback? = null, layoutImages: List<FloatArray> = emptyList(),
+        tableHints: List<FloatArray> = emptyList(),
+        /**
+         * "Mejorar con Jev": recibe la página rectificada (antes del filtro) y devuelve (fotos, tablas) normalizadas, o
+         * null (sin Jev: todo como siempre). Las fotos se suman a [layoutImages] sin duplicar; las tablas a [tableHints].
+         */
+        jev: ((Mat) -> Pair<List<FloatArray>, List<FloatArray>>?)? = null,
+    ): Bitmap {
         progress?.invoke(0f)
         val geo = geometryFull(original, edits, maxSide = 0)
         // (el callback de progreso puede lanzar para cancelar un render en segundo plano: nada queda sin liberar)
         try { progress?.invoke(0.3f) } catch (e: Throwable) { geo.release(); throw e }
-        val out = finish(geo, edits, ImageEnhancer.Options.of(tier, fast = false).copy(layoutImages = layoutImages, tableHints = tableHints), progress)
+        val hints = jev?.let { f -> runCatching { f(geo) }.getOrNull() }
+        val photos = hints?.let { com.scannerpromax.ai.jev.JevPage.mergePhotos(layoutImages, it.first) } ?: layoutImages
+        val tables = hints?.let { tableHints + it.second } ?: tableHints
+        val out = finish(geo, edits, ImageEnhancer.Options.of(tier, fast = false).copy(layoutImages = photos, tableHints = tables), progress)
         try {
             val bmp = Cv.toBitmap(out)
             progress?.invoke(1f)

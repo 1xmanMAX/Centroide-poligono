@@ -146,6 +146,28 @@ class IndraCorrector(
         return pre + matchCase(c, top.key) + post to (if (accentOnly) "tilde" else "léxico %.1f".format(java.util.Locale.ROOT, gain))
     }
 
+    /**
+     * Candidatas para una palabra dudosa (verificación con Jev): términos del vocabulario cercanos y palabras del léxico a
+     * una edición, ordenadas por distancia ponderada (y LM). Conserva la puntuación y la mayúscula de [t]. Sin decidir:
+     * quien llama elige mirando la imagen.
+     */
+    fun suggestions(t: String, max: Int = 4): List<String> {
+        val start = t.indexOfFirst { it.isLetterOrDigit() }
+        if (start < 0) return emptyList()
+        val end = t.indexOfLast { it.isLetterOrDigit() } + 1
+        val c = t.substring(start, end); val pre = t.substring(0, start); val post = t.substring(end)
+        if (c.length < 3 || !c.all { it.isLetter() }) return emptyList()
+        val scored = HashMap<String, Double>()
+        for (v in vocab.words.values) if (!v.any { it.isDigit() } && editDistance(key(c), key(v)) <= maxVocabEdits(c.length)) scored[matchCase(c, v)] = weightedDistance(c, v, null) - 0.5
+        if (lexicon != null && !inLexicon(c)) {
+            for (cand in edits1(c.lowercase())) if (!scored.containsKey(cand) && inLexicon(cand)) {
+                val lm = lmScore(cand)
+                scored[matchCase(c, cand)] = weightedDistance(c, cand, null) - (if (lm.isNaN()) 0.0 else 0.02 * lm)
+            }
+        }
+        return scored.entries.sortedBy { it.value }.map { pre + it.key + post }.filter { it != t }.distinct().take(max)
+    }
+
     /** log P de la palabra (con espacio delante y detrás) según el LM de Indra; NaN sin LM. */
     private fun lmScore(w: String): Double {
         val m = lm ?: return Double.NaN
