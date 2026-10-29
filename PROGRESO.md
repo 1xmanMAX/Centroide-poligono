@@ -158,3 +158,4 @@ Maqueta en lienzo de diseño: https://claude.ai/artifact/1axPwJgQ3TRA16puB75DTG 
   OCR: CER 27,3 -> 27,3 (sin efecto) -> "Texto dudoso" apagado por defecto. Todo apagado sin clave; 527 tests.
 - Recomendación: "Mejorar con Jev" opcional (apagado por defecto); con clave, fotos y tablas sí; OCR no. Pendiente: probar
   en el móvil; encuadre con Jev no probado. Láminas /tmp/claude-0/bench/jev/laminas/.
+- 2026-10-29: Jev INTEGRADO (merge b55a5d9): fotos (IoU 0,48→0,74 sin PP; F1 0,47→0,88), tablas deslumbradas (cobertura 74,5→89 %), OCR dudoso sin mejora (apagado). Orientación doc_ori (3b62269). Agente "ideas Jev" implementando: tipo→modo, carpetas, rescate encuadre/¿hay documento?, duplicados híbrido, calidad→reescanear, firmas/sellos (notas /tmp/claude-0/bench/notes_jev_impl.md). Luego UNA sola versión (v28) con todo.
