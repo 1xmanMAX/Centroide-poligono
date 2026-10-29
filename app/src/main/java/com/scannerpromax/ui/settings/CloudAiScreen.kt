@@ -176,6 +176,7 @@ fun CloudAiScreen(container: AppContainer, onBack: () -> Unit) {
         onStop = { id -> update { it.withCloudConsent(id, false) } },
         onResetUsage = { container.cloudUsage.reset(it) },
         docGen = { com.scannerpromax.ui.docgen.DocGenSettingsGroup(container) },
+        jev = { JevSettingsGroup(container) },
     )
 
     consentFor?.let { id ->
@@ -219,6 +220,8 @@ internal fun CloudAiContent(
     onResetUsage: (CloudProviderId) -> Unit,
     /** Grupo de la reconstrucción de documentos con IA (modelo de alta calidad y precios). */
     docGen: @Composable () -> Unit = {},
+    /** "Jev (TypeSafe)": mejora de fotos, tablas y OCR dudoso. */
+    jev: @Composable () -> Unit = {},
 ) {
     val ui = MaterialTheme.ui
     Column(
@@ -258,6 +261,8 @@ internal fun CloudAiContent(
         }
 
         docGen()
+
+        jev()
 
         InsetGroup(
             header = "Opciones",

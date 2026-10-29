@@ -45,6 +45,9 @@ class IndraEngine(
         return IndraCorrector(if (spellCheck) lexicon else null, UserVocabulary(vocabulary), e.languageModel, e.vocab).also { corrector = it }
     }
 
+    /** Candidatas del corrector para una palabra dudosa (verificación con Jev); vacía si Indra no está cargado. */
+    fun suggestions(word: String): List<String> = ocr?.let { runCatching { correctorFor(it).suggestions(word) }.getOrNull() }.orEmpty()
+
     @Volatile private var ocr: IndraOcr? = null
     @Volatile private var failed = false
 

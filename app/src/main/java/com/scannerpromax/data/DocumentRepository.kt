@@ -78,6 +78,9 @@ class DocumentRepository(
     private val tier: DeviceTier,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** "Mejorar con Jev" (Ajustes › IA en la nube); null o apagado = comportamiento de siempre. */
+    @Volatile var jev: com.scannerpromax.ai.jev.JevEnhancer? = null
     private val root: File = File(context.filesDir, DOCUMENTS_DIR)
     private val captureDir: File = File(context.cacheDir, "captures")
     private val importDir: File = File(context.cacheDir, "imports")
@@ -931,7 +934,7 @@ class DocumentRepository(
         val workEdits = edits.quad?.let { q -> edits.copy(quad = toSpace(q, pageW, pageH, original.width, original.height)) } ?: edits
         // Cajas de foto de la maquetación guardada (PP-DocLayoutV3): "Color natural" las conserva como foto
         val photos = if (edits.filter == FilterType.NATURAL) layoutPhotoBoxes(docId, pageId, edits) else emptyList()
-        val rendered = processor.render(original, workEdits, progress, photos)
+        val rendered = processor.render(original, workEdits, progress, photos, jev = jevHook(dir, pageId, edits))
         try {
             currentCoroutineContext().ensureActive()
             val thumb = BitmapIO.thumbnail(rendered, THUMB_SIDE)
@@ -958,6 +961,20 @@ class DocumentRepository(
             if (rendered !== original) rendered.recycle()
         }
         return processedName to thumbName
+    }
+
+    /**
+     * "Mejorar con Jev" (opcional, con la clave del usuario): fotos (solo "Color natural") y tablas (con "Conservar
+     * cuadrícula") de la página rectificada; caché en `jev/<página>_<hash de la geometría>.json` (no depende del filtro).
+     * null = sin Jev (apagado, sin clave o filtro sin uso): render de siempre.
+     */
+    private fun jevHook(dir: File, pageId: String, edits: PageEdits): ((org.opencv.core.Mat) -> Pair<List<FloatArray>, List<FloatArray>>?)? {
+        val j = jev?.takeIf { it.settings.value.enabled && it.hasKey() } ?: return null
+        val wantPhotos = edits.filter == FilterType.NATURAL
+        val wantTables = edits.keepRuling && edits.filter.uiFilter != FilterType.ORIGINAL
+        if (!wantPhotos && !wantTables) return null
+        val cache = File(dir, jevCacheName(pageId, edits))
+        return { geo -> j.pageHints(geo, cache, wantPhotos, wantTables)?.let { it.photos to it.tables } }
     }
 
     private suspend fun regenerateThumb(docId: String, page: Page, processed: File) {
@@ -1000,6 +1017,9 @@ class DocumentRepository(
 
     /** Borra procesados/miniaturas antiguos de la página distintos de los que se conservan. */
     private fun cleanupStale(dir: File, page: Page, keepProcessed: String, keepThumb: String) {
+        // caché de Jev de otras geometrías de la página
+        val keepJev = jevCacheName(page.id, page.edits).substringAfter('/')
+        File(dir, JEV_DIR).listFiles()?.forEach { f -> if (f.name.startsWith(page.id + "_") && f.name != keepJev) f.delete() }
         File(dir, PROCESSED_DIR).listFiles()?.forEach { f ->
             // (la maquetación de la IA del procesado que se conserva, `<procesado>.layout.json`, también se conserva)
             val rel = "$PROCESSED_DIR/${f.name}"
@@ -1227,8 +1247,17 @@ class DocumentRepository(
         val bmp = geo?.first ?: withContext(Dispatchers.Default) { BitmapIO.decode(file.absolutePath, ocrDecodePixels(lightweight)) }
         val partial = OcrEngine.Partial()
         val result = try {
-            if (geo != null) ocr().recognize(bmp, geo.second.first, geo.second.second, partial)
+            val r0 = if (geo != null) ocr().recognize(bmp, geo.second.first, geo.second.second, partial)
             else ocr().recognize(bmp, edits.filter, lightweight, partial)
+            // "Mejorar con Jev" › OCR: palabras/líneas dudosas verificadas con el recorte (si falla, r0 tal cual)
+            jev?.takeIf { it.settings.value.let { s -> s.enabled && s.ocr } }?.let { j ->
+                withContext(Dispatchers.IO) {
+                    runCatching {
+                        val m = com.scannerpromax.imaging.Cv.toRgba(bmp)
+                        try { j.fixOcr(r0, m) { w -> ocr().indra?.suggestions(w).orEmpty() } } finally { m.release() }
+                    }.getOrDefault(r0)
+                }
+            } ?: r0
         } catch (c: kotlinx.coroutines.CancellationException) {
             partial.result?.let { r ->
                 withContext(NonCancellable) {
@@ -1614,6 +1643,8 @@ class DocumentRepository(
 
         private fun processedName(pageId: String, edits: PageEdits) = PageFiles.processedName(pageId, edits)
         private fun thumbName(pageId: String, edits: PageEdits) = PageFiles.thumbName(pageId, edits)
+        private fun jevCacheName(pageId: String, edits: PageEdits) = PageFiles.jevCacheName(pageId, edits)
+        private const val JEV_DIR = PageFiles.JEV_DIR
         /** OCR con el hash de las ediciones en el nombre: un OCR de otra versión de la imagen se invalida por nombre. */
         private fun ocrName(pageId: String, edits: PageEdits) = PageFiles.ocrName(pageId, edits)
 

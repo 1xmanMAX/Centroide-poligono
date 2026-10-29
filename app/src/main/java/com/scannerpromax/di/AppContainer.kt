@@ -124,7 +124,13 @@ class AppContainer(context: Context) {
             it.attachOcrEngine(ocr)
             it.aiHook = aiQueue
             it.onOcrUnavailable = { indraProvisioner.ensure() }
+            it.jev = jev
         }
+    }
+
+    /** "Mejorar con Jev" (TypeSafe; opcional, con la clave del usuario): fotos, tablas y OCR dudoso. */
+    val jev: com.scannerpromax.ai.jev.JevEnhancer by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        com.scannerpromax.ai.jev.JevEnhancer(appContext, cloudKeys)
     }
 
     val pdfExporter: PdfExporter by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {

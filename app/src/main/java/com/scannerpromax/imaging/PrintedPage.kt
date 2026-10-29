@@ -48,6 +48,9 @@ internal object PrintedPage {
 
     internal var log: ((String) -> Unit)? = null
 
+    /** Banco de pruebas: bloques de imagen clásicos (px de la salida) y tamaño de la salida. */
+    internal var onImages: ((List<org.opencv.core.Rect>, Int, Int) -> Unit)? = null
+
     /**
      * [printed] = usar este render (todo lo que no es una hoja de cuaderno con rayado, ver [PrintClassifier]);
      * [notebook] = hoja de cuaderno -> recuadros de escritura. [letterHeight] en px de la imagen analizada (completa).
@@ -396,6 +399,7 @@ internal object PrintedPage {
         val lh = max(4.0, if (st.letterHeight > 0) st.letterHeight * f else oh / 250.0)
         // Bloques de imagen (logos, fotos: compactos y de color) -> en B/N se conservan en gris
         val images = if (color) emptyList() else findImageBlocks(smNz, ow, oh, bag) + pictureBlocks(st, ow, oh)
+        onImages?.invoke(images, ow, oh)
         val outsideFull = if (outside == null) null else bag.mat().also { Imgproc.resize(outside, it, Size(ow.toDouble(), oh.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR) }
         // Sombras: la división por el fondo amplifica el ruido del papel (ganancia g) -> el punto blanco local baja
         // con el ruido local (σ·g^0.85) para que el papel en sombra quede igual de blanco que el iluminado. Se

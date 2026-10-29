@@ -39,6 +39,15 @@ object PageFiles {
         explicitNulls = false
     }
 
+    const val JEV_DIR = "jev"
+
+    /**
+     * Caché de "Mejorar con Jev" de la página: depende SOLO de la geometría ([sameGeometry]), no del filtro ni de los
+     * ajustes: `jev/<página>_<hash de la geometría>.json`.
+     */
+    fun jevCacheName(pageId: String, edits: PageEdits) =
+        "$JEV_DIR/${pageId}_${editsHash(PageEdits(quad = edits.quad, rotation = edits.rotation, autoDeskew = edits.autoDeskew, autoDewarp = edits.autoDewarp, manualQuad = edits.manualQuad))}.json"
+
     fun processedName(pageId: String, edits: PageEdits) =
         "$PROCESSED_DIR/${pageId}_${editsHash(edits)}.${if (isBinaryFilter(edits.filter)) "png" else "jpg"}"
 
