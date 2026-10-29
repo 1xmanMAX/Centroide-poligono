@@ -172,3 +172,4 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
 - QualityAnalyzer: desenfoque 60 -> 150.
 - Banco: JevIdeasEvalTest (-PjevIdeas), notas /tmp/claude-0/bench/notes_jev_impl.md. 547 tests OK.
 - 2026-10-29: ideas Jev INTEGRADAS (c5d950f): tipo→modo/filtro, carpetas (categoría + chips en Inicio), rescate de encuadre y "¿hay documento?", duplicados ORB+Jev, calidad→Reescanear, firmas/sellos. Umbral de desenfoque en vivo devuelto a 60 (150 sólo medido en fotos). 547 tests. v28 COMPILADA (una sola versión con todo).
+- 2026-10-29: 13 fotos REALES del informe Juliaca en /tmp/claude-0/bench/datasets_usuario/juliaca2 (NO al repo). Agente "juliaca2": cadena completa (detección, orientación, geometría, filtros, tablas, fotos, Jev, duplicados j09/j12), lista de defectos, correcciones generales, láminas /tmp/claude-0/bench/juliaca2_laminas, notas notes_juliaca2.md. Luego una sola versión (v29).
