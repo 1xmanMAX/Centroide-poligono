@@ -18,6 +18,13 @@ object QualityAnalyzer {
 
     private const val WORK_SIDE = 640
 
+    /**
+     * Umbral de desenfoque (varianza del Laplaciano a 640 px). Banco jev_ideas i3 (40 fotos desenfocadas por foco o
+     * movimiento frente a 200 sin desenfoque): con 60 solo se detectaba el 28 %; con 150, el 53 % sin falsos positivos.
+     * En manifest_v3 (30 categorías reales x 40 fotos nítidas) el percentil 5 nunca baja de 333 y ninguna queda bajo 200.
+     */
+    internal const val BLUR_LAPVAR = 150.0
+
     fun analyze(bitmap: Bitmap): QualityReport {
         val w = bitmap.width; val h = bitmap.height
         if (w < 8 || h < 8) return report(0.0, 0.0, 0.0)
@@ -137,13 +144,13 @@ object QualityAnalyzer {
     }
 
     private fun report(lapVar: Double, brightness: Double, glare: Double, hasGlare: Boolean = false): QualityReport {
-        // Varianza del Laplaciano a 640 px: < ~60 borroso, > ~600 muy nítido
+        // Varianza del Laplaciano a 640 px: < [BLUR_LAPVAR] borroso, > ~600 muy nítido
         val sharp = (lapVar / 600.0).coerceIn(0.0, 1.0).toFloat()
         return QualityReport(
             sharpness = sharp,
             brightness = brightness.coerceIn(0.0, 1.0).toFloat(),
             glare = glare.coerceIn(0.0, 1.0).toFloat(),
-            isBlurry = lapVar < 60.0,
+            isBlurry = lapVar < BLUR_LAPVAR,
             isTooDark = brightness < 0.22,
             hasGlare = hasGlare,
         )

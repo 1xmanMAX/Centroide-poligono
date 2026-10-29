@@ -7,6 +7,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -107,6 +109,8 @@ fun HomeScreen(
 
     val documents by container.documents.documents.collectAsStateWithLifecycle()
     var query by rememberSaveable { mutableStateOf("") }
+    /** Carpeta elegida en la fila de carpetas (null = todas). */
+    var folder by rememberSaveable { mutableStateOf<String?>(null) }
     var gridMode by rememberSaveable { mutableStateOf(true) }
     var renameTarget by remember { mutableStateOf<Document?>(null) }
     var deleteTarget by remember { mutableStateOf<Document?>(null) }
@@ -131,17 +135,21 @@ fun HomeScreen(
     // páginas en cada tecla bloqueaba el hilo principal en gama baja: se hace en segundo plano con un pequeño
     // retardo (las pulsaciones rápidas cancelan la búsqueda anterior). Sin consulta, la lista va directa.
     var filtered by remember { mutableStateOf(documents) }
-    LaunchedEffect(documents, query) {
+    val folders = remember(documents) { homeFolders(documents) }
+    // (la carpeta elegida ya no existe: se vuelve a "Todas")
+    LaunchedEffect(folders) { if (folder != null && folders.none { it.first == folder }) folder = null }
+    LaunchedEffect(documents, query, folder) {
         val q = query.trim()
+        val inFolder = folder?.let { f -> documents.filter { it.category == f } } ?: documents
         val result = if (q.isEmpty()) {
-            documents
+            inFolder
         } else {
             delay(SEARCH_DEBOUNCE_MS)
             withContext(Dispatchers.Default) {
-                documents.filter { d ->
-                    d.title.contains(q, ignoreCase = true) || d.pages.any { p ->
-                        (p.ocrEditedText ?: p.ocrText)?.contains(q, ignoreCase = true) == true
-                    }
+                inFolder.filter { d ->
+                    d.title.contains(q, ignoreCase = true) ||
+                        com.scannerpromax.ai.jev.JevCapture.folderLabel(d.category)?.contains(q, ignoreCase = true) == true ||
+                        d.pages.any { p -> (p.ocrEditedText ?: p.ocrText)?.contains(q, ignoreCase = true) == true }
                 }
             }
         }
@@ -196,6 +204,9 @@ fun HomeScreen(
             filtered = filtered,
             query = query,
             onQueryChange = { query = it },
+            folders = folders,
+            folder = folder,
+            onFolderChange = { folder = it },
             gridMode = gridMode,
             onToggleGrid = { gridMode = !gridMode },
             actionsFor = { doc -> actionsFor(doc) },
@@ -269,6 +280,10 @@ internal fun HomeContent(
     onSettings: () -> Unit,
     snackbar: SnackbarHostState,
     menuInitiallyOpen: Boolean = false,
+    /** Carpetas con documentos (clave, nombre con recuento); vacía = sin fila de carpetas. */
+    folders: List<Pair<String, String>> = emptyList(),
+    folder: String? = null,
+    onFolderChange: (String?) -> Unit = {},
 ) {
     val ui = MaterialTheme.ui
     val perf = LocalPerf.current
@@ -314,6 +329,9 @@ internal fun HomeContent(
                     placeholder = "Buscar documentos o texto",
                     modifier = Modifier.padding(top = 14.dp),
                 )
+            }
+            if (folders.isNotEmpty()) fullItem("folders") {
+                FolderChips(folders, folder, onFolderChange, Modifier.padding(top = 12.dp))
             }
             if (documents.isNotEmpty()) {
                 fullItem("recentHeader") {
@@ -472,6 +490,44 @@ private fun QuietMessage(title: String, message: String) {
 }
 
 private fun countLabel(n: Int, one: String, many: String) = if (n == 1) "1 $one" else "$n $many"
+
+/** Carpetas de [docs] con documentos, por número de documentos: (clave, «Facturas · 3»). */
+internal fun homeFolders(docs: List<Document>): List<Pair<String, String>> =
+    docs.mapNotNull { it.category }.groupingBy { it }.eachCount().entries
+        .mapNotNull { (k, n) -> com.scannerpromax.ai.jev.JevCapture.folderLabel(k)?.let { Triple(k, it, n) } }
+        .sortedWith(compareByDescending<Triple<String, String, Int>> { it.third }.thenBy { it.second })
+        .map { (k, l, n) -> k to "$l · $n" }
+
+/** Fila de carpetas (cápsulas): «Todas» y una por carpeta con documentos. */
+@Composable
+private fun FolderChips(folders: List<Pair<String, String>>, selected: String?, onSelect: (String?) -> Unit, modifier: Modifier = Modifier) {
+    androidx.compose.foundation.lazy.LazyRow(
+        modifier.fillMaxWidth(),
+        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
+    ) {
+        item(key = "all") { FolderChip("Todas", selected == null) { onSelect(null) } }
+        items(folders.size, key = { folders[it].first }) { i ->
+            val (k, label) = folders[i]
+            FolderChip(label, selected == k) { onSelect(if (selected == k) null else k) }
+        }
+    }
+}
+
+@Composable
+private fun FolderChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    val ui = MaterialTheme.ui
+    Text(
+        label,
+        style = MaterialTheme.typography.bodySmall,
+        fontWeight = if (selected) androidx.compose.ui.text.font.FontWeight.SemiBold else androidx.compose.ui.text.font.FontWeight.Normal,
+        color = if (selected) ui.onAccent else ui.label,
+        modifier = Modifier
+            .clip(androidx.compose.foundation.shape.RoundedCornerShape(50))
+            .background(if (selected) ui.accent else ui.card)
+            .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 7.dp),
+    )
+}
 
 private const val SEARCH_DEBOUNCE_MS = 150L
 

@@ -48,6 +48,9 @@ object PageFiles {
     fun jevCacheName(pageId: String, edits: PageEdits) =
         "$JEV_DIR/${pageId}_${editsHash(PageEdits(quad = edits.quad, rotation = edits.rotation, autoDeskew = edits.autoDeskew, autoDewarp = edits.autoDewarp, manualQuad = edits.manualQuad))}.json"
 
+    /** Respuestas de "Mejorar con Jev" sobre la FOTO capturada (tipo, carpeta, encuadre, calidad): no dependen de las ediciones. */
+    fun jevCaptureName(pageId: String) = "$JEV_DIR/${pageId}_capture.json"
+
     fun processedName(pageId: String, edits: PageEdits) =
         "$PROCESSED_DIR/${pageId}_${editsHash(edits)}.${if (isBinaryFilter(edits.filter)) "png" else "jpg"}"
 

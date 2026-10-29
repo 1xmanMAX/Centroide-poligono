@@ -512,7 +512,7 @@ internal object PrintedPage {
             out
         } else if (natBuf != null) {
             try {
-                NaturalColor.compose(NaturalColor.Inputs(out, natBuf, lh, 0.0, images = images + NaturalColor.layoutRects(layoutImages, ow, oh), exclude = outsideFull, excludeForeign = true, orig = rgb, photoMode = photoMode))
+                NaturalColor.compose(NaturalColor.Inputs(out, natBuf, lh, 0.0, images = images + NaturalColor.layoutRects(layoutImages, ow, oh), exclude = outsideFull, excludeForeign = true, orig = rgb, photoMode = photoMode, soft = NaturalColor.inkRects(layoutImages, ow, oh)))
             } finally { out.release() }
         } else out
     }

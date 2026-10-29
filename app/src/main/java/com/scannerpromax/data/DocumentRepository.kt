@@ -5,6 +5,11 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import android.util.Log
+import com.scannerpromax.ai.jev.CaptureHints
+import com.scannerpromax.ai.jev.JevBox
+import com.scannerpromax.ai.jev.JevCapture
+import com.scannerpromax.ai.jev.JevDuplicates
+import com.scannerpromax.ai.jev.JevRenderHints
 import com.scannerpromax.domain.DocLayout
 import com.scannerpromax.domain.Document
 import com.scannerpromax.domain.FilterType
@@ -18,6 +23,8 @@ import com.scannerpromax.domain.ScanMode
 import com.scannerpromax.imaging.BitmapIO
 import com.scannerpromax.imaging.DeviceProfiler
 import com.scannerpromax.imaging.DeviceTier
+import com.scannerpromax.imaging.Cv
+import com.scannerpromax.imaging.DuplicatePages
 import com.scannerpromax.imaging.PageProcessor
 import com.scannerpromax.imaging.PerspectiveCorrector
 import com.scannerpromax.imaging.ProgressCallback
@@ -301,6 +308,8 @@ class DocumentRepository(
         val originalName = "$ORIGINAL_DIR/$pageId.jpg"
         val dst = File(dir, originalName)
 
+        var capture: CaptureHints? = null
+        var docBox: JevBox? = null
         val page = heavyWork {
             withContext(Dispatchers.Default) {
                 var bitmap: Bitmap? = null
@@ -320,12 +329,26 @@ class DocumentRepository(
 
                     val edits = presetEdits ?: run {
                         val det = if (autoDetect && m != ScanMode.PHOTO) detectQuadWithConfidence(bmp) else null
-                        val quad = det?.first?.let { toSpace(it, bmp.width, bmp.height, pw, ph) }
-                        val base = defaultEdits(m, quad)
+                        // "Mejorar con Jev" (opcional): tipo, carpeta, encuadre y calidad de la foto en UNA petición. Sin
+                        // clave, sin red o si falla: null y todo como siempre.
+                        val hints = if (autoDetect && m != ScanMode.PHOTO && m != ScanMode.ID_CARD) captureHints(bmp, dir, pageId) else null
+                        capture = hints
+                        var q0 = det?.first
+                        when (val f = JevCapture.framing(hints, q0?.let { boxOf(it, bmp.width, bmp.height) }, det?.second, q0 != null && nearlyFull(q0, bmp.width, bmp.height))) {
+                            JevCapture.Framing.Keep -> Unit
+                            // no hay documento: sin recorte (antes se recortaba el 82 % de las fotos sin documento)
+                            JevCapture.Framing.FullPage -> q0 = null
+                            is JevCapture.Framing.Roi -> q0 = rescueQuad(bmp, f, hints?.box)
+                        }
+                        docBox = q0?.let { boxOf(it, bmp.width, bmp.height) }
+                        val quad = q0?.let { toSpace(it, bmp.width, bmp.height, pw, ph) }
+                        var base = defaultEdits(m, quad)
+                        // tipo de documento -> modo y filtro (solo si el usuario no eligió otro filtro)
+                        JevCapture.typeEdits(JevCapture.confidentType(hints), m, base)?.let { base = it }
                         // Hoja girada 90° (renglones verticales) o del revés: se endereza SOLO si es muy fiable; el giro
                         // queda en las ediciones (el usuario lo cambia o deshace en el editor y la IA no vuelve a girar)
-                        val rot = if (autoDetect && (m == ScanMode.DOCUMENT || m == ScanMode.RECEIPT)) {
-                            runCatching { processor.autoOrientation(bmp, det?.first) }.getOrDefault(0)
+                        val rot = if (autoDetect && (m == ScanMode.DOCUMENT || m == ScanMode.RECEIPT) && base.aiHint != "photo") {
+                            runCatching { processor.autoOrientation(bmp, q0) }.getOrDefault(0)
                         } else 0
                         if (rot != 0) base.copy(rotation = rot) else base
                     }
@@ -345,6 +368,7 @@ class DocumentRepository(
                         width = pw,
                         height = ph,
                         edits = edits,
+                        issues = JevCapture.issues(capture, docBox).takeIf { it.isNotEmpty() },
                     )
                     appendPage(docId, page)
                     page
@@ -356,7 +380,9 @@ class DocumentRepository(
                 }
             }
         }
+        JevCapture.suggestedFolder(capture)?.let { suggestCategory(docId, it) }
         enqueueOcr(docId, page.id)
+        checkDuplicate(docId, page.id)
         aiHook?.onPageAdded(docId, page.id)
         return page
     }
@@ -453,6 +479,7 @@ class DocumentRepository(
             }
         }
         enqueueOcr(docId, page.id)
+        checkDuplicate(docId, page.id)
         aiHook?.onPageAdded(docId, page.id)
         return page
     }
@@ -553,7 +580,8 @@ class DocumentRepository(
     }
 
     suspend fun deletePage(docId: String, pageId: String) {
-        mutatePages(docId) { pages -> pages.filterNot { it.id == pageId } }
+        // (el aviso de duplicado de otra página que apuntaba a esta ya no tiene sentido)
+        mutatePages(docId) { pages -> pages.filterNot { it.id == pageId }.map { if (it.dupOf == pageId) it.copy(dupOf = null) else it } }
         withContext(Dispatchers.IO) { deletePageFiles(docDir(docId), pageId) }
         pageLocks.remove("$docId/$pageId")
         editGenerations.remove("$docId/$pageId")
@@ -820,6 +848,169 @@ class DocumentRepository(
     /** Detecta el documento y devuelve el quad en coordenadas del bitmap, o null si la confianza es baja. */
     private fun detectQuad(bmp: Bitmap): Quad? = detectQuadWithConfidence(bmp)?.first
 
+    // ------------------------------------------------------------------ "Mejorar con Jev" en la captura
+
+    /** Preguntas de la captura sobre la foto [bmp] (caché `jev/<página>_capture.json`). null = sin Jev. */
+    private fun captureHints(bmp: Bitmap, dir: File, pageId: String): CaptureHints? {
+        val j = jev?.takeIf { it.captureEnabled() } ?: return null
+        return runCatching {
+            val (m, _) = Cv.toRgbaScaled(bmp, JevCapture.SIDE)
+            try { j.captureHints(m, File(dir, PageFiles.jevCaptureName(pageId))) } finally { m.release() }
+        }.getOrNull()
+    }
+
+    /** El cuadrilátero es (casi) la imagen entera: el detector "cayó" a la foto completa. */
+    private fun nearlyFull(q: Quad, w: Int, h: Int): Boolean = polyArea(q) > 0.97f * w * h
+
+    private fun polyArea(q: Quad): Float {
+        val p = q.points()
+        var a = 0f
+        for (i in p.indices) { val u = p[i]; val v = p[(i + 1) % p.size]; a += u.x * v.y - v.x * u.y }
+        return kotlin.math.abs(a) / 2f
+    }
+
+    /** Caja envolvente del quad en fracciones de la foto [w] x [h]. */
+    private fun boxOf(q: Quad, w: Int, h: Int): JevBox {
+        val p = q.points()
+        return JevBox(p.minOf { it.x }.toDouble() / w, p.minOf { it.y }.toDouble() / h, p.maxOf { it.x }.toDouble() / w, p.maxOf { it.y }.toDouble() / h)
+    }
+
+    /**
+     * Rescate del encuadre: vuelve a lanzar el detector clásico DENTRO de la zona de Jev ([JevCapture.Framing.Roi.roi], la
+     * caja ampliada; fracciones de [bmp]) y, si tampoco da un cuadrilátero creíble ([JevCapture.roiQuadOk]), recorta por
+     * la caja de Jev ([JevCapture.Framing.Roi.fallback]). Quad en coordenadas de [bmp].
+     */
+    private fun rescueQuad(bmp: Bitmap, f: JevCapture.Framing.Roi, box: JevBox?): Quad {
+        val w = bmp.width; val h = bmp.height
+        val roi = f.roi
+        val x0 = (roi.left * w).toInt().coerceIn(0, w - 1); val y0 = (roi.top * h).toInt().coerceIn(0, h - 1)
+        val x1 = (roi.right * w).toInt().coerceIn(x0 + 1, w); val y1 = (roi.bottom * h).toInt().coerceIn(y0 + 1, h)
+        val fb = f.fallback
+        val fx0 = (fb.left * w).toFloat(); val fy0 = (fb.top * h).toFloat(); val fx1 = (fb.right * w).toFloat(); val fy1 = (fb.bottom * h).toFloat()
+        val rect = Quad(Pt(fx0, fy0), Pt(fx1, fy0), Pt(fx1, fy1), Pt(fx0, fy1))
+        var crop: Bitmap? = null
+        return try {
+            crop = Bitmap.createBitmap(bmp, x0, y0, x1 - x0, y1 - y0)
+            val det = processor.detector.detect(crop, useNeural = true)
+            if (det == null || det.confidence < MIN_CONFIDENCE || det.frameWidth <= 0) return rect
+            val q = detQuadScaled(crop, det).let { c -> Quad.of(c.points().map { Pt(it.x + x0, it.y + y0) }) }
+            val f = FloatArray(8) { i -> q.points()[i / 2].let { p -> if (i % 2 == 0) p.x / w else p.y / h } }
+            if (JevCapture.roiQuadOk(f, roi, box)) q else rect
+        } catch (t: Throwable) {
+            if (isOutOfMemory(t)) throw t
+            Log.w(TAG, "Fallo al volver a detectar en la zona de Jev", t)
+            rect
+        } finally {
+            if (crop != null && crop !== bmp) crop.recycle()
+        }
+    }
+
+    /** Cambia el documento bajo el candado sin tocar updatedAt (sugerencias, carpeta). */
+    private suspend fun mutateDocIfPresent(docId: String, durable: Boolean, transform: (Document) -> Document) {
+        loaded.await()
+        val changed = writeMutex.withLock {
+            val d = docs[docId] ?: return@withLock false
+            val u = transform(d)
+            if (u == d) return@withLock false
+            docs[docId] = u; publish(); true
+        }
+        if (changed) persist(docId, durable)
+    }
+
+    /** Sugerencia de carpeta para el documento (solo si no tiene carpeta ni otra sugerencia, aceptada o descartada). */
+    private suspend fun suggestCategory(docId: String, folder: String) = runCatching {
+        mutateDocIfPresent(docId, durable = false) { d -> if (d.category != null || d.suggestedCategory != null) d else d.copy(suggestedCategory = folder) }
+    }
+
+    /** Pone (o quita, con null) la carpeta del documento; la sugerencia queda resuelta ("" = no se vuelve a sugerir). */
+    suspend fun setCategory(docId: String, category: String?) =
+        mutateDocIfPresent(docId, durable = true) { it.copy(category = category, suggestedCategory = "") }
+
+    /** Descarta la carpeta sugerida (no se vuelve a sugerir). */
+    suspend fun dismissSuggestedCategory(docId: String) =
+        mutateDocIfPresent(docId, durable = true) { it.copy(suggestedCategory = "") }
+
+    /** Quita los avisos de calidad de la página (el usuario los descartó). */
+    suspend fun dismissIssues(docId: String, pageId: String) =
+        mutatePagesIfPresent(docId) { pages -> pages.map { if (it.id == pageId) it.copy(issues = null) else it } }
+
+    /** Descarta el aviso de duplicado de la página. */
+    suspend fun dismissDuplicate(docId: String, pageId: String) =
+        mutatePagesIfPresent(docId) { pages -> pages.map { if (it.id == pageId) it.copy(dupOf = null) else it } }
+
+    /** Rasgos ORB de los procesados recientes (los duplicados se buscan entre las últimas páginas del lote). */
+    private val dupFeatures = object : LinkedHashMap<String, DuplicatePages.Features>(16, 0.75f, true) {
+        override fun removeEldestEntry(e: MutableMap.MutableEntry<String, DuplicatePages.Features>?): Boolean =
+            (size > DUP_CACHE).also { if (it) e?.value?.release() }
+    }
+    private val dupMutex = Mutex()
+
+    /**
+     * Páginas duplicadas del lote (en segundo plano, sin red): ORB+RANSAC de la página nueva contra las [DUP_WINDOW]
+     * anteriores; ≥ 40 coincidencias = duplicado seguro; en la zona gris decide Jev si está activo (sin Jev, no se
+     * avisa). Si es duplicado se marca [Page.dupOf] y la revisión avisa.
+     */
+    private fun checkDuplicate(docId: String, pageId: String) {
+        scope.launch {
+            try {
+                awaitOcrIdle()
+                val doc = get(docId) ?: return@launch
+                val idx = doc.pages.indexOfFirst { it.id == pageId }
+                if (idx <= 0) return@launch
+                val page = doc.pages[idx]
+                val others = doc.pages.subList(maxOf(0, idx - DUP_WINDOW), idx).reversed()
+                dupMutex.withLock {
+                    val fa = dupFeaturesOf(docId, page) ?: return@launch
+                    for (o in others) {
+                        val fb = dupFeaturesOf(docId, o) ?: continue
+                        val dup = when (DuplicatePages.verdict(DuplicatePages.inliers(fa, fb))) {
+                            DuplicatePages.Verdict.DUPLICATE -> true
+                            DuplicatePages.Verdict.DIFFERENT -> false
+                            DuplicatePages.Verdict.GRAY -> grayDuplicate(docId, page, o)
+                        }
+                        if (dup) {
+                            mutatePagesIfPresent(docId, durable = false) { ps -> if (ps.none { it.id == o.id }) ps else ps.map { if (it.id == pageId) it.copy(dupOf = o.id) else it } }
+                            break
+                        }
+                    }
+                }
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                Log.w(TAG, "No se pudo buscar duplicados", t)
+            }
+        }
+    }
+
+    private suspend fun dupFeaturesOf(docId: String, p: Page): DuplicatePages.Features? {
+        val f = processedFileIfReady(docId, p) ?: return null
+        val key = f.absolutePath
+        dupFeatures[key]?.let { return it }
+        return withContext(Dispatchers.Default) {
+            val b = BitmapIO.decode(f.absolutePath, DuplicatePages.SIDE * DuplicatePages.SIDE * 2)
+            try {
+                val rgba = Cv.toRgba(b)
+                val gray = Cv.gray(rgba); rgba.release()
+                try { DuplicatePages.features(gray) } finally { gray.release() }
+            } finally { b.recycle() }
+        }.also { dupFeatures[key] = it }
+    }
+
+    /** Zona gris: ¿la misma hoja según Jev? (false sin Jev o si falla). */
+    private suspend fun grayDuplicate(docId: String, a: Page, b: Page): Boolean {
+        val j = jev?.takeIf { it.settings.value.enabled && it.hasKey() } ?: return false
+        val fa = processedFileIfReady(docId, a) ?: return false
+        val fb = processedFileIfReady(docId, b) ?: return false
+        return withContext(Dispatchers.Default) {
+            val px = JevDuplicates.SIDE * JevDuplicates.SIDE * 2
+            val ba = BitmapIO.decode(fa.absolutePath, px); val bb = BitmapIO.decode(fb.absolutePath, px)
+            val ma = Cv.toRgba(ba); val mb = Cv.toRgba(bb)
+            ba.recycle(); bb.recycle()
+            try { (j.samePage(ma, mb) ?: 0.0) >= JevDuplicates.SAME } finally { ma.release(); mb.release() }
+        }
+    }
+
+
     /**
      * Como [detectQuad] pero con la confianza del detector: (quad o null si es baja, confianza). null si el detector
      * no devolvió nada (cae a "imagen completa").
@@ -968,13 +1159,15 @@ class DocumentRepository(
      * cuadrícula") de la página rectificada; caché en `jev/<página>_<hash de la geometría>.json` (no depende del filtro).
      * null = sin Jev (apagado, sin clave o filtro sin uso): render de siempre.
      */
-    private fun jevHook(dir: File, pageId: String, edits: PageEdits): ((org.opencv.core.Mat) -> Pair<List<FloatArray>, List<FloatArray>>?)? {
+    private fun jevHook(dir: File, pageId: String, edits: PageEdits): ((org.opencv.core.Mat) -> JevRenderHints?)? {
         val j = jev?.takeIf { it.settings.value.enabled && it.hasKey() } ?: return null
         val wantPhotos = edits.filter == FilterType.NATURAL
         val wantTables = edits.keepRuling && edits.filter.uiFilter != FilterType.ORIGINAL
-        if (!wantPhotos && !wantTables) return null
+        // firmas y sellos con su color: solo en "Color natural"
+        val wantInks = edits.filter == FilterType.NATURAL
+        if (!wantPhotos && !wantTables && !wantInks) return null
         val cache = File(dir, jevCacheName(pageId, edits))
-        return { geo -> j.pageHints(geo, cache, wantPhotos, wantTables)?.let { it.photos to it.tables } }
+        return { geo -> j.pageHints(geo, cache, wantPhotos, wantTables, wantInks)?.let { JevRenderHints(it.photos, it.tables, it.inks) } }
     }
 
     private suspend fun regenerateThumb(docId: String, page: Page, processed: File) {
@@ -1592,7 +1785,10 @@ class DocumentRepository(
         private const val PROCESSED_DIR = "processed"
         private const val THUMB_DIR = "thumb"
         private const val OCR_DIR = "ocr"
-        private val SUBDIRS = listOf(ORIGINAL_DIR, PROCESSED_DIR, THUMB_DIR, OCR_DIR)
+        private val SUBDIRS = listOf(ORIGINAL_DIR, PROCESSED_DIR, THUMB_DIR, OCR_DIR, PageFiles.JEV_DIR)
+        /** Duplicados: páginas anteriores con las que se compara la nueva y rasgos ORB guardados en memoria. */
+        private const val DUP_WINDOW = 6
+        private const val DUP_CACHE = 12
 
         /** Solo para originales GENERADOS (DNI compuesto); las fotos de cámara/galería se mueven sin recodificar. */
         private const val ORIGINAL_QUALITY = 100

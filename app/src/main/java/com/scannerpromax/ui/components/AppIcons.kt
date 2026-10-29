@@ -73,6 +73,8 @@ object AppIcons {
     val Lock by lazy { stroke("Lock", rect(5f, 11f, 14f, 10f, 2f) + "M8 11V7a4 4 0 0 1 8 0v4", width = 2f) }
     val Copy by lazy { stroke("Copy", rect(9f, 9f, 11f, 11f, 2f) + "M5 15V5a2 2 0 0 1 2-2h8", width = 1.9f) }
     val Sparkles by lazy { stroke("Sparkles", "M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8zM19 15l.8 2.2 2.2.8-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z", width = 1.7f) }
+    val Folder by lazy { stroke("Folder", "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z", width = 1.9f) }
+    val Warning by lazy { stroke("Warning", "M10.3 4.2a2 2 0 0 1 3.4 0l7.6 13a2 2 0 0 1-1.7 3H4.4a2 2 0 0 1-1.7-3zM12 9.5v4M12 17h.01", width = 2f) }
     val Shield by lazy { stroke("Shield", "M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z", width = 2f) }
 
     private fun circle(cx: Float, cy: Float, r: Float) =

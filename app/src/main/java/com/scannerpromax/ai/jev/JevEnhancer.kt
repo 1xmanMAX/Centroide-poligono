@@ -23,6 +23,13 @@ data class JevSettings(
     val tables: Boolean = true,
     /** Verificar el OCR dudoso: apagado por defecto (en el banco no mejora el CER, notes_jev.md). */
     val ocr: Boolean = false,
+    /**
+     * Al capturar o importar: tipo de documento (modo y filtro), carpeta sugerida, rescate del encuadre / "no hay
+     * documento" y avisos de calidad. Una petición por foto (≈ 2 600 tokens).
+     */
+    val capture: Boolean = true,
+    /** Firmas y sellos con su color en "Color natural" (en la petición de la página: casi gratis). */
+    val inks: Boolean = true,
     val pages: Long = 0,
     val requests: Long = 0,
     val inputTokens: Long = 0,
@@ -44,25 +51,28 @@ class JevEnhancer(private val context: Context, private val keys: CloudKeyStore)
     val settings: StateFlow<JevSettings> = _settings.asStateFlow()
 
     @Volatile private var cached: Pair<String, JevClient>? = null
+    @Volatile private var cachedQuick: Pair<String, JevClient>? = null
 
     fun hasKey(): Boolean = keys.has(CloudKeyStore.JEV)
 
     fun maskedKey(): String? = keys.get(CloudKeyStore.JEV)?.let { CloudKeyStore.masked(it) }
 
-    fun setKey(key: String) { keys.set(CloudKeyStore.JEV, key); cached = null }
+    fun setKey(key: String) { keys.set(CloudKeyStore.JEV, key); cached = null; cachedQuick = null }
 
-    fun removeKey() { keys.remove(CloudKeyStore.JEV); cached = null; update { it.copy(enabled = false) } }
+    fun removeKey() { keys.remove(CloudKeyStore.JEV); cached = null; cachedQuick = null; update { it.copy(enabled = false) } }
 
     @Synchronized
     fun update(f: (JevSettings) -> JevSettings) {
         val n = f(_settings.value)
         prefs.edit().putBoolean("enabled", n.enabled).putBoolean("photos", n.photos).putBoolean("tables", n.tables).putBoolean("ocr", n.ocr)
+            .putBoolean("capture", n.capture).putBoolean("inks", n.inks)
             .putLong("pages", n.pages).putLong("requests", n.requests).putLong("tokens", n.inputTokens).putString("lastError", n.lastError).apply()
         _settings.value = n
     }
 
     private fun load() = JevSettings(
         prefs.getBoolean("enabled", false), prefs.getBoolean("photos", true), prefs.getBoolean("tables", true), prefs.getBoolean("ocr", false),
+        prefs.getBoolean("capture", true), prefs.getBoolean("inks", true),
         prefs.getLong("pages", 0), prefs.getLong("requests", 0), prefs.getLong("tokens", 0), prefs.getString("lastError", null),
     )
 
@@ -78,19 +88,68 @@ class JevEnhancer(private val context: Context, private val keys: CloudKeyStore)
         return JevClient(key, OkHttpJevTransport(http), maxTries = 2, baseDelayMs = 600).also { cached = key to it }
     }
 
+    /** Cliente de la captura: la página espera por él antes de procesarse, así que un solo intento y 8 s como mucho. */
+    private fun quickClient(): JevClient? {
+        val key = keys.get(CloudKeyStore.JEV) ?: return null
+        cachedQuick?.let { if (it.first == key) return it.second }
+        val http = OkHttpClient.Builder().connectTimeout(4, TimeUnit.SECONDS).writeTimeout(6, TimeUnit.SECONDS)
+            .readTimeout(6, TimeUnit.SECONDS).callTimeout(8, TimeUnit.SECONDS).build()
+        return JevClient(key, OkHttpJevTransport(http), maxTries = 1).also { cachedQuick = key to it }
+    }
+
+    /** ¿Se pregunta sobre la foto al capturar? (interruptor general + subopción + clave). */
+    fun captureEnabled(): Boolean = _settings.value.let { it.enabled && it.capture } && hasKey()
+
+    /**
+     * Tipo, carpeta, encuadre y calidad de la FOTO capturada [photo] (RGB/RGBA, sin recortar). Usa [cacheFile] si ya
+     * existe; si no, pregunta y la guarda. null = sin Jev (apagado, sin clave/red, error).
+     */
+    fun captureHints(photo: Mat, cacheFile: File): CaptureHints? {
+        if (!captureEnabled()) return null
+        CaptureHints.read(cacheFile)?.let { return it }
+        if (!active()) return null
+        val cli = quickClient() ?: return null
+        return try {
+            val h = JevCapture.analyze(photo, cli)
+            runCatching { CaptureHints.write(cacheFile, h) }
+            record(h.inputTokens, 1, page = false, error = null)
+            h
+        } catch (e: Exception) {
+            if (e is InterruptedException) Thread.currentThread().interrupt()
+            Log.w(TAG, "Jev no disponible para la captura: ${e.javaClass.simpleName}")
+            record(0, 0, page = false, error = (e as? CloudException)?.message ?: "Sin conexión con Jev")
+            null
+        }
+    }
+
+    /** Zona gris de los duplicados: probabilidad de que [a] y [b] sean la misma hoja, o null sin Jev. */
+    fun samePage(a: Mat, b: Mat): Double? {
+        if (!_settings.value.enabled || !active()) return null
+        val cli = client() ?: return null
+        return try {
+            val (p, tok) = JevDuplicates.samePage(a, b, cli)
+            record(tok, 1, page = false, error = null)
+            p
+        } catch (e: Exception) {
+            if (e is InterruptedException) Thread.currentThread().interrupt()
+            Log.w(TAG, "Jev no disponible para los duplicados: ${e.javaClass.simpleName}")
+            null
+        }
+    }
+
     /**
      * Fotos y tablas de la página rectificada [geo] (RGB/RGBA). Usa [cacheFile] si ya tiene lo pedido; si no, pregunta
      * y la guarda. null = sin Jev (apagado, sin clave/red, error).
      */
-    fun pageHints(geo: Mat, cacheFile: File, photos: Boolean, tables: Boolean): JevPageResult? {
+    fun pageHints(geo: Mat, cacheFile: File, photos: Boolean, tables: Boolean, inks: Boolean = false): JevPageResult? {
         val s = _settings.value
-        val wantP = photos && s.photos; val wantT = tables && s.tables
-        if (!s.enabled || !(wantP || wantT)) return null
-        JevPageResult.read(cacheFile)?.takeIf { it.covers(wantP, wantT) }?.let { return it }
+        val wantP = photos && s.photos; val wantT = tables && s.tables; val wantI = inks && s.inks
+        if (!s.enabled || !(wantP || wantT || wantI)) return null
+        JevPageResult.read(cacheFile)?.takeIf { it.covers(wantP, wantT, wantI) }?.let { return it }
         if (!active()) return null
         val cli = client() ?: return null
         return try {
-            val r = JevPage.analyze(geo, cli, wantP, wantT)
+            val r = JevPage.analyze(geo, cli, wantP, wantT, wantI)
             runCatching { JevPageResult.write(cacheFile, r) }
             record(r.inputTokens, 1, page = true, error = null)
             r
@@ -132,10 +191,13 @@ class JevEnhancer(private val context: Context, private val keys: CloudKeyStore)
     companion object {
         private const val TAG = "JevEnhancer"
 
-        /** Tokens típicos por página (fotos + tablas a 1568 px, medido): ~6 300; OCR dudoso: ~9 000 más. */
-        const val TYPICAL_PAGE_TOKENS = 6_300L
+        /** Tokens típicos por página (fotos + tablas + firmas a 1568 px, medido): ~6 400; OCR dudoso: ~9 000 más. */
+        const val TYPICAL_PAGE_TOKENS = 6_400L
         const val TYPICAL_OCR_TOKENS = 9_000L
+        /** Petición de la captura (foto a 1024 px, 9 preguntas): mediana medida 2 860 tokens (p90 3 380). */
+        const val TYPICAL_CAPTURE_TOKENS = 2_900L
 
-        fun typicalPageCost(ocr: Boolean): Double = JevApi.cost(TYPICAL_PAGE_TOKENS + if (ocr) TYPICAL_OCR_TOKENS else 0)
+        fun typicalPageCost(ocr: Boolean, capture: Boolean = true): Double =
+            JevApi.cost(TYPICAL_PAGE_TOKENS + (if (ocr) TYPICAL_OCR_TOKENS else 0) + if (capture) TYPICAL_CAPTURE_TOKENS else 0)
     }
 }

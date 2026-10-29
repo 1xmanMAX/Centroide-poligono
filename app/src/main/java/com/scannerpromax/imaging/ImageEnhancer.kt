@@ -149,10 +149,13 @@ object ImageEnhancer {
     /**
      * Ajusta la clasificación clásica de AUTO con el tipo de documento que dio la IA (antigua clasificación local, ya eliminada: fiable en recibos,
      * pizarras y pantallas según el banco; AUTO clásico solo reconocía el 6 % de los recibos). [hint] = clase de
-     * Qwen ("receipt", "whiteboard", "screen"); otras clases no cambian nada. La pizarra oscura (tiza) se respeta.
+     * Qwen o de Jev ("receipt", "whiteboard", "screen", "id_card"); otras clases no cambian nada. La pizarra oscura (tiza) se respeta.
      */
     fun withAiHint(a: ContentAnalysis, hint: String?): ContentAnalysis = when (hint) {
         "receipt" -> if (a.darkBoard) a else a.copy(kind = ContentKind.RECEIPT, recommended = FilterType.GRAYSCALE)
+        // DNI / tarjeta ("Mejorar con Jev"): color vivo como cada cara del modo DNI (la segmentación aplanaría el fondo
+        // de la tarjeta y su foto)
+        "id_card" -> if (a.darkBoard) a else a.copy(kind = ContentKind.PHOTO, recommended = FilterType.VIVID)
         "whiteboard" -> a.copy(kind = ContentKind.WHITEBOARD, recommended = if (a.darkBoard) FilterType.MAGIC else FilterType.WHITEBOARD)
         "screen" -> if (a.darkBoard) a else a.copy(
             kind = ContentKind.SCREEN, moire = true,

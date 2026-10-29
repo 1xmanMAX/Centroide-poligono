@@ -159,3 +159,15 @@ Maqueta en lienzo de diseño: https://claude.ai/artifact/1axPwJgQ3TRA16puB75DTG 
 - Recomendación: "Mejorar con Jev" opcional (apagado por defecto); con clave, fotos y tablas sí; OCR no. Pendiente: probar
   en el móvil; encuadre con Jev no probado. Láminas /tmp/claude-0/bench/jev/laminas/.
 - 2026-10-29: Jev INTEGRADO (merge b55a5d9): fotos (IoU 0,48→0,74 sin PP; F1 0,47→0,88), tablas deslumbradas (cobertura 74,5→89 %), OCR dudoso sin mejora (apagado). Orientación doc_ori (3b62269). Agente "ideas Jev" implementando: tipo→modo, carpetas, rescate encuadre/¿hay documento?, duplicados híbrido, calidad→reescanear, firmas/sellos (notas /tmp/claude-0/bench/notes_jev_impl.md). Luego UNA sola versión (v28) con todo.
+
+## Jev: ideas buenas integradas (2026-10-29, worktree agent-a977e8d7f50a68a52, sin push)
+Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y sellos»); sin clave/red/fallo = como antes.
+- Captura/importación (DocumentRepository.addPageFromFile): UNA petición por foto (ai/jev/JevCapture, 1024 px, 9 preguntas, ~2 860 tokens):
+  tipo (type_a/type_b) -> modo/filtro (AUTO+aiHint recibo/pizarra/pantalla/DNI, ORIGINAL foto) solo con filtro por defecto; carpeta sugerida
+  (Document.suggestedCategory -> «¿Mover a Facturas?», Document.category, menú «Carpeta…», cápsulas en Inicio); rescate del encuadre
+  (sin documento -> página completa; detector débil o en desacuerdo -> re-detectar en la caja +8 %, si no caja de Jev +1 %); avisos de
+  calidad Page.issues (reflejo/dedo/cortada/sombra, umbrales altos) con marca en la miniatura y «Reescanear» en el visor.
+- Duplicados (imaging/DuplicatePages ORB+RANSAC, sin red; zona gris 12–39 inliers -> JevDuplicates): Page.dupOf, aviso en la revisión.
+- Firmas y sellos: preguntas en la petición de página; zona de tinta suave en Color natural (NaturalColor.Inputs.soft).
+- QualityAnalyzer: desenfoque 60 -> 150.
+- Banco: JevIdeasEvalTest (-PjevIdeas), notas /tmp/claude-0/bench/notes_jev_impl.md. 547 tests OK.
