@@ -988,7 +988,7 @@ internal object PrintedPage {
             if (max(an[0], an[1]) >= TEX_TEXT_VAR && max(an[0], an[1]) >= TEX_TEXT_RATIO * max(1e-6, min(an[0], an[1]))) continue
             // la densidad recorta los bordes (y una franja lisa de la foto -calle, cielo- queda fuera): se amplía cada lado
             // mientras la fila/columna siguiente siga con textura en ≥ 75 % (hasta un 25 % del tamaño)
-            val g4 = growRect(tex, w, h, x, y, bw, bh)
+            val g4 = trimPaper(gb, w, growRect(tex, w, h, x, y, bw, bh), pThr)
             val r = Cv.clampRect(Rect((g4[0] * kx).toInt(), (g4[1] * ky).toInt(), ((g4[2] - g4[0]) * kx).roundToInt(), ((g4[3] - g4[1]) * ky).roundToInt()), ow, oh)
             if (r.width > 0 && r.height > 0) out.add(r)
         }
@@ -1013,6 +1013,21 @@ internal object PrintedPage {
     }
 
     /** Amplía la caja (x0, y0, x1, y1 exclusivo) por los lados con textura ≥ [GROW_TEX] en la línea siguiente. */
+    /**
+     * Recorta de la caja (x0, y0, x1, y1) las filas/columnas de los bordes que son casi todo papel (≥ 50 % más claro que
+     * [pThr]): el pie de foto o el margen que la densidad de la ventana arrastraba (su texto quedaba gris, sin limpiar).
+     */
+    private fun trimPaper(g: ByteArray, w: Int, r: IntArray, pThr: Double): IntArray {
+        var (x0, y0, x1, y1) = r.toList()
+        fun rowP(yy: Int): Double { var k = 0; for (xx in x0 until x1) if ((g[yy * w + xx].toInt() and 0xFF) > pThr) k++; return k.toDouble() / max(1, x1 - x0) }
+        fun colP(xx: Int): Double { var k = 0; for (yy in y0 until y1) if ((g[yy * w + xx].toInt() and 0xFF) > pThr) k++; return k.toDouble() / max(1, y1 - y0) }
+        while (y1 - y0 > 8 && rowP(y0) >= 0.5) y0++
+        while (y1 - y0 > 8 && rowP(y1 - 1) >= 0.5) y1--
+        while (x1 - x0 > 8 && colP(x0) >= 0.5) x0++
+        while (x1 - x0 > 8 && colP(x1 - 1) >= 0.5) x1--
+        return intArrayOf(x0, y0, x1, y1)
+    }
+
     private fun growRect(tex: FloatArray, w: Int, h: Int, x: Int, y: Int, bw: Int, bh: Int): IntArray {
         var x0 = x; var y0 = y; var x1 = x + bw; var y1 = y + bh
         fun rowF(yy: Int): Double { var s = 0.0; for (xx in x0 until x1) s += tex[yy * w + xx]; return s / max(1, x1 - x0) }
