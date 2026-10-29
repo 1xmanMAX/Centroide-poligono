@@ -41,18 +41,19 @@ class PageProcessor(val tier: DeviceTier) {
         original: Bitmap, edits: PageEdits, progress: ProgressCallback? = null, layoutImages: List<FloatArray> = emptyList(),
         tableHints: List<FloatArray> = emptyList(),
         /**
-         * "Mejorar con Jev": recibe la página rectificada (antes del filtro) y devuelve (fotos, tablas) normalizadas, o
-         * null (sin Jev: todo como siempre). Las fotos se suman a [layoutImages] sin duplicar; las tablas a [tableHints].
+         * "Mejorar con Jev": recibe la página rectificada (antes del filtro) y devuelve fotos, tablas y firmas/sellos
+         * normalizados, o null (sin Jev: todo como siempre). Las fotos se suman a [layoutImages] sin duplicar, las firmas y
+         * sellos también, marcados como tinta ([NaturalColor.INK_FLAG]: tratamiento suave), y las tablas a [tableHints].
          */
-        jev: ((Mat) -> Pair<List<FloatArray>, List<FloatArray>>?)? = null,
+        jev: ((Mat) -> com.scannerpromax.ai.jev.JevRenderHints?)? = null,
     ): Bitmap {
         progress?.invoke(0f)
         val geo = geometryFull(original, edits, maxSide = 0)
         // (el callback de progreso puede lanzar para cancelar un render en segundo plano: nada queda sin liberar)
         try { progress?.invoke(0.3f) } catch (e: Throwable) { geo.release(); throw e }
         val hints = jev?.let { f -> runCatching { f(geo) }.getOrNull() }
-        val photos = hints?.let { com.scannerpromax.ai.jev.JevPage.mergePhotos(layoutImages, it.first) } ?: layoutImages
-        val tables = hints?.let { tableHints + it.second } ?: tableHints
+        val photos = hints?.let { h -> com.scannerpromax.ai.jev.JevPage.mergePhotos(layoutImages, h.photos) + h.inks.map { floatArrayOf(it[0], it[1], it[2], it[3], NaturalColor.INK_FLAG) } } ?: layoutImages
+        val tables = hints?.let { tableHints + it.tables } ?: tableHints
         val out = finish(geo, edits, ImageEnhancer.Options.of(tier, fast = false).copy(layoutImages = photos, tableHints = tables), progress)
         try {
             val bmp = Cv.toBitmap(out)

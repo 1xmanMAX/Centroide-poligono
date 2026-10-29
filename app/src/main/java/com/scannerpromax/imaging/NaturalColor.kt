@@ -290,6 +290,9 @@ internal object NaturalColor {
         /** Fotos de la página ([com.scannerpromax.domain.PageEdits.photoMode]): 0 auto, 1 recortadas como rectángulos enteros
          * con su color ([photoRects]), 2 sin trato de foto (se procesan como el resto de la página). */
         val photoMode: Int = 0,
+        /** Zonas de tinta que pasan con su color sin binarizar ni trocear (firmas y sellos de "Mejorar con Jev"): toda la
+         * zona cuenta como trazo candidato, con el alfa de la evidencia continua (oscuridad / croma) -> el papel sigue blanco. */
+        val soft: List<Rect> = emptyList(),
     ) { val bridgeOnly: Boolean get() = bridge > 0 }
 
     private class Global(
@@ -319,8 +322,18 @@ internal object NaturalColor {
         fun release() { support.release(); figures.release(); fills?.release(); fillCol?.release(); foreign?.release(); foreignSoft?.release(); photos?.release(); lw?.release() }
     }
 
-    /** Cajas normalizadas 0..1 (izq., arriba, dcha., abajo) de la maquetación -> rectángulos en px de una salida [w] x [h]. */
-    fun layoutRects(boxes: List<FloatArray>, w: Int, h: Int): List<Rect> = boxes.mapNotNull { b ->
+    /** Marca de [layoutImages] (5.º valor) para una zona de TINTA (firma, sello): tratamiento suave ([Inputs.soft]), no de foto. */
+    const val INK_FLAG = 7f
+
+    fun isInk(b: FloatArray) = b.size >= 5 && b[4] == INK_FLAG
+
+    /** Cajas de tinta ([isInk]) de [boxes] -> rectángulos en px (para [Inputs.soft]). */
+    fun inkRects(boxes: List<FloatArray>, w: Int, h: Int): List<Rect> = rects(boxes.filter { isInk(it) }, w, h)
+
+    /** Cajas normalizadas 0..1 (izq., arriba, dcha., abajo) de la maquetación -> rectángulos en px de una salida [w] x [h] (sin las de tinta). */
+    fun layoutRects(boxes: List<FloatArray>, w: Int, h: Int): List<Rect> = rects(boxes.filter { !isInk(it) }, w, h)
+
+    private fun rects(boxes: List<FloatArray>, w: Int, h: Int): List<Rect> = boxes.mapNotNull { b ->
         val x0 = (b[0] * w).roundToInt().coerceIn(0, w); val y0 = (b[1] * h).roundToInt().coerceIn(0, h)
         val x1 = (b[2] * w).roundToInt().coerceIn(0, w); val y1 = (b[3] * h).roundToInt().coerceIn(0, h)
         if (x1 - x0 < 2 || y1 - y0 < 2) null else Rect(x0, y0, x1 - x0, y1 - y0)
@@ -638,6 +651,10 @@ internal object NaturalColor {
                     Imgproc.rectangle(figures, org.opencv.core.Point(x, y), org.opencv.core.Point(x + rw - 1, y + rh - 1), Scalar(255.0), -1)
                     Imgproc.rectangle(photos, org.opencv.core.Point(x, y), org.opencv.core.Point(x + rw - 1, y + rh - 1), Scalar(255.0), -1)
                 }
+            }
+            // Firmas y sellos: toda la zona es trazo candidato (alfa = evidencia continua, color propio; sin binarizar ni trocear)
+            if (!inp.bridgeOnly) for (r in inp.soft) {
+                Imgproc.rectangle(support, org.opencv.core.Point(r.x * s, r.y * s), org.opencv.core.Point((r.x + r.width) * s - 1, (r.y + r.height) * s - 1), Scalar(255.0), -1)
             }
             // (la foto se pinta desde el original: nunca sobre el fondo ajeno -fuera de la hoja, mesa-)
             foreignAll2?.let { f -> val nf = bag.mat(); Core.bitwise_not(f, nf); Core.bitwise_and(photos, nf, photos); Core.bitwise_and(figures, nf, figures) }

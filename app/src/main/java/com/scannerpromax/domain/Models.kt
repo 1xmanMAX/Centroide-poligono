@@ -150,6 +150,13 @@ data class Page(
     val ocrText: String? = null,
     val ocrFile: String? = null,     // JSON con OcrResult (para capa de texto del PDF)
     val ocrEditedText: String? = null, // texto corregido por el usuario (sobrevive a un nuevo OCR)
+    /**
+     * Avisos de calidad de la captura ("Mejorar con Jev": "glare", "finger", "cut", "shadow"; ver ai/jev/PageIssue) que
+     * sugieren reescanear. null = ninguno (o descartado por el usuario); al ser null no se serializa.
+     */
+    val issues: List<String>? = null,
+    /** Id de otra página del documento que parece la MISMA hoja (duplicado del lote, aviso en la revisión). null = no. */
+    val dupOf: String? = null,
 )
 
 @Serializable
@@ -160,6 +167,10 @@ data class Document(
     val updatedAt: Long,
     val mode: ScanMode = ScanMode.DOCUMENT,
     val pages: List<Page> = emptyList(),
+    /** Carpeta (categoría ligera: "factura", "contrato"…; ver ai/jev/JevCapture.FOLDERS) o null. */
+    val category: String? = null,
+    /** Carpeta que sugirió "Mejorar con Jev" y el usuario aún no aceptó ("" = descartada: no se vuelve a sugerir). */
+    val suggestedCategory: String? = null,
 )
 
 // ---------- OCR ----------
