@@ -171,9 +171,12 @@ object GridDewarp {
         var footRows: List<DewarpMath.LineObs> = emptyList()
         var align: MarginAlign.Result? = null
         var tiltInfo = ""
+        // Guías del texto (también para los márgenes curvos sin malla, ver [MarginCurve])
+        var tlText: TextLayout? = null
         // Respaldo: renglones de texto si las líneas horizontales no cubren la hoja
         if (coverage(hl, h.toDouble()) < 0.35 && coverage(vl, w.toDouble()) < 0.35) {
             val tl = textLayout(bin, longSide, bag)
+            tlText = tl
             if (tl != null && tl.rowSlopes.size >= 4) {
                 hl = tl.rows; textRows = true
                 footRows = tl.footRows
@@ -236,9 +239,18 @@ object GridDewarp {
         // modelo (sigue habiendo un único remuestreo y el mismo lienzo: nunca se amplía)
         var postInfo = ""
         val fm = fit.model
-        if (fm != null && textRows && MarginAlign.enabled && MarginAlign.afterMesh) {
-            val r = runCatching { alignAfterModel(sm, fm, longSide, bag) }.getOrNull()
+        // (márgenes curvos también tras una malla de líneas, salvo cuadrícula/tabla densa: sus líneas mandan)
+        val shearAfter = textRows && MarginAlign.enabled && MarginAlign.afterMesh
+        val dense = !textRows && fit.lines.count { it.horizontal } >= 10 && fit.lines.count { !it.horizontal } >= 10
+        if (fm != null && (shearAfter || (MarginCurve.enabled && !dense && !fm.beyond))) {
+            val r = runCatching { alignAfterModel(sm, fm, bag, shearAfter) }.getOrNull()
             if (r != null) { postInfo = " | tras la malla: ${r.second}"; r.first?.let { fit = Fit(it, fit.reason, fit.lines, fit.after) } }
+        }
+        // Sin malla: márgenes CURVOS (la cizalla sola no los endereza). Modelo con el giro (+ cizalla de [MarginAlign]) y el
+        // desplazamiento que deja verticales las guías del texto
+        if (fit.model == null && MarginCurve.enabled) {
+            val r = runCatching { curveWithoutModel(sm, bin, tlText, align, longSide, paper, bag) }.getOrNull()
+            if (r != null) { postInfo += " | curva: ${r.second}"; r.first?.let { fit = Fit(it, "márgenes curvos", fit.lines) } }
         }
         debug?.msSolve = (System.nanoTime() - t1) / 1e6
         lastInfo = "${fit.reason} ${fit.model?.info ?: ""} | $borderInfo"
@@ -279,10 +291,11 @@ object GridDewarp {
     }
 
     /**
-     * [MarginAlign] sobre la imagen de estimación [sm] ya enderezada por [model]: modelo con la corrección compuesta en su
-     * mapa (o null) y el motivo. Sólo si la corrección mueve poco las esquinas (≤ 4 % del lado): el lienzo no se amplía.
+     * [MarginAlign] sobre la imagen de estimación [sm] ya enderezada por [model] ([shear]: cizalla residual, sólo si la
+     * corrección mueve poco las esquinas, ≤ 4 % del lado) y después [MarginCurve] (márgenes curvos que la malla no dejó
+     * verticales): modelo con ambas correcciones compuestas en su mapa (o null) y el motivo. El lienzo no se amplía.
      */
-    private fun alignAfterModel(sm: Mat, model: Model, longSide: Double, bag: MatBag): Pair<Model?, String>? {
+    private fun alignAfterModel(sm: Mat, model: Model, bag: MatBag, shear: Boolean): Pair<Model?, String>? {
         val out = bag.add(apply(sm, model, Imgproc.INTER_LINEAR))
         val ow = out.cols(); val oh = out.rows()
         val ink = inkMap(out, bag)
@@ -290,15 +303,92 @@ object GridDewarp {
         Imgproc.threshold(ink, bin, inkThreshold(ink), 255.0, Imgproc.THRESH_BINARY)
         val tl = textLayout(bin, max(ow, oh).toDouble(), bag) ?: return null
         if (tl.segs.isEmpty()) return null
-        val al = MarginAlign.estimate(tl.segs, tl.rowSlopes, tl.rowLens, tl.med, tl.pitch, ow.toDouble(), oh.toDouble(), shearOnly = true) ?: return null
-        val k = al.m ?: return null to al.info
-        if (!MarginAlign.small(k, ow.toDouble(), oh.toDouble(), 0.04)) return null to "${al.info} (esquinas > 4 %)"
-        val map = MarginAlign.composeMap(model.map, model.gw, model.gh, ow.toDouble(), oh.toDouble(), k) ?: return null to al.info
+        val info = StringBuilder()
+        var k: DoubleArray? = null
+        if (shear) {
+            val al = MarginAlign.estimate(tl.segs, tl.rowSlopes, tl.rowLens, tl.med, tl.pitch, ow.toDouble(), oh.toDouble(), shearOnly = true)
+            if (al != null) {
+                info.append(al.info)
+                al.m?.let { m -> if (MarginAlign.small(m, ow.toDouble(), oh.toDouble(), 0.04)) k = m else info.append(" (esquinas > 4 %)") }
+            }
+        }
+        val ki = k?.let { MarginAlign.inv3(it) }
+        if (k != null && ki == null) k = null
+        val (disp, why) = MarginCurve.build(curvesOf(tl, k), tl.med, tl.pitch, 0.0, 0.0, ow - 1.0, oh - 1.0, max(ow, oh).toDouble() / EST_SIDE)
+        info.append(" curva: ").append(why)
+        if (k == null && disp == null) return null to info.toString()
+        val map = MarginCurve.composeMap(model.map, model.gw, model.gh, ow.toDouble(), oh.toDouble()) { px, py, o ->
+            val x = px + (disp?.at(px, py) ?: 0.0)
+            if (ki != null) MarginAlign.apply(ki, x, py, o) else { o[0] = x; o[1] = py }
+        }
         val m2 = Model(
-            model.gw, model.gh, map, model.confidence, model.info + " márgenes", model.x0, model.y0, model.x1, model.y1,
-            model.paper, model.paperW, model.paperH, model.beyond, model.sheetSides,
+            model.gw, model.gh, map, model.confidence, model.info + (if (k != null) " márgenes" else "") + (if (disp != null) " curva" else ""),
+            model.x0, model.y0, model.x1, model.y1, model.paper, model.paperW, model.paperH, model.beyond, model.sheetSides,
         )
-        return m2 to al.info
+        return m2 to info.toString()
+    }
+
+    /**
+     * Guías estrictas del texto de [tl] (inicios y finales; sin las amplias de la letra a mano) llevadas por la
+     * homografía [m] (o tal cual) al marco de salida, como curvas x(y) con y creciente.
+     */
+    private fun curvesOf(tl: TextLayout, m: DoubleArray?): List<MarginCurve.Curve> {
+        val o = DoubleArray(2)
+        return tl.guides.filter { !it.loose && it.size >= 4 }.map { g ->
+            val n = g.size
+            val xs = FloatArray(n); val ys = FloatArray(n)
+            for (i in 0 until n) {
+                if (m != null) { MarginAlign.apply(m, g.x[i].toDouble(), g.y[i].toDouble(), o); xs[i] = o[0].toFloat(); ys[i] = o[1].toFloat() } else { xs[i] = g.x[i]; ys[i] = g.y[i] }
+            }
+            val ord = (0 until n).sortedBy { ys[it] }
+            MarginCurve.Curve(FloatArray(n) { xs[ord[it]] }, FloatArray(n) { ys[ord[it]] }, g.weight, g.resid)
+        }
+    }
+
+    /**
+     * Hoja sin malla (plana para las líneas o tabla): si las guías del texto ([tl], o calculadas ahora sobre [bin]) quedan
+     * curvas tras el giro de los renglones (y la cizalla de [align], si actúa), un modelo con el giro, esa corrección y el
+     * desplazamiento de [MarginCurve], en un lienzo que contiene la hoja entera (tope +12 %, como el giro). null si no
+     * hace falta.
+     */
+    private fun curveWithoutModel(
+        sm: Mat, bin: Mat, tl0: TextLayout?, align: MarginAlign.Result?, longSide: Double, paper: Triple<ByteArray, Int, Int>, bag: MatBag,
+    ): Pair<Model?, String>? {
+        val w = sm.cols().toDouble(); val h = sm.rows().toDouble()
+        val tl = tl0 ?: textLayout(bin, longSide, bag) ?: return null
+        if (tl.rowSlopes.size < 6 || tl.guides.none { !it.loose }) return null to "sin guías"
+        // Giro de los renglones (coherentes) o la corrección de [MarginAlign]
+        val m = align?.m ?: run {
+            val ang = DoubleArray(tl.rowSlopes.size) { Math.toDegrees(kotlin.math.atan(tl.rowSlopes[it])) }
+            val a = TextGuides.weightedMedian(ang, tl.rowLens)
+            val mad = TextGuides.weightedMedian(DoubleArray(ang.size) { abs(ang[it] - a) }, tl.rowLens)
+            if (mad > 0.35 || abs(a) > 10.0) return null to "renglones incoherentes"
+            MarginAlign.rotation(a, w / 2, h / 2)
+        }
+        val mi = MarginAlign.inv3(m) ?: return null
+        val o = DoubleArray(2)
+        var u0 = Double.MAX_VALUE; var v0 = Double.MAX_VALUE; var u1 = -Double.MAX_VALUE; var v1 = -Double.MAX_VALUE
+        for ((x, y) in listOf(0.0 to 0.0, w to 0.0, w to h, 0.0 to h)) {
+            MarginAlign.apply(m, x, y, o)
+            u0 = min(u0, o[0]); v0 = min(v0, o[1]); u1 = max(u1, o[0]); v1 = max(v1, o[1])
+        }
+        if (u1 - u0 > 1.12 * w || v1 - v0 > 1.12 * h) return null to "lienzo"
+        val (disp, why) = MarginCurve.build(curvesOf(tl, m), tl.med, tl.pitch, u0, v0, u1, v1, longSide / EST_SIDE)
+        if (disp == null) return null to why
+        val gw = max(2, ceil((u1 - u0) / INV_STEP).toInt() + 1)
+        val gh = max(2, ceil((v1 - v0) / INV_STEP).toInt() + 1)
+        val map = FloatArray(gw * gh * 2)
+        for (b in 0 until gh) for (a in 0 until gw) {
+            val px = u0 + a * (u1 - u0) / (gw - 1); val py = v0 + b * (v1 - v0) / (gh - 1)
+            MarginAlign.apply(mi, px + disp.at(px, py), py, o)
+            map[2 * (b * gw + a)] = (o[0] / (w - 1)).toFloat()
+            map[2 * (b * gw + a) + 1] = (o[1] / (h - 1)).toFloat()
+        }
+        val model = Model(
+            gw, gh, map, 0.5, "márgenes curvos desv=%.1f".format(java.util.Locale.ROOT, disp.maxDev),
+            u0 / w, v0 / h, u1 / w, v1 / h, paper.first, paper.second, paper.third,
+        )
+        return model to why
     }
 
     /** Pliegues por placa delgada reponderada ([DewarpMath.foldWeights]); desactivable en el banco de pruebas. */
