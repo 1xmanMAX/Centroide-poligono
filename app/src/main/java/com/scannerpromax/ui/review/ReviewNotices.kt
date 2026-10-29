@@ -148,7 +148,7 @@ internal fun IssueBadge(page: Page, modifier: Modifier = Modifier) {
     ) { Icon(AppIcons.Warning, null, tint = ui.orange, modifier = Modifier.size(15.dp)) }
 }
 
-/** Aviso del visor: «Reflejo · conviene reescanear» con «Reescanear» y ✕. */
+/** Aviso del visor: «Reflejo y sombra fuerte» con «Reescanear» y ✕. */
 @Composable
 internal fun ViewerIssueBanner(codes: List<String>, onRetake: (() -> Unit)?, onDismiss: () -> Unit, modifier: Modifier = Modifier) {
     val text = PageIssue.sentence(codes) ?: return
@@ -162,7 +162,7 @@ internal fun ViewerIssueBanner(codes: List<String>, onRetake: (() -> Unit)?, onD
     ) {
         Icon(AppIcons.Warning, null, tint = ui.orange, modifier = Modifier.size(15.dp))
         Spacer(Modifier.width(8.dp))
-        Text("$text · conviene reescanear", color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+        Text(text, color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
         if (onRetake != null) {
             Text(
                 "Reescanear", color = ui.accent, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
