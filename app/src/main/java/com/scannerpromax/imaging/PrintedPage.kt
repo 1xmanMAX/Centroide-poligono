@@ -843,7 +843,66 @@ internal object PrintedPage {
         val dk = bag.mat(); Core.compare(gq, Scalar(150.0), dk, Core.CMP_LT)
         Imgproc.morphologyEx(dk, dk, Imgproc.MORPH_OPEN, Cv.kernel(Imgproc.MORPH_RECT, 5))
         val dkBlocks = blocks(dk, q, ow, oh, maxAspect = 30.0, minFill = 0.6, bag = bag)
-        return blocks(m, q, ow, oh, maxAspect = 3.0, minFill = 0.3, bag = bag) + dkBlocks
+        return blocks(m, q, ow, oh, maxAspect = 3.0, minFill = 0.3, bag = bag) + dkBlocks + if (BANDS) bandBlocks(smN, ow, oh, bag) else emptyList()
+    }
+
+    /** Bandas rellenas ([bandBlocks]); false = como antes (banco). */
+    @Volatile internal var BANDS = true
+    private const val BAND_SIDE = 700
+    private const val BAND_FILL = 0.75
+
+    /**
+     * BANDAS RELLENAS de color o gris medio con texto claro (cabecera azul de una tabla, banda de título): alargadas, así
+     * que [blocks] no las aceptaba (relación ≤ 3 para el color, y el gris < 150 no ve un azul claro) y salían a trozos -un
+     * pedazo entre palabra y palabra como imagen, el resto binarizado: el texto blanco se perdía o quedaba con manchas-.
+     * Máscara: croma (S ≥ 60) o gris medio (< 185) a la escala de [q]; cierre horizontal para tapar el texto claro y
+     * apertura que quita letras y líneas finas; se aceptan las componentes alargadas (relación > 3, sólo las filas que
+     * cubren en ≥ 70 %), de al menos 3 px de alto y cuya caja es relleno en ≥ [BAND_FILL] antes del cierre.
+     */
+    private fun bandBlocks(smN: Mat, ow: Int, oh: Int, bag: MatBag): List<Rect> {
+        val q = bag.mat(); Cv.downscale(smN, q, BAND_SIDE)
+        val hsv = bag.mat(); Imgproc.cvtColor(q, hsv, Imgproc.COLOR_RGB2HSV)
+        val s = bag.mat(); Core.extractChannel(hsv, s, 1)
+        val gq = bag.add(Cv.gray(q))
+        // relleno: con color (S ≥ 60) o gris medio (90..185), ni papel ni tinta negra
+        val m = bag.mat(); Core.compare(s, Scalar(60.0), m, Core.CMP_GE)
+        val g1 = bag.mat(); Core.inRange(gq, Scalar(90.0), Scalar(185.0), g1)
+        Core.bitwise_or(m, g1, m)
+        val fill = bag.mat(); m.copyTo(fill)
+        Imgproc.morphologyEx(m, m, Imgproc.MORPH_CLOSE, Cv.kernel(Imgproc.MORPH_RECT, 9, 5))
+        Imgproc.morphologyEx(m, m, Imgproc.MORPH_OPEN, Cv.kernel(Imgproc.MORPH_RECT, 7))
+        texDebug?.let { d -> val b = bag.mat(); Imgproc.cvtColor(q, b, Imgproc.COLOR_RGB2BGR); d("band_q", b); d("band_fill", fill); d("band_m", m) }
+        val labels = bag.mat(); val stats = bag.mat(); val cents = bag.mat()
+        val nc = Imgproc.connectedComponentsWithStats(m, labels, stats, cents, 8, CvType.CV_32S)
+        val st = IntArray(max(0, nc) * 5); if (nc > 0) stats.get(0, 0, st)
+        val kx = ow.toDouble() / q.cols(); val ky = oh.toDouble() / q.rows()
+        val out = ArrayList<Rect>()
+        val lb = IntArray(q.cols() * q.rows()); labels.get(0, 0, lb)
+        val qw = q.cols()
+        for (c in 1 until nc) {
+            val x = st[c * 5]; var y = st[c * 5 + 1]; val bw = st[c * 5 + 2]; var bh = st[c * 5 + 3]
+            if (st[c * 5 + 4] < 0.001 * q.total() || bw < 3 * bh / 2) continue
+            // (el cierre pega a la banda la raya de la fila de al lado: sólo las filas que la componente cubre en ≥ 70 %)
+            var y0 = -1; var y1 = -1
+            for (yy in y until y + bh) {
+                var k = 0; val o = yy * qw
+                for (xx in x until x + bw) if (lb[o + xx] == c) k++
+                if (k >= 0.7 * bw) { if (y0 < 0) y0 = yy; y1 = yy }
+            }
+            if (y0 < 0) continue
+            y = y0; bh = y1 - y0 + 1
+            if (bh < 3 || bw <= 3 * bh) continue
+            val r = Rect(x, y, bw, bh)
+            // casi todo relleno (un renglón de texto cerrado es sobre todo papel: ≤ 0,5; una banda ≥ 0,9)
+            val fr = fill.submat(r); val ff = Core.countNonZero(fr).toDouble() / r.area(); fr.release()
+            val roi = gq.submat(r); val light = bag.mat(); Core.compare(roi, Scalar(200.0), light, Core.CMP_GE); roi.release()
+            val lf = Core.countNonZero(light).toDouble() / r.area()
+            log?.invoke("banda cand $x,$y ${bw}x$bh relleno=%.2f claro=%.2f".format(ff, lf))
+            if (ff < BAND_FILL) continue
+            out.add(Cv.clampRect(Rect((x * kx).toInt(), (y * ky).toInt(), (bw * kx).roundToInt(), (bh * ky).roundToInt()), ow, oh))
+        }
+        log?.invoke("bandas: ${out.size} ${out.joinToString { "${it.x},${it.y} ${it.width}x${it.height}" }}")
+        return out
     }
 
     /** Fotos por textura ([textureBlocks]); false = como antes (banco). */
