@@ -10,6 +10,7 @@ import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import org.opencv.core.Mat
 import java.io.File
+import kotlin.math.max
 
 /**
  * Lo que "Mejorar con Jev" sabe de una página rectificada: cajas de FOTO (ya ajustadas localmente), de TABLA y de FIRMA o
@@ -27,16 +28,24 @@ class JevPageResult(
     /** Firmas y sellos (zonas de tinta que pasan con su color, sin binarizar ni trocear). */
     val inks: List<FloatArray> = emptyList(),
     val askedInks: Boolean = false,
+    /**
+     * Opiniones "¿es una FOTOGRAFÍA de cámara?" sobre cajas candidatas (las de Jev y los recortes locales): (x0, y0, x1, y1,
+     * [com.scannerpromax.imaging.NaturalColor.VERDICT_FLAG], p). Las usa el recuadro exacto
+     * ([com.scannerpromax.imaging.PhotoBoxRefine]); nunca son cajas de foto por sí mismas.
+     */
+    val verdicts: List<FloatArray> = emptyList(),
+    val askedCamera: Boolean = false,
 ) {
     fun toJson(): String = buildJsonObject {
         put("v", VERSION)
-        put("photos", boxes(photos)); put("tables", boxes(tables)); put("inks", boxes(inks))
+        put("photos", boxes(photos)); put("tables", boxes(tables)); put("inks", boxes(inks)); put("verdicts", boxes(verdicts))
         put("tokens", inputTokens); put("ms", ms)
-        put("askedPhotos", askedPhotos); put("askedTables", askedTables); put("askedInks", askedInks)
+        put("askedPhotos", askedPhotos); put("askedTables", askedTables); put("askedInks", askedInks); put("askedCamera", askedCamera)
     }.toString()
 
+    /** (las cachés de antes de la pregunta de cámara no valen para las fotos: se vuelve a preguntar) */
     fun covers(photos: Boolean, tables: Boolean, inks: Boolean = false) =
-        (!photos || askedPhotos) && (!tables || askedTables) && (!inks || askedInks)
+        (!photos || (askedPhotos && askedCamera)) && (!tables || askedTables) && (!inks || askedInks)
 
     companion object {
         /** Sube si cambia el protocolo: las cachés viejas se ignoran (las de antes de las firmas valen: askedInks = false). */
@@ -52,7 +61,7 @@ class JevPageResult(
             }
             fun b(k: String, def: Boolean = true) = (o[k] as? JsonPrimitive)?.content?.toBooleanStrictOrNull() ?: def
             JevPageResult(list("photos"), list("tables"), (o["tokens"] as? JsonPrimitive)?.longOrNull ?: 0, (o["ms"] as? JsonPrimitive)?.longOrNull ?: 0,
-                b("askedPhotos"), b("askedTables"), list("inks"), b("askedInks", false))
+                b("askedPhotos"), b("askedTables"), list("inks"), b("askedInks", false), list("verdicts"), b("askedCamera", false))
         }.getOrNull()
 
         fun read(f: File): JevPageResult? = if (f.isFile) runCatching { fromJson(f.readText()) }.getOrNull() else null
@@ -67,7 +76,7 @@ class JevPageResult(
 }
 
 /** Lo que la página aporta al render ([com.scannerpromax.imaging.PageProcessor.render]). */
-class JevRenderHints(val photos: List<FloatArray>, val tables: List<FloatArray>, val inks: List<FloatArray> = emptyList())
+class JevRenderHints(val photos: List<FloatArray>, val tables: List<FloatArray>, val inks: List<FloatArray> = emptyList(), val verdicts: List<FloatArray> = emptyList())
 
 object JevPage {
 
@@ -82,11 +91,31 @@ object JevPage {
     const val SIG_PAD = 0.5
     const val STAMP_PAD = 0.1
 
-    /** Petición combinada (fotos, tablas y/o firmas y sellos) sobre [img]. */
-    fun request(img: JevImage, photos: Boolean, tables: Boolean, inks: Boolean = false): JevRequest {
+    /**
+     * Pregunta "¿fotografía de cámara?" (las fotos aéreas o de satélite cuentan: son una escena real fotografiada). [what]
+     * = la región por la que se pregunta.
+     */
+    fun cameraQuestion(what: String) = "Is $what a photograph taken with a camera (a real scene: people, streets, buildings, " +
+        "landscape, nature, objects; aerial or satellite photos count), and not a signature, stamp, logo, chart, drawing, map graphic or text?"
+
+    /** Probabilidad mínima de "sí" para que una caja DUDOSA cuente como fotografía (calibrada en juliaca2: notes_fotos_exactas.md). */
+    const val CAMERA_YES = 0.85
+
+    /** Recortes candidatos por los que se pregunta como mucho. */
+    const val MAX_CROPS = 6
+
+    /**
+     * Petición combinada (fotos, tablas y/o firmas y sellos) sobre [img]. Con fotos, además, "¿fotografía de cámara?" para
+     * cada caja ordinal de Jev y para cada recorte de [crops] (cajas candidatas locales, ya ajustadas: se pasa su recorte).
+     */
+    fun request(img: JevImage, photos: Boolean, tables: Boolean, inks: Boolean = false, crops: List<JevImage> = emptyList()): JevRequest {
         require(photos || tables || inks)
         val q = LinkedHashMap<String, JevQuestion>()
-        if (photos) q += JevPhotos.request(img).questions
+        if (photos) {
+            q += JevPhotos.request(img).questions
+            for (i in 0 until JevPhotos.MAX_BOXES) q["cam$i"] = JevQuestion.Noul(cameraQuestion("the ${JevPhotos.ORD[i]} picture in reading order on the page in `page`"))
+            for ((k, _) in crops.withIndex()) q["camc$k"] = JevQuestion.Noul(cameraQuestion("the image region shown in `crop$k`"))
+        }
         if (tables) q += JevTables.request(img).questions
         if (inks) {
             q["has_sig"] = JevQuestion.Noul("Does `page` contain a handwritten signature?")
@@ -96,7 +125,11 @@ object JevPage {
         }
         val what = listOfNotNull("the pictures".takeIf { photos }, "the ruled tables".takeIf { tables }, "the signatures and stamps".takeIf { inks })
         val task = "Find " + (if (what.size == 1) what[0] else what.dropLast(1).joinToString(", ") + " and " + what.last()) + " on a photographed document page."
-        return JevRequest(buildJsonObject { put("page", JsonPrimitive(img.asset.ref)); put("task", task) }, q, listOf(img.asset))
+        return JevRequest(buildJsonObject {
+            put("page", JsonPrimitive(img.asset.ref))
+            if (photos) for ((k, c) in crops.withIndex()) put("crop$k", JsonPrimitive(c.asset.ref))
+            put("task", task)
+        }, q, listOf(img.asset) + if (photos) crops.map { it.asset } else emptyList())
     }
 
     /** Firmas y sellos de la respuesta (cajas ampliadas, fracciones de la página). */
@@ -121,11 +154,35 @@ object JevPage {
      */
     fun analyze(page: Mat, client: JevClient, photos: Boolean, tables: Boolean, inks: Boolean = false, side: Int = SIDE): JevPageResult {
         val img = JevImages.encode(page, side, 75, prefix = "page")
-        val r = client.ask(request(img, photos, tables, inks))
-        val ph = if (photos) JevPhotos.refine(page, JevPhotos.parse(r, img.fit).boxes).map { it.toArray() } else emptyList()
+        // cajas candidatas locales (recuadro exacto, las que pueden ser foto) -> su recorte, para la pregunta de cámara
+        val cands = if (!photos) emptyList() else runCatching { com.scannerpromax.imaging.PrintedPage.photoCandidates(page) }.getOrDefault(emptyList()).take(MAX_CROPS)
+        val crops = cands.map { b ->
+            val r = org.opencv.core.Rect((b[0] * page.cols()).toInt(), (b[1] * page.rows()).toInt(), max(1, ((b[2] - b[0]) * page.cols()).toInt()), max(1, ((b[3] - b[1]) * page.rows()).toInt()))
+            JevImages.encodeCrop(page, r, 0.0, 512, maxSide = 512, quality = 80, prefix = "crop")
+        }
+        val r = client.ask(request(img, photos, tables, inks, crops))
+        val found = if (photos) JevPhotos.parse(r, img.fit) else null
+        val refined = found?.let { JevPhotos.refine(page, it.boxes) } ?: emptyList()
+        val ph = refined.map { it.toArray() }
         val tb = if (tables) JevTables.parse(r, img.fit).hints() else emptyList()
         val ik = if (inks) parseInks(r, img.fit) else emptyList()
-        return JevPageResult(ph, tb, r.inputTokens, r.ms, photos, tables, ik, inks)
+        val vd = if (!photos) emptyList() else parseVerdicts(r, found!!, refined, cands)
+        return JevPageResult(ph, tb, r.inputTokens, r.ms, photos, tables, ik, inks, vd, photos)
+    }
+
+    /** Opiniones de cámara: las cajas ordinales de Jev ([found], ajustadas en [refined]) y los recortes [cands]. */
+    internal fun parseVerdicts(r: JevResponse, found: JevPhotos.Found, refined: List<JevBox>, cands: List<FloatArray>): List<FloatArray> {
+        val out = ArrayList<FloatArray>()
+        val flag = com.scannerpromax.imaging.NaturalColor.VERDICT_FLAG
+        for ((j, b) in refined.withIndex()) {
+            val p = r["cam${found.ordinals.getOrElse(j) { j }}"]?.noul ?: continue
+            out += floatArrayOf(b.left.toFloat(), b.top.toFloat(), b.right.toFloat(), b.bottom.toFloat(), flag, p.toFloat())
+        }
+        for ((k, b) in cands.withIndex()) {
+            val p = r["camc$k"]?.noul ?: continue
+            out += floatArrayOf(b[0], b[1], b[2], b[3], flag, p.toFloat())
+        }
+        return out
     }
 
     /**

@@ -327,11 +327,26 @@ internal object NaturalColor {
 
     fun isInk(b: FloatArray) = b.size >= 5 && b[4] == INK_FLAG
 
+    /**
+     * Marca de [layoutImages] (5.º valor) para una OPINIÓN de Jev sobre una caja: 6.º valor = probabilidad de que sea una
+     * fotografía de cámara ([PhotoBoxRefine.Verdict]). No es una caja de foto.
+     */
+    const val VERDICT_FLAG = 8f
+
+    fun isVerdict(b: FloatArray) = b.size >= 6 && b[4] == VERDICT_FLAG
+
+    /**
+     * Zonas de tinta suave de las firmas y sellos de Jev ([Inputs.soft]): APAGADAS. Toda la zona pasaba como trazo
+     * candidato con alfa continuo y el papel de alrededor de la firma salía gris o beige (un recuadro); sin ellas la firma
+     * y el sello se tratan como el resto de la tinta (fondo blanco puro, tinta con su color).
+     */
+    @Volatile var SOFT_INKS = false
+
     /** Cajas de tinta ([isInk]) de [boxes] -> rectángulos en px (para [Inputs.soft]). */
     fun inkRects(boxes: List<FloatArray>, w: Int, h: Int): List<Rect> = rects(boxes.filter { isInk(it) }, w, h)
 
     /** Cajas normalizadas 0..1 (izq., arriba, dcha., abajo) de la maquetación -> rectángulos en px de una salida [w] x [h] (sin las de tinta). */
-    fun layoutRects(boxes: List<FloatArray>, w: Int, h: Int): List<Rect> = rects(boxes.filter { !isInk(it) }, w, h)
+    fun layoutRects(boxes: List<FloatArray>, w: Int, h: Int): List<Rect> = rects(boxes.filter { !isInk(it) && !isVerdict(it) }, w, h)
 
     private fun rects(boxes: List<FloatArray>, w: Int, h: Int): List<Rect> = boxes.mapNotNull { b ->
         val x0 = (b[0] * w).roundToInt().coerceIn(0, w); val y0 = (b[1] * h).roundToInt().coerceIn(0, h)

@@ -29,7 +29,7 @@ object JevPhotos {
     const val MAX_BOXES = 6
     /** Densidad de contenido mínima para ajustar los bordes localmente ([refine]). */
     @JvmField var FULL_DENSITY = 0.6
-    private val ORD = listOf("1st", "2nd", "3rd", "4th", "5th", "6th")
+    internal val ORD = listOf("1st", "2nd", "3rd", "4th", "5th", "6th")
     private const val WHAT = "pictures (photographs, illustrations, drawings, diagrams, charts, maps, logos or stamps; " +
         "not plain text, not tables, not empty colored boxes)"
 
@@ -54,7 +54,7 @@ object JevPhotos {
     }
 
     /** Resultado: cajas en fracciones de la página ORIGINAL (sin ajustar) y lo que se decidió. */
-    class Found(val boxes: List<JevBox>, val count: Int, val pAny: Double, val confidences: List<Double>)
+    class Found(val boxes: List<JevBox>, val count: Int, val pAny: Double, val confidences: List<Double>, /** índice ordinal (b_i) de cada caja */ val ordinals: List<Int> = boxes.indices.toList())
 
     /** Respuesta -> cajas (antes del ajuste local). */
     fun parse(r: JevResponse, fit: JevFit, minAny: Double = 0.5): Found {
@@ -62,7 +62,7 @@ object JevPhotos {
         val pAny = r["any"]?.noul ?: 0.0
         val n = when (val c = cnt?.choice) { null -> 0; "5+" -> MAX_BOXES; else -> c.toIntOrNull() ?: 0 }
         if (n == 0 || pAny < minAny) return Found(emptyList(), n, pAny, emptyList())
-        val out = ArrayList<JevBox>(); val conf = ArrayList<Double>()
+        val out = ArrayList<JevBox>(); val conf = ArrayList<Double>(); val ord = ArrayList<Int>()
         for (i in 0 until MAX_BOXES) {
             if (out.size >= n) break
             val a = r["b$i"] ?: continue
@@ -70,9 +70,9 @@ object JevPhotos {
             if (b.width < 0.02 || b.height < 0.01 || b.area > 0.92) continue
             // una ordinal inexistente repite otra caja: fuera los duplicados
             if (out.any { it.iou(b) > 0.5 || contains(it, b, 0.85) }) continue
-            out += b; conf += a.confidence ?: 0.0
+            out += b; conf += a.confidence ?: 0.0; ord += i
         }
-        return Found(out, n, pAny, conf)
+        return Found(out, n, pAny, conf, ord)
     }
 
     private fun contains(outer: JevBox, inner: JevBox, frac: Double): Boolean {
