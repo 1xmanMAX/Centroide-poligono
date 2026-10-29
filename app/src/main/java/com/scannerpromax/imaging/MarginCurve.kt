@@ -56,7 +56,7 @@ internal object MarginCurve {
         }
     }
 
-    /** Fracción máxima del ancho que puede desviarse una guía (más = no es un margen o la malla falló). */
+    /** Fracción máxima del ancho que puede recorrer una guía en x (más = no es un margen o la malla falló). */
     private const val MAX_DEV_FRAC = 0.04
     /** Estiramiento horizontal máximo entre dos guías de la misma altura. */
     private const val MAX_STRETCH = 0.06
@@ -108,7 +108,7 @@ internal object MarginCurve {
             val xm = vals[vals.size / 2]
             var dev = 0.0
             for (v in vals) dev = max(dev, abs(v - xm))
-            if (dev > MAX_DEV_FRAC * w) { dropped++; continue }
+            if (vals.last() - vals.first() > MAX_DEV_FRAC * w) { dropped++; continue }
             // Una desviación del orden de la dispersión de sus inicios (cursiva, sangrías de una letra) no cuenta: la guía
             // queda como columna recta (ancla, d = 0)
             if (dev < NOISE_K * c.noise) { cand.add(G(ct, xm, 0.0, doubleArrayOf(xm), ym, ys)); continue }
@@ -131,7 +131,10 @@ internal object MarginCurve {
             }
             if (ok) acc.add(g) else dropped++
         }
-        val maxDev = acc.maxOf { it.dev }
+        // Actúa sólo si una guía LARGA (≥ 6 renglones y ≥ 20 % del alto) está curva: una columna corta (anuncio, pie de
+        // foto) acompaña la corrección pero no la decide
+        val trigSpan = max(6 * pt, 0.2 * h)
+        val maxDev = acc.filter { it.c.y1 - it.c.y0 >= trigSpan }.maxOfOrNull { it.dev } ?: 0.0
         val minDev = max(3.0 * scale, 0.3 * med)
         if (maxDev < minDev) return null to "recto (desv. %.1f px)".format(java.util.Locale.ROOT, maxDev)
         // Rejilla

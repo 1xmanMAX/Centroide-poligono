@@ -242,7 +242,7 @@ object GridDewarp {
         // (márgenes curvos también tras una malla de líneas, salvo cuadrícula/tabla densa: sus líneas mandan)
         val shearAfter = textRows && MarginAlign.enabled && MarginAlign.afterMesh
         val dense = !textRows && fit.lines.count { it.horizontal } >= 10 && fit.lines.count { !it.horizontal } >= 10
-        if (fm != null && (shearAfter || (MarginCurve.enabled && !dense && !fm.beyond))) {
+        if (fm != null && (shearAfter || (MarginCurve.enabled && !dense))) {
             val r = runCatching { alignAfterModel(sm, fm, bag, shearAfter) }.getOrNull()
             if (r != null) { postInfo = " | tras la malla: ${r.second}"; r.first?.let { fit = Fit(it, fit.reason, fit.lines, fit.after) } }
         }
