@@ -507,12 +507,13 @@ internal object TableLinesMath {
         // tenue o rota por la luz dentro de una tabla indicada: recta, fina, sin tocar texto, con algo de tinta seguida
         for (k in 0 until n) if (zoned[k] && !basic[k]) {
             val l = c[k]; val tr = l.tr
-            val minLen = max(2.5 * lh, 0.03 * (if (l.hor) w else h))
+            // (una palabra subrayada junto a la tabla no debe pasar: horizontales algo más largas)
+            val minLen = if (l.hor) max(4.0 * lh, 0.05 * w) else max(2.5 * lh, 0.03 * h)
             basic[k] = l.len >= minLen && !tr.dashed && tr.thick <= maxThick && tr.rms <= RMS_MAX_CONT && tr.embedded < 0.3 &&
                 tr.touching < 0.5 && tr.inkFrac >= 0.25 && (tr.maxRun >= 1.5 * lh || tr.maxRun >= 0.6 * l.len)
         }
         val visible = BooleanArray(n) { basic[it] && c[it].outCov >= 0.1 }
-        val support = BooleanArray(n) { visible[it] || (basic[it] && strong[it]) }
+        val support = BooleanArray(n) { visible[it] || (basic[it] && (strong[it] || zoned[it])) }
         val ok = BooleanArray(n)
         for (k in 0 until n) {
             if (!basic[k]) continue
@@ -532,7 +533,7 @@ internal object TableLinesMath {
                 // rejilla de un gráfico (barras que la cruzan y ninguna línea fina perpendicular): no se toca. Una
                 // tabla con columnas sombreadas sí tiene sus verticales finas
                 (l.tr.chartLike || parChart >= 2) && crLong < 2 -> false
-                zoned[k] && (visible[k] || (tr0(l) && l.tr.amp >= 0.5 * FAINT_MIN * inkRef)) -> true
+                zoned[k] && parS + crS >= 1 && (visible[k] || (tr0(l) && l.tr.amp >= 0.5 * FAINT_MIN * inkRef)) -> true
                 visible[k] -> longRule || table
                 // la salida no la muestra: sólo dentro de la estructura de una tabla
                 strong[k] -> parS >= 2 || crS >= 2
