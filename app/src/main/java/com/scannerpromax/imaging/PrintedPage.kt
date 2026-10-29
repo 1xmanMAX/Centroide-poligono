@@ -850,6 +850,8 @@ internal object PrintedPage {
     @Volatile internal var BANDS = true
     private const val BAND_SIDE = 700
     private const val BAND_FILL = 0.75
+    /** Relación mínima largo/alto (un logo o un rótulo compactos ya los trata [blocks]). */
+    private const val BAND_ASPECT = 6
 
     /**
      * BANDAS RELLENAS de color o gris medio con texto claro (cabecera azul de una tabla, banda de título): alargadas, así
@@ -859,7 +861,7 @@ internal object PrintedPage {
      * apertura que quita letras y líneas finas; se aceptan las componentes alargadas (relación > 3, sólo las filas que
      * cubren en ≥ 70 %), de al menos 3 px de alto y cuya caja es relleno en ≥ [BAND_FILL] antes del cierre.
      */
-    private fun bandBlocks(smN: Mat, ow: Int, oh: Int, bag: MatBag): List<Rect> {
+    internal fun bandBlocks(smN: Mat, ow: Int, oh: Int, bag: MatBag): List<Rect> {
         val q = bag.mat(); Cv.downscale(smN, q, BAND_SIDE)
         val hsv = bag.mat(); Imgproc.cvtColor(q, hsv, Imgproc.COLOR_RGB2HSV)
         val s = bag.mat(); Core.extractChannel(hsv, s, 1)
@@ -891,7 +893,7 @@ internal object PrintedPage {
             }
             if (y0 < 0) continue
             y = y0; bh = y1 - y0 + 1
-            if (bh < 3 || bw <= 3 * bh) continue
+            if (bh < 3 || bw <= BAND_ASPECT * bh) continue
             val r = Rect(x, y, bw, bh)
             // casi todo relleno (un renglón de texto cerrado es sobre todo papel: ≤ 0,5; una banda ≥ 0,9)
             val fr = fill.submat(r); val ff = Core.countNonZero(fr).toDouble() / r.area(); fr.release()
@@ -975,7 +977,7 @@ internal object PrintedPage {
             if (pf > TEX_PALE_PAPER && (bw < TEX_PALE_SIDE * side || bh < TEX_PALE_SIDE * side)) continue
             if (gaps.first > TEX_MAX_GAPS) continue
             // la densidad recorta los bordes (y una franja lisa de la foto -calle, cielo- queda fuera): se amplía cada lado
-            // mientras la fila/columna siguiente siga con textura en ≥ 50 % (hasta un 25 % del tamaño)
+            // mientras la fila/columna siguiente siga con textura en ≥ 75 % (hasta un 25 % del tamaño)
             val g4 = growRect(tex, w, h, x, y, bw, bh)
             val r = Cv.clampRect(Rect((g4[0] * kx).toInt(), (g4[1] * ky).toInt(), ((g4[2] - g4[0]) * kx).roundToInt(), ((g4[3] - g4[1]) * ky).roundToInt()), ow, oh)
             if (r.width > 0 && r.height > 0) out.add(r)
@@ -1000,20 +1002,22 @@ internal object PrintedPage {
         return gapRows.toDouble() / max(1, bh) to runs
     }
 
-    /** Amplía la caja (x0, y0, x1, y1 exclusivo) por los lados con textura ≥ 50 % en la línea siguiente. */
+    /** Amplía la caja (x0, y0, x1, y1 exclusivo) por los lados con textura ≥ [GROW_TEX] en la línea siguiente. */
     private fun growRect(tex: FloatArray, w: Int, h: Int, x: Int, y: Int, bw: Int, bh: Int): IntArray {
         var x0 = x; var y0 = y; var x1 = x + bw; var y1 = y + bh
         fun rowF(yy: Int): Double { var s = 0.0; for (xx in x0 until x1) s += tex[yy * w + xx]; return s / max(1, x1 - x0) }
         fun colF(xx: Int): Double { var s = 0.0; for (yy in y0 until y1) s += tex[yy * w + xx]; return s / max(1, y1 - y0) }
         val my = (0.25 * bh).toInt(); val mx = (0.25 * bw).toInt()
-        var k = 0; while (k < my && y0 > 0 && rowF(y0 - 1) >= 0.5) { y0--; k++ }
-        k = 0; while (k < my && y1 < h && rowF(y1) >= 0.5) { y1++; k++ }
-        k = 0; while (k < mx && x0 > 0 && colF(x0 - 1) >= 0.5) { x0--; k++ }
-        k = 0; while (k < mx && x1 < w && colF(x1) >= 0.5) { x1++; k++ }
+        var k = 0; while (k < my && y0 > 0 && rowF(y0 - 1) >= GROW_TEX) { y0--; k++ }
+        k = 0; while (k < my && y1 < h && rowF(y1) >= GROW_TEX) { y1++; k++ }
+        k = 0; while (k < mx && x0 > 0 && colF(x0 - 1) >= GROW_TEX) { x0--; k++ }
+        k = 0; while (k < mx && x1 < w && colF(x1) >= GROW_TEX) { x1++; k++ }
         return intArrayOf(x0, y0, x1, y1)
     }
 
     private const val TEX_SIDE = 1000
+    /** Textura mínima de la línea siguiente para ampliar la caja de una foto (un renglón de texto al lado no llega). */
+    private const val GROW_TEX = 0.75
     private const val TEX_MIN_SIDE = 0.12
     private const val TEX_MIN_FILL = 0.55
     private const val TEX_MAX_PAPER = 0.45

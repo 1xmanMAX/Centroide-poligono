@@ -457,6 +457,11 @@ internal object TableLinesMath {
     /** Dispersión máxima (px) de los centros alrededor de la curva suavizada. */
     @JvmField var RMS_MAX = 0.7
     @JvmField var RMS_MAX_CONT = 1.2
+    /** Líneas muy largas a trozos ([accept]): longitud mínima (letras), tinta, dispersión y contraste mínimos. */
+    @JvmField var LONG_LH = 40.0
+    @JvmField var LONG_INK = 0.7
+    @JvmField var RMS_MAX_LONG = 1.4
+    @JvmField var FAINT_MIN_LONG = 0.1
     /** Contraste mínimo (fracción del de la tinta de la página) de una línea que la salida no muestra. */
     @JvmField var FAINT_MIN = 0.12
 
@@ -482,7 +487,10 @@ internal object TableLinesMath {
         }
         // tenue pero inequívoca: casi continua en la foto y con contraste apreciable respecto de la tinta de la página
         // (la transparencia del reverso es mucho más pálida)
-        val strong = BooleanArray(n) { k -> val tr = c[k].tr; tr.inkFrac >= 0.85 && tr.maxRun >= 0.5 * c[k].len && tr.amp >= FAINT_MIN * inkRef }
+        // muy larga (>= [LONG_LH] letras), con tinta en casi toda su longitud aunque a trozos: las rayas finas y claras de una
+        // tabla impresa fotografiada (gris azulado, 1-2 px) se rompen en tramos cortos y su centro es ruidoso
+        val long = BooleanArray(n) { k -> val tr = c[k].tr; c[k].len >= LONG_LH * lh && tr.inkFrac >= LONG_INK && tr.rms <= RMS_MAX_LONG && tr.amp >= FAINT_MIN_LONG * inkRef }
+        val strong = BooleanArray(n) { k -> val tr = c[k].tr; (tr.inkFrac >= 0.85 && tr.maxRun >= 0.5 * c[k].len && tr.amp >= FAINT_MIN * inkRef) || long[k] }
         val basic = BooleanArray(n) { k ->
             val l = c[k]; val tr = l.tr
             val side = if (l.hor) w else h
@@ -490,7 +498,7 @@ internal object TableLinesMath {
             // trazo continuo largo, o raya rota de forma irregular con bastante tinta
             val solid = tr.maxRun >= 2.5 * lh || tr.maxRun >= 0.85 * l.len
             // una línea casi continua admite más dispersión (contraste bajo = centro más ruidoso); el texto no lo es
-            val rmsMax = if (tr.inkFrac >= 0.85 && tr.maxRun >= 0.5 * l.len) RMS_MAX_CONT else RMS_MAX
+            val rmsMax = if (long[k]) RMS_MAX_LONG else if (tr.inkFrac >= 0.85 && tr.maxRun >= 0.5 * l.len) RMS_MAX_CONT else RMS_MAX
             l.len >= minLen && !tr.dashed && tr.thick <= maxThick && tr.rms <= rmsMax &&
                 tr.embedded < 0.3 && tr.touching < 0.7 && tr.inkFrac >= 0.35 && l.len <= side &&
                 (solid || (tr.irregular && tr.inkFrac >= 0.45 && tr.maxRun >= lh && l.len >= 6 * lh))

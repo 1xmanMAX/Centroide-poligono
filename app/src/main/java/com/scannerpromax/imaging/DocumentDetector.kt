@@ -256,7 +256,7 @@ class DocumentDetector(private val tier: DeviceTier) {
                 val fe = DetPaper.fit(m, e.pts)
                 val fn = DetPaper.fit(m, scaleNeural(q.pts, rgbSmall.cols(), rgbSmall.rows(), fullW, fullH))
                 debugLog?.invoke("nn: papel E ink=%.3f bg=%.3f cov=%.3f | NN ink=%.3f bg=%.3f cov=%.3f".format(java.util.Locale.ROOT, fe.inkIn, fe.bgIn, fe.cov, fn.inkIn, fn.bgIn, fn.cov))
-                if (fe.inkIn >= NN_KEEP_E_INK && fe.bgIn <= NN_KEEP_E_BG && fn.inkIn < fe.inkIn - NN_KEEP_INK_LOSS && fn.cov < NN_KEEP_COV * fe.cov) d = NeuralDecision.CLASSIC
+                if (nnCutsCleanSheet(fe.inkIn, fe.bgIn, fe.cov, fn.inkIn, fn.cov)) d = NeuralDecision.CLASSIC
             }
         }
         debugLog?.invoke("nn: s=%.2f conf=%s -> $d".format(java.util.Locale.ROOT, q.score, e?.conf?.let { "%.2f".format(java.util.Locale.ROOT, it) }))
@@ -1966,6 +1966,13 @@ class DocumentDetector(private val tier: DeviceTier) {
          * Reglas de fusión del árbitro neuronal (puras, testeables): [ePts]/[eConf] el candidato clásico en px de la imagen
          * de trabajo [w]x[h] (null = ninguno), [q] la red en px de la imagen completa.
          */
+        /**
+         * ¿La red corta una hoja que el contorno clásico encierra limpia? [eInk]/[eBg]/[eCov] = tinta dentro, fondo ajeno
+         * dentro y papel cubierto por el cuadrilátero clásico ([DetPaper.fit]); [nInk]/[nCov] = lo mismo con el de la red.
+         */
+        internal fun nnCutsCleanSheet(eInk: Double, eBg: Double, eCov: Double, nInk: Double, nCov: Double): Boolean =
+            eInk >= NN_KEEP_E_INK && eBg <= NN_KEEP_E_BG && nInk < eInk - NN_KEEP_INK_LOSS && nCov < NN_KEEP_COV * eCov
+
         internal fun arbitrate(ePts: FloatArray?, eConf: Double?, q: NeuralQuad, w: Int, h: Int, fullW: Int, fullH: Int): NeuralDecision {
             val qn = scaleNeural(q.pts, w, h, fullW, fullH)
             val s = q.score
