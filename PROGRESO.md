@@ -191,3 +191,22 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
 - Pendiente: celdas gris claro de tablas (ΔE < 7, no son relleno), fila de sección gris clara; pie de foto dentro del marco con
   fondo claro entra en la caja de la foto (texto algo gris); "sólo B/N" deja las fotos en gris (decisión de diseño).
 - 2026-10-29: mejoras con fotos reales INTEGRADAS (4f5f6f4): orientación por tiras (stripAxis), fotos por textura, bandas rellenas (cabeceras), rayas finas largas, detección (red no sustituye contorno limpio), duplicados con parecido de contenido. 556 tests. Pendiente: celdas gris muy claro (ΔE<7), pie de foto dentro del marco algo gris. v29 COMPILADA.
+
+## 2026-10-29: fotos con su recuadro EXACTO + capa de fotos (queja v29 pág. 25 y firma en recuadro gris) — rama del agente (sin push)
+- Causa raíz (13 fotos juliaca2, cajas dibujadas): ninguna fuente sola; las cajas de foto se usaban tal cual. Jev (JevPhotos pide
+  "pictures" incluidos logos y sellos): caja de la cabecera a media página (j02 0,21-0,42 x 0,03-0,83, como la pág. 25), firmas y
+  cabeceras como foto; PP-DocLayoutV3: la FIRMA como image/footer_image y los logos; textureBlocks: el pie de foto dentro de la caja;
+  findImageBlocks: trozos que desbordan la foto; firmas/sellos de Jev (zona suave): toda la zona como trazo -> recuadro gris.
+- imaging/PhotoBoxRefine (paso único): evidencia propia (grano/tono medio/color, zonas densas); cada caja candidata (bloques,
+  textura, PP, Jev) sólo SELECCIONA zonas densas; perfiles por filas/columnas con puentes en franjas pálidas y sin rayas del marco
+  ni pie de foto; división de cajas con varias fotos; borde exacto a resolución completa (escalón de gris + textura, fuera = papel);
+  clasificación "¿fotografía de cámara?" (papel, grano, top2 colores planos -> logos/cabeceras/firmas/sellos fuera); Jev: pregunta
+  de cámara por caja ordinal y por recorte EN LA MISMA petición (JevPage cam_i/camc_k), veto < 0,3, confirma dudosas >= 0,75; nunca amplía.
+- imaging/PhotoLayer: DOS CAPAS. Base = render normal sin fotos (+ bordes + líneas de tabla); fotos = recorte del original
+  rectificado con filtro natural (balance con el papel, hombro en luces, curva suave, saturación + vibrance, enfoque; B/N en gris),
+  pegado con 1 px de fundido hacia dentro. Fuera de los recuadros: idéntico píxel a píxel (test).
+- Firmas/sellos de Jev: la zona sólo protege la tinta (candidatos a trazo), papel blanco puro.
+- Medido: juliaca 13 fotos (verdad a mano): IoU 0,973 -> 0,990 (mín 0,976), papel tratado como foto 13,8 % -> 0,19 %, 0 cajas en
+  firmas/sellos/logos/cabeceras (con y sin Jev). Banco fotos Jev: syn photo IoU 0,84 (86 % aceptadas), gráficos 0 (a propósito),
+  papel tratado 0,85 % -> 0,01 %. DIBCO FM 79,33 -> 79,30, DRD 10,86 -> 10,88; tablas syn2 = (97,4/97,2 %). 570 tests.
+- Láminas /tmp/claude-0/bench/fotos_exactas/; notas /tmp/claude-0/bench/notes_fotos_exactas.md.
