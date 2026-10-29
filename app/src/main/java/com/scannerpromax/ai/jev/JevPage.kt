@@ -43,9 +43,9 @@ class JevPageResult(
         put("askedPhotos", askedPhotos); put("askedTables", askedTables); put("askedInks", askedInks); put("askedCamera", askedCamera)
     }.toString()
 
-    /** (las cachés de antes de la pregunta de cámara no valen para las fotos: se vuelve a preguntar) */
+    /** (una caché de antes de la pregunta de cámara sigue valiendo: sin opiniones decide el recuadro exacto local) */
     fun covers(photos: Boolean, tables: Boolean, inks: Boolean = false) =
-        (!photos || (askedPhotos && askedCamera)) && (!tables || askedTables) && (!inks || askedInks)
+        (!photos || askedPhotos) && (!tables || askedTables) && (!inks || askedInks)
 
     companion object {
         /** Sube si cambia el protocolo: las cachés viejas se ignoran (las de antes de las firmas valen: askedInks = false). */
@@ -98,8 +98,6 @@ object JevPage {
     fun cameraQuestion(what: String) = "Is $what a photograph taken with a camera (a real scene: people, streets, buildings, " +
         "landscape, nature, objects; aerial or satellite photos count), and not a signature, stamp, logo, chart, drawing, map graphic or text?"
 
-    /** Probabilidad mínima de "sí" para que una caja DUDOSA cuente como fotografía (calibrada en juliaca2: notes_fotos_exactas.md). */
-    const val CAMERA_YES = 0.85
 
     /** Recortes candidatos por los que se pregunta como mucho. */
     const val MAX_CROPS = 6

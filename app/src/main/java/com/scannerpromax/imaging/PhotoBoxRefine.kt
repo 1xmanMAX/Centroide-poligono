@@ -64,12 +64,16 @@ object PhotoBoxRefine {
         val colors: Int,
         /** Tono medio (ni papel ni tinta negra: 0,15..0,9 del papel). */
         val mid: Double,
+        /** Fracción de los píxeles en los DOS colores más frecuentes (un logo o una cabecera: casi todo; una foto: poco). */
+        val top2: Double = 0.0,
     ) {
-        override fun toString() = "foto=%.2f papel=%.2f grano=%.2f plano=%.2f colores=$colors medio=%.2f".format(photo, paper, grain, flat, mid)
+        override fun toString() = "foto=%.2f papel=%.2f grano=%.2f plano=%.2f colores=$colors medio=%.2f top2=%.2f".format(photo, paper, grain, flat, mid, top2)
     }
 
     /** Resultado: rectángulo (px de salida), fuentes que lo pidieron, ¿fotografía?, medidas y opinión de Jev (o null). */
-    class Found(val rect: Rect, val src: Int, val photo: Boolean, val m: Metrics, val jevP: Double?, val why: String, val local: PhotoMath.Kind = PhotoMath.Kind.NOT, val big: Boolean = true)
+    class Found(val rect: Rect, val src: Int, val photo: Boolean, val m: Metrics, val jevP: Double?, val why: String, val local: PhotoMath.Kind = PhotoMath.Kind.NOT, val big: Boolean = true) {
+        override fun toString() = "$rect $m jev=$jevP -> $why"
+    }
 
     /** Fila/columna "de foto": densidad mínima de píxeles de foto en el tramo. */
     const val ROW_T = 0.62
@@ -103,8 +107,12 @@ object PhotoBoxRefine {
     private const val EXT_MAX = 0.15
     /** Largo mínimo (fracción del lado largo) de un tramo unido por un puente en un extremo del grupo (no un pie de foto). */
     private const val BRIDGE_RUN = 0.04
-    /** Jev: probabilidad mínima para aceptar como fotografía una caja dudosa y máxima para vetar una caja local. */
-    const val JEV_YES = 0.85
+    /**
+     * Jev ("¿fotografía de cámara?", JevPage.cameraQuestion): probabilidad mínima para aceptar como fotografía una caja
+     * DUDOSA y máxima para vetar una caja local. Calibrado en las 13 fotos reales juliaca2: fotografías 0,79–0,99 (aéreas
+     * 0,79–0,88), firmas, sellos, logos y cabeceras 0,03–0,58 -> umbral alto en el hueco.
+     */
+    const val JEV_YES = 0.75
     const val JEV_NO = 0.3
 
     @Volatile var log: ((String) -> Unit)? = null
@@ -487,7 +495,8 @@ object PhotoBoxRefine {
         }
         if (n == 0) return Metrics(0.0, 1.0, 0.0, 0.0, 0, 0.0)
         val colors = hist.count { it >= 0.004 * n }
-        return Metrics(ph.toDouble() / n, pa.toDouble() / n, gr.toDouble() / n, fl.toDouble() / n, colors, mid.toDouble() / n)
+        val top = hist.sortedDescending()
+        return Metrics(ph.toDouble() / n, pa.toDouble() / n, gr.toDouble() / n, fl.toDouble() / n, colors, mid.toDouble() / n, (top[0] + top[1]).toDouble() / n)
     }
 
     private fun iou(a: FloatArray, b: FloatArray): Double {
@@ -507,13 +516,15 @@ object PhotoMath {
 
     /**
      * ¿Fotografía de cámara? Una foto tiene tono medio o color en casi toda la caja, casi nada de papel liso, grano en buena
-     * parte y muchos colores. Una firma o un sello (trazos sobre papel): mucho papel. Un logo o una cabecera: tramos
-     * planos de color y pocos colores.
+     * parte y muchos colores. Una firma o un sello (trazos sobre papel): mucho papel. Un logo o una cabecera: casi todo en
+     * dos colores planos y pocos colores. (Umbrales: 13 fotos reales juliaca2 + banco de fotos de Jev, notes_fotos_exactas.md.)
      */
     fun classify(m: PhotoBoxRefine.Metrics): Kind = when {
-        m.paper > 0.25 || m.photo < 0.6 -> Kind.NOT
-        m.flat > 0.45 || m.grain < 0.5 || m.colors < 6 -> Kind.NOT
-        m.photo >= 0.8 && m.paper <= 0.2 && m.grain >= 0.6 && m.flat <= 0.3 && m.colors >= 8 -> Kind.PHOTO
+        m.paper > 0.25 || m.photo < 0.6 || m.colors < 6 || m.grain < 0.2 -> Kind.NOT
+        // logo, cabecera, banda de color
+        m.top2 >= 0.6 && m.grain < 0.45 && m.colors <= 18 -> Kind.NOT
+        // foto con grano en casi todo, o con zonas lisas (cielo, pared) pero de muchos tonos
+        m.photo >= 0.8 && m.paper <= 0.2 && m.colors >= 8 && (m.grain >= 0.6 || (m.grain >= 0.28 && m.top2 <= 0.6)) -> Kind.PHOTO
         else -> Kind.DOUBTFUL
     }
 

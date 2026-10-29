@@ -60,7 +60,11 @@ internal object PrintedPage {
      * x1, y1). Las mismas fuentes locales que el render (bloques de color y textura), para preguntar a Jev por su recorte
      * ("Mejorar con Jev"); el render las vuelve a calcular y casa las opiniones por solape.
      */
-    fun photoCandidates(page: Mat): List<FloatArray> = MatBag().use { bag ->
+    fun photoCandidates(page: Mat): List<FloatArray> = photoFound(page).filter { it.big && it.local != PhotoMath.Kind.NOT }
+        .map { f -> floatArrayOf(f.rect.x.toFloat() / page.cols(), f.rect.y.toFloat() / page.rows(), (f.rect.x + f.rect.width).toFloat() / page.cols(), (f.rect.y + f.rect.height).toFloat() / page.rows()) }
+
+    /** Cajas ajustadas ([PhotoBoxRefine]) de [page] desde las fuentes locales y las de [layoutImages] (fracciones). */
+    internal fun photoFound(page: Mat, layoutImages: List<FloatArray> = emptyList()): List<PhotoBoxRefine.Found> = MatBag().use { bag ->
         val rgb = if (page.channels() == 4) bag.mat().also { Imgproc.cvtColor(page, it, Imgproc.COLOR_RGBA2RGB) } else page
         val w = rgb.cols(); val h = rgb.rows()
         val bg = bag.add(Cv.estimateBackground(rgb, 384, refine = true, refineSide = 1024))
@@ -69,9 +73,9 @@ internal object PrintedPage {
         val smN = bag.mat(); Cv.divideByBackground(sm, sb, smN)
         val pm = max(1.0, Cv.paperStats(Cv.histogram(bag.add(Cv.gray(smN)))).second)
         val cands = findImageBlocks(smN, w, h, bag).map { PhotoBoxRefine.Cand(it, PhotoBoxRefine.SRC_COLOR) } +
-            (if (TEXTURE_PHOTOS) textureBlocks(smN, pm, w, h, bag).map { PhotoBoxRefine.Cand(it, PhotoBoxRefine.SRC_TEX) } else emptyList())
-        PhotoBoxRefine.refine(smN, pm, cands, w, h, full = rgb).filter { it.big && it.local != PhotoMath.Kind.NOT }
-            .map { f -> floatArrayOf(f.rect.x.toFloat() / w, f.rect.y.toFloat() / h, (f.rect.x + f.rect.width).toFloat() / w, (f.rect.y + f.rect.height).toFloat() / h) }
+            (if (TEXTURE_PHOTOS) textureBlocks(smN, pm, w, h, bag).map { PhotoBoxRefine.Cand(it, PhotoBoxRefine.SRC_TEX) } else emptyList()) +
+            NaturalColor.layoutRects(layoutImages, w, h).map { PhotoBoxRefine.Cand(it, PhotoBoxRefine.SRC_LAYOUT) }
+        PhotoBoxRefine.refine(smN, pm, cands, w, h, full = rgb, verdicts = photoVerdicts(layoutImages))
     }
 
     /** Opiniones de Jev ([NaturalColor.isVerdict]) de [layoutImages]. */
