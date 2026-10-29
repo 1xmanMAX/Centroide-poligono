@@ -36,7 +36,7 @@ class JevPageResult(
 
     companion object {
         /** Sube si cambia el protocolo: las cachés viejas se ignoran. */
-        const val VERSION = 1
+        const val VERSION = 2
 
         private fun boxes(l: List<FloatArray>): JsonArray = buildJsonArray { for (b in l) add(JsonArray(b.map { JsonPrimitive(it) })) }
 
@@ -44,7 +44,7 @@ class JevPageResult(
             val o = JevApi.json.parseToJsonElement(s).jsonObject
             if ((o["v"] as? JsonPrimitive)?.longOrNull?.toInt() != VERSION) return null
             fun list(k: String) = (o[k] as? JsonArray).orEmpty().mapNotNull { e ->
-                (e as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.doubleOrNull?.toFloat() }?.takeIf { it.size == 4 }?.toFloatArray()
+                (e as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.doubleOrNull?.toFloat() }?.takeIf { it.size == 4 || it.size == 6 }?.toFloatArray()
             }
             fun b(k: String) = (o[k] as? JsonPrimitive)?.content?.toBooleanStrictOrNull() ?: true
             JevPageResult(list("photos"), list("tables"), (o["tokens"] as? JsonPrimitive)?.longOrNull ?: 0, (o["ms"] as? JsonPrimitive)?.longOrNull ?: 0, b("askedPhotos"), b("askedTables"))
@@ -88,7 +88,7 @@ object JevPage {
         val img = JevImages.encode(page, side, 75, prefix = "page")
         val r = client.ask(request(img, photos, tables))
         val ph = if (photos) JevPhotos.refine(page, JevPhotos.parse(r, img.fit).boxes).map { it.toArray() } else emptyList()
-        val tb = if (tables) JevTables.parse(r, img.fit).boxes.map { it.toArray() } else emptyList()
+        val tb = if (tables) JevTables.parse(r, img.fit).hints() else emptyList()
         return JevPageResult(ph, tb, r.inputTokens, r.ms, photos, tables)
     }
 

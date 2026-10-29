@@ -66,6 +66,7 @@ internal object TableLines {
         // análisis
         val vs = bag.mat(); val s = Cv.downscale(vFull, vs, ANALYSIS_SIDE)
         val bgS = bag.add(Cv.estimateBackground(vs, 256))
+        val glare = if (hints.isEmpty()) null else Glare(bgS, s)
         val nv = bag.mat(); Cv.divideByBackground(vs, bgS, nv)
         val hist = Cv.histogram(nv)
         val (noise, pm) = Cv.paperStats(hist)
@@ -92,8 +93,10 @@ internal object TableLines {
         )
         val avoidRects = avoid.map { r -> doubleArrayOf(r[0] * w, r[1] * h, r[2] * w, r[3] * h) }
         // tablas indicadas (Jev): px de la página con margen de ~1 letra / en px de análisis
-        val zones = hints.map { z -> doubleArrayOf(z.box[0] * w - lh, z.box[1] * h - lh, z.box[2] * w + lh, z.box[3] * h + lh) }
-        val zonesA = zones.map { z -> DoubleArray(4) { z[it] * s } }
+        val zones = hints.map { z ->
+            doubleArrayOf(z.box[0] * w - lh, z.box[1] * h - lh, z.box[2] * w + lh, z.box[3] * h + lh, if (z.hLines) 1.0 else 0.0, if (z.vLines) 1.0 else 0.0)
+        }
+        val zonesA = zones.map { z -> DoubleArray(6) { if (it < 4) z[it] * s else z[it] } }
         val t1 = System.nanoTime()
         var tTrack = 0L; var tMorph = 0L
         for (hor in booleanArrayOf(true, false)) {
@@ -101,11 +104,12 @@ internal object TableLines {
             val bh = bag.mat()
             Imgproc.morphologyEx(nv, bh, Imgproc.MORPH_BLACKHAT, if (hor) Cv.kernel(Imgproc.MORPH_RECT, 1, kt) else Cv.kernel(Imgproc.MORPH_RECT, kt, 1))
             // 2.ª pasada sólo dentro de las tablas indicadas ([Hint]): umbral más bajo (líneas tenues o quemadas por la luz)
-            for (pass in 0 until (if (zonesA.isEmpty()) 1 else 2)) {
+            val zonesO = zonesA.filter { it[if (hor) 4 else 5] > 0.5 }
+            for (pass in 0 until (if (zonesO.isEmpty()) 1 else 2)) {
             val m = bag.mat(); Imgproc.threshold(bh, m, if (pass == 0) thr else max(4.0, HINT_THR_K * thr), 255.0, Imgproc.THRESH_BINARY)
             if (pass == 1) {
                 val roi = bag.add(Mat.zeros(m.size(), m.type()))
-                for (z in zonesA) Imgproc.rectangle(roi, org.opencv.core.Point(z[0], z[1]), org.opencv.core.Point(z[2], z[3]), Scalar(255.0), -1)
+                for (z in zonesO) Imgproc.rectangle(roi, org.opencv.core.Point(z[0], z[1]), org.opencv.core.Point(z[2], z[3]), Scalar(255.0), -1)
                 Core.bitwise_and(m, roi, m)
             }
             // puntos/trazos de una línea punteada o rota: cierre corto a lo largo antes de la apertura
@@ -171,7 +175,7 @@ internal object TableLines {
         log?.invoke("tiempos: prep=%.0f morf=%.0f seguimiento=%.0f ms".format((t1 - t0) / 1e6, tMorph / 1e6, (t2 - t1 - tMorph) / 1e6))
         if (cands.isEmpty()) return@use 0
         if (faint.isNotEmpty()) {
-            val f = faint.keys.toList(); markGlare(f, zones, vFull, lh)
+            val f = faint.keys.toList(); markGlare(f, zones, glare)
             cands.removeAll { it in faint && !it.glare }
         }
         // duplicados (dos semillas de la misma línea): la más larga
@@ -187,12 +191,12 @@ internal object TableLines {
             } ?: (0.0 to null)
             l.outCov = cov; colors[l] = col
         }
-        if (zones.isNotEmpty()) markGlare(kept, zones, vFull, lh)
+        if (zones.isNotEmpty()) markGlare(kept, zones, glare)
         val ok = TableLinesMath.accept(kept, w, h, lh, maxThick, inkRef, zones)
         val drawn = ArrayList<DoubleArray>()
         val chn = out.channels()
         // rejilla completada dentro de las tablas indicadas: prolongaciones por zonas QUEMADAS por la luz
-        val ext = if (zones.isEmpty()) emptyList() else completeGrid(kept, ok, zones, vFull, lh)
+        val ext = if (zones.isEmpty()) emptyList() else completeGrid(kept, ok, zones, vFull, lh, glare)
         for ((idx, l) in kept.withIndex()) {
             log?.invoke("cand ${if (l.hor) "H" else "V"} a=%.0f..%.0f c=%.1f len=%.0f thick=%.2f amp=%.0f ink=%.2f gap=${l.tr.maxGap} dash=${l.tr.dashed} rms=%.2f emb=%.2f touch=%.2f run=${l.tr.maxRun} irr=${l.tr.irregular} blk=%.2f/${l.tr.blockedRuns} out=%.2f gl=${l.glare} -> ${ok[idx]}".format(l.a0, l.a1, l.c, l.len, l.tr.thick, l.tr.amp, l.tr.inkFrac, l.tr.rms, l.tr.embedded, l.tr.touching, l.tr.blockedFrac, l.outCov))
             if (!ok[idx]) continue
@@ -225,7 +229,11 @@ internal object TableLines {
      * desconocido). Dentro: segunda pasada con umbral más bajo, aceptación más permisiva ([TableLinesMath.accept]) y
      * rejilla completada a través de las zonas quemadas por la luz ([completeGrid]). Sin indicaciones, todo igual.
      */
-    class Hint(val box: DoubleArray, val rows: Int = 0, val cols: Int = 0)
+    class Hint(
+        val box: DoubleArray, val rows: Int = 0, val cols: Int = 0,
+        /** ¿Tiene líneas impresas entre filas / entre columnas? (Jev; sin ellas no se relaja ni se completa esa orientación). */
+        val hLines: Boolean = true, val vLines: Boolean = true,
+    )
 
     /** Factor del umbral del black-hat en la 2.ª pasada dentro de las tablas indicadas. */
     @Volatile @JvmField var HINT_THR_K = 0.55
@@ -238,42 +246,33 @@ internal object TableLines {
     /** Fracción del hueco que debe estar quemada para prolongar una línea a través de él. */
     @Volatile @JvmField var BURN_FRAC = 0.7
 
-    /** Papel típico de la página (percentil 60 del canal mínimo, a baja resolución). */
-    private fun paperLevel(vFull: Mat): Double {
-        val sm = Mat(); Cv.downscale(vFull, sm, 400)
-        return Cv.percentile(Cv.histogram(sm), 0.6).toDouble().also { sm.release() }
-    }
-
     /**
-     * Marca las candidatas de las zonas cuya banda de papel (a media letra de la línea, el lado más claro) está, en
-     * mediana, >= [GLARE_ABOVE_PAPER] por encima del papel típico: ahí la luz lavó la línea y se acepta más tenue.
+     * Deslumbramiento a gran escala: el FONDO estimado (sin tinta, suave) [bg] (escala [s] de la página) >= papel típico
+     * (percentil 60 del fondo) + [GLARE_ABOVE_PAPER]. Los brillos finos de una hoja arrugada no llegan al fondo.
      */
-    private fun markGlare(kept: List<TableLinesMath.Cand>, zones: List<DoubleArray>, vFull: Mat, lh: Double) {
-        val paper = paperLevel(vFull)
-        val w = vFull.cols(); val h = vFull.rows()
-        val px = ByteArray(1)
-        fun v(x: Int, y: Int): Int { if (x < 0 || y < 0 || x >= w || y >= h) return -1; vFull.get(y, x, px); return px[0].toInt() and 0xFF }
-        for (l in kept) {
-            if (zones.none { inZone(l, it) }) continue
-            val off = l.tr.thick / 2 + 0.6 * lh
-            val vals = ArrayList<Int>()
-            var i = l.tr.a0
-            while (i <= l.tr.a1) {
-                val c = l.tr.centerAt(i.toDouble())
-                val a = (c - off).roundToInt(); val b = (c + off).roundToInt()
-                val m = if (l.hor) max(v(i, a), v(i, b)) else max(v(a, i), v(b, i))
-                if (m >= 0) vals.add(m)
-                i += 6
-            }
-            if (vals.size >= 4) { vals.sort(); l.glare = vals[vals.size / 2] >= paper + GLARE_ABOVE_PAPER }
+    private class Glare(bg: Mat, private val s: Double) {
+        private val w = bg.cols(); private val h = bg.rows()
+        private val px = ByteArray(w * h).also { bg.get(0, 0, it) }
+        val paper = Cv.percentile(Cv.histogram(bg), 0.6).toDouble()
+        fun at(x: Double, y: Double): Boolean {
+            val i = ((x + 0.5) * s).toInt().coerceIn(0, w - 1); val j = ((y + 0.5) * s).toInt().coerceIn(0, h - 1)
+            return (px[j * w + i].toInt() and 0xFF) >= paper + GLARE_ABOVE_PAPER
+        }
+        /** Fracción de la recta (a lo largo [a0]..[a1], centro [c]) en zona deslumbrada. */
+        fun frac(hor: Boolean, a0: Int, a1: Int, c: (Double) -> Double): Double {
+            var n = 0; var g = 0; var i = a0
+            while (i <= a1) { n++; val cc = c(i.toDouble()); if (if (hor) at(i.toDouble(), cc) else at(cc, i.toDouble())) g++; i += 6 }
+            return if (n == 0) 0.0 else g.toDouble() / n
         }
     }
 
-    private fun inZone(l: TableLinesMath.Cand, z: DoubleArray): Boolean {
-        val m = (l.a0 + l.a1) / 2
-        val x = if (l.hor) m else l.c; val y = if (l.hor) l.c else m
-        return x >= z[0] && x <= z[2] && y >= z[1] && y <= z[3]
+    /** Marca las candidatas de las zonas que están en su mayor parte (>= 50 %) en zona deslumbrada ([Glare]). */
+    private fun markGlare(kept: List<TableLinesMath.Cand>, zones: List<DoubleArray>, glare: Glare?) {
+        glare ?: return
+        for (l in kept) if (zones.any { inZone(l, it) }) l.glare = glare.frac(l.hor, l.tr.a0, l.tr.a1) { l.tr.centerAt(it) } >= 0.5
     }
+
+    private fun inZone(l: TableLinesMath.Cand, z: DoubleArray): Boolean = TableLinesMath.inside(l, z)
 
     /**
      * Prolongaciones de las líneas aceptadas dentro de cada zona: (1) hasta el extremo de la tabla (la perpendicular
@@ -281,12 +280,14 @@ internal object TableLines {
      * línea; en ambos casos SOLO si el hueco está quemado por la luz (>= [BURN_FRAC] del recorrido con el canal mínimo
      * >= [BURN_LEVEL]): donde la foto muestra papel normal sin línea, la línea de verdad no sigue.
      */
-    private fun completeGrid(kept: List<TableLinesMath.Cand>, ok: BooleanArray, zones: List<DoubleArray>, vFull: Mat, lh: Double): List<Pair<TableLinesMath.Cand, TableLinesMath.Cand>> {
+    private fun completeGrid(kept: List<TableLinesMath.Cand>, ok: BooleanArray, zones: List<DoubleArray>, vFull: Mat, lh: Double, glare: Glare?): List<Pair<TableLinesMath.Cand, TableLinesMath.Cand>> {
+        glare ?: return emptyList()
         val w = vFull.cols(); val h = vFull.rows()
         val out = ArrayList<Pair<TableLinesMath.Cand, TableLinesMath.Cand>>()
         // "quemado" = bastante más claro que el papel normal de la página (un escaneo con papel a 250 no tiene zonas
         // quemadas: su blanco es papel, y una línea que no se ve ahí es que no existe)
-        val paper = paperLevel(vFull)
+        val sm = Mat(); Cv.downscale(vFull, sm, 400)
+        val paper = Cv.percentile(Cv.histogram(sm), 0.6).toDouble(); sm.release()
         val burnLevel = max(BURN_LEVEL.toDouble(), paper + BURN_ABOVE_PAPER)
         val px = ByteArray(1)
         fun v(x: Int, y: Int): Int { if (x < 0 || y < 0 || x >= w || y >= h) return 0; vFull.get(y, x, px); return px[0].toInt() and 0xFF }
@@ -302,15 +303,17 @@ internal object TableLines {
             var i = a0
             while (i <= a1) { val c = cAt(i.toDouble()).roundToInt(); n++; if ((if (parent.hor) v(i, c) else v(c, i)) >= burnLevel) burned++; i += 2 }
             if (n == 0 || burned < BURN_FRAC * n) return null
+            // y el hueco está en un deslumbramiento de verdad (fondo claro a gran escala), no en un brillo fino
+            if (glare.frac(parent.hor, a0, a1, cAt) < 0.5) return null
             val centers = DoubleArray(a1 - a0 + 1) { cAt((a0 + it).toDouble()) }
             val tr = TableLinesMath.Track(a0, a1, centers, parent.tr.thick, parent.tr.amp, 1.0, 0, false, 0.0, 0.0, maxRun = a1 - a0 + 1)
             return TableLinesMath.Cand(parent.hor, a0.toDouble(), a1.toDouble(), centers.average(), tr)
         }
         for (z in zones) {
-            if (kept.any { it.tr.dashed && inZone(it, z) }) continue
+            if (kept.any { it.tr.dashed && TableLinesMath.insideBox(it, z) }) continue
             for (hor in booleanArrayOf(true, false)) {
                 val par = kept.indices.filter { ok[it] && kept[it].hor == hor && inZone(kept[it], z) }.map { kept[it] }
-                val perp = kept.indices.filter { ok[it] && kept[it].hor != hor && inZone(kept[it], z) }.map { kept[it] }
+                val perp = kept.indices.filter { ok[it] && kept[it].hor != hor && TableLinesMath.insideBox(kept[it], z) }.map { kept[it] }
                 if (par.isEmpty() || par.size + perp.size < 3) continue
                 val e0 = (perp.map { it.c } + par.map { it.a0 }).min()
                 val e1 = (perp.map { it.c } + par.map { it.a1 }).max()

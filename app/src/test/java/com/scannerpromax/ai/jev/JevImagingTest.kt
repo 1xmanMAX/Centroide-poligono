@@ -98,6 +98,11 @@ class JevImagingTest {
             val a = rowCoverage(out0, yy); val b = rowCoverage(out1, yy)
             assertTrue("fila $yy: sin zona $a, con zona $b", b > 0.95 && b > a + 0.1)
         }
+        // si Jev dice que la tabla NO tiene líneas entre filas, las horizontales no se relajan ni se completan
+        val out3 = Mat(1600, 1400, CvType.CV_8UC1, Scalar(255.0))
+        TableLines.restore(out3, src, 26.0, hints = listOf(TableLines.Hint(doubleArrayOf(0.06, 0.24, 0.94, 0.71), hLines = false)))
+        assertTrue(rowCoverage(out3, 760) < rowCoverage(out1, 760) - 0.1)
+        out3.release()
         // la salida sin zonas es idéntica a pasar una lista vacía
         val out2 = Mat(1600, 1400, CvType.CV_8UC1, Scalar(255.0))
         TableLines.restore(out2, src, 26.0, hints = emptyList())

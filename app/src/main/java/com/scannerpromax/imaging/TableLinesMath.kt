@@ -461,11 +461,14 @@ internal object TableLinesMath {
     @JvmField var FAINT_MIN = 0.12
 
     /** ¿El centro de [l] está dentro del rectángulo [z] (px x0, y0, x1, y1)? */
-    fun inside(l: Cand, z: DoubleArray): Boolean {
+    fun insideBox(l: Cand, z: DoubleArray): Boolean {
         val m = (l.a0 + l.a1) / 2
         val x = if (l.hor) m else l.c; val y = if (l.hor) l.c else m
         return x >= z[0] && x <= z[2] && y >= z[1] && y <= z[3]
     }
+
+    /** Como [insideBox] y, si la zona trae banderas (z[4] filas rayadas, z[5] columnas rayadas), la de su orientación. */
+    fun inside(l: Cand, z: DoubleArray): Boolean = insideBox(l, z) && (z.size < 6 || (if (l.hor) z[4] else z[5]) > 0.5)
 
     private fun tr0(l: Cand) = l.tr.inkFrac >= 0.6 && l.tr.maxRun >= 0.3 * l.len
 
@@ -473,11 +476,9 @@ internal object TableLinesMath {
         val n = c.size
         // dentro de una tabla indicada (Jev; zonas en px x0, y0, x1, y1): reglas más permisivas, la tabla ya está probada
         val zoned = BooleanArray(n) { k ->
-            val l = c[k]; val m = (l.a0 + l.a1) / 2
-            val x = if (l.hor) m else l.c; val y = if (l.hor) l.c else m
-            zones.any { z -> x >= z[0] && x <= z[2] && y >= z[1] && y <= z[3] &&
+            zones.any { z -> inside(c[k], z) &&
                 // tabla de rayas discontinuas impresas: sus trazos sueltos no deben unirse en líneas continuas
-                c.none { d -> d.tr.dashed && inside(d, z) } }
+                c.none { d -> d.tr.dashed && insideBox(d, z) } }
         }
         // tenue pero inequívoca: casi continua en la foto y con contraste apreciable respecto de la tinta de la página
         // (la transparencia del reverso es mucho más pálida)
