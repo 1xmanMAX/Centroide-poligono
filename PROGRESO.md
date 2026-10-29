@@ -172,3 +172,14 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
 - QualityAnalyzer: desenfoque 60 -> 150.
 - Banco: JevIdeasEvalTest (-PjevIdeas), notas /tmp/claude-0/bench/notes_jev_impl.md. 547 tests OK.
 - 2026-10-29: ideas Jev INTEGRADAS (c5d950f): tipo→modo/filtro, carpetas (categoría + chips en Inicio), rescate de encuadre y "¿hay documento?", duplicados ORB+Jev, calidad→Reescanear, firmas/sellos. Umbral de desenfoque en vivo devuelto a 60 (150 sólo medido en fotos). 547 tests. v28 COMPILADA (una sola versión con todo).
+
+## 2026-10-29: 13 fotos reales del informe (juliaca2) por la cadena completa — rama local del agente (sin push)
+- Fotos del usuario en /tmp/claude-0/bench/datasets_usuario/juliaca2 (PERSONALES, nunca al repo). Arnés scratchpad/jl
+  (JlRunner: DocAligner+DetPaper, Jev captura, doc_ori, geometría, Jev página, NATURAL/B/N, duplicados). Notas
+  /tmp/claude-0/bench/notes_juliaca2.md. Láminas /tmp/claude-0/bench/juliaca2_laminas/.
+- Corregido (general): orientación por renglones a varias escalas cuando los vecinos no deciden (paneles de fotos girados);
+  fotos de tonos apagados por TEXTURA (PrintedPage.textureBlocks; antes troceadas/binarizadas); bandas rellenas con texto
+  claro (cabeceras azules de tabla) como bloque entero (bandBlocks); rayas de tabla largas, finas y claras redibujadas
+  (TableLinesMath "long"); DocAligner ya no corta una hoja que el contorno clásico encierra limpia; duplicados exigen
+  parecido del CONTENIDO por celdas (las páginas de una misma plantilla ya no se avisan como duplicadas).
+- Arnés del banco: harness/compile.sh y env.sh compilan ai/jev (imaging depende de él desde la integración Jev).
