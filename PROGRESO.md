@@ -148,6 +148,10 @@ Maqueta en lienzo de diseño: https://claude.ai/artifact/1axPwJgQ3TRA16puB75DTG 
   CloudKeyStore ("JEV"), Ajustes › IA en la nube › "Jev (TypeSafe)" con "Mejorar con Jev" (fotos, tablas, texto dudoso; apagado
   sin clave; coste estimado), caché docDir/jev/<página>_<hash geometría>.json, PageProcessor.render(jev=…) -> layoutImages /
   tableHints, TableLines.Hint (2.ª pasada en la tabla, aceptación permisiva, rejilla completada por zonas quemadas por la luz).
-- Medido (protocolo final, 1568 px, ~6 000 tokens ≈ 0,00025 $/pág, p50 220 ms): fotos IoU medio 0,48 (clásico) -> 0,75 (Jev);
-  PP-DocLayoutV3 0,87, PP+Jev 0,88. Tablas con deslumbramiento (sintético) cobertura 74,5 -> 90,9 % (continuas 44 -> 74 %),
-  sin deslumbramiento 94,3 -> 95,2 %. OCR: CER 27,3 -> 27,3 (sin efecto) -> OCR apagado por defecto.
+- Medido (protocolo final: fotos+tablas en una petición, 1568 px, ~6 200-6 700 tokens ≈ 0,00027 $/pág, ~230 ms):
+  fotos IoU medio 0,48 (clásico) -> 0,74 (Jev ajustado); PP-DocLayoutV3 0,87, PP+Jev 0,88. Tablas con deslumbramiento
+  (sintético syn3) cobertura NAT 74,5 -> 89,0 % (continuas 44 -> 71 %; con cajas exactas 89,2; zonas propias sin Jev 83,2),
+  sin deslumbramiento 94,3 -> 94,5 %; fotos reales 387 -> 392 líneas, categorías con referencia 0 píxeles cambiados.
+  OCR: CER 27,3 -> 27,3 (sin efecto) -> "Texto dudoso" apagado por defecto. Todo apagado sin clave; 527 tests.
+- Recomendación: "Mejorar con Jev" opcional (apagado por defecto); con clave, fotos y tablas sí; OCR no. Pendiente: probar
+  en el móvil; encuadre con Jev no probado. Láminas /tmp/claude-0/bench/jev/laminas/.
