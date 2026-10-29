@@ -119,7 +119,7 @@ class PageProcessor(val tier: DeviceTier) {
                 val r = TextOrientation.estimate(gray)
                 // El modelo sólo se consulta cuando puede cambiar la decisión: renglones verticales o propuesta de 180°
                 val model = orientationModel
-                val probs = if (model != null && (r.vertical == true || r.rotation == 180)) {
+                val probs = if (model != null && (r.vertical == true || r.rotation == 180 || !r.sure)) {
                     runCatching {
                         val bmp = Cv.toBitmap(page)
                         try { model(bmp) } finally { bmp.recycle() }

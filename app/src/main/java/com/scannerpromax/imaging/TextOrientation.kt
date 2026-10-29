@@ -145,6 +145,11 @@ internal object TextOrientation {
      */
     fun decide(r: Result, probs: FloatArray?): Int {
         val p = probs?.takeIf { it.size >= 4 && it.all { v -> v.isFinite() } }
+        // Renglones poco fiables: decide el modelo si está seguro (banco de orientación: 67 % -> 91 %, sin giros dañinos)
+        if (!r.sure && p != null) {
+            var k = 0; for (i in 1..3) if (p[i] > p[k]) k = i
+            return if (p[k] >= MODEL_SURE) (360 - 90 * k) % 360 else 0
+        }
         return when (r.vertical) {
             true -> {
                 if (p == null) return r.rotation
@@ -164,6 +169,8 @@ internal object TextOrientation {
     /** Modelo contra el análisis seguro (veto) y modelo solo entre 90/270 con renglones verticales. */
     private const val MODEL_VETO = 0.8
     private const val MODEL_ALONE = 0.6
+    /** Modelo solo cuando el análisis de renglones no es seguro. */
+    private const val MODEL_SURE = 0.7
 
     private fun median(v: IntArray): Double { if (v.isEmpty()) return 0.0; val c = v.copyOf(); c.sort(); return c[c.size / 2].toDouble() }
 

@@ -33,8 +33,10 @@ class TextOrientationDecideTest {
         assertEquals(90, TextOrientation.decide(res(0, true, false), has(0.05f, 0.05f, 0.1f, 0.8f)))
         assertEquals(270, TextOrientation.decide(res(0, true, false), has(0.05f, 0.75f, 0.1f, 0.1f)))
         assertEquals(0, TextOrientation.decide(res(0, true, false), has(0.3f, 0.35f, 0.05f, 0.3f)))
-        // eje dudoso: nunca se gira aunque el modelo lo pida
-        assertEquals(0, TextOrientation.decide(res(0, null, false), has(0.0f, 0.95f, 0.0f, 0.05f)))
+        // eje dudoso: decide el modelo sólo si está seguro (p >= 0,7)
+        assertEquals(270, TextOrientation.decide(res(0, null, false), has(0.0f, 0.95f, 0.0f, 0.05f)))
+        assertEquals(180, TextOrientation.decide(res(0, null, false), has(0.1f, 0.05f, 0.8f, 0.05f)))
+        assertEquals(0, TextOrientation.decide(res(0, null, false), has(0.4f, 0.1f, 0.45f, 0.05f)))
     }
 
     @Test fun ciento80_necesitaAcuerdoDelModelo() {
