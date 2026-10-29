@@ -183,3 +183,9 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
   (TableLinesMath "long"); DocAligner ya no corta una hoja que el contorno clásico encierra limpia; duplicados exigen
   parecido del CONTENIDO por celdas (las páginas de una misma plantilla ya no se avisan como duplicadas).
 - Arnés del banco: harness/compile.sh y env.sh compilan ai/jev (imaging depende de él desde la integración Jev).
+- FINAL (rama del agente, sin push): bancos sin regresiones relevantes — detección fallo 16,3 -> 16,2 %; orientación ok 511 ->
+  527/1200 (0 incoherencias nuevas); tablas sintéticas NAT 94,3 -> 97,4 %, B/N 93,6 -> 97,2 %; DIBCO FM 79,33 =, DRD 10,87 -> 10,86;
+  Color natural (11 cat.) B/N FM +0,04, MAGIC FM -0,03 (iluminación -0,12), B/N espurio +0,25 pp (fotos y bandas en gris);
+  duplicados: 0 falsos (antes 11 en juliaca), seguros del banco 22 -> 13/30 (resto a la zona gris de Jev). 556 tests OK.
+- Pendiente: celdas gris claro de tablas (ΔE < 7, no son relleno), fila de sección gris clara; pie de foto dentro del marco con
+  fondo claro entra en la caja de la foto (texto algo gris); "sólo B/N" deja las fotos en gris (decisión de diseño).
