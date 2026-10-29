@@ -458,8 +458,25 @@ internal object TableLinesMath {
     /** Contraste mínimo (fracción del de la tinta de la página) de una línea que la salida no muestra. */
     @JvmField var FAINT_MIN = 0.12
 
-    fun accept(c: List<Cand>, w: Int, h: Int, lh: Double, maxThick: Double, inkRef: Double = 0.0): BooleanArray {
+    /** ¿El centro de [l] está dentro del rectángulo [z] (px x0, y0, x1, y1)? */
+    fun inside(l: Cand, z: DoubleArray): Boolean {
+        val m = (l.a0 + l.a1) / 2
+        val x = if (l.hor) m else l.c; val y = if (l.hor) l.c else m
+        return x >= z[0] && x <= z[2] && y >= z[1] && y <= z[3]
+    }
+
+    private fun tr0(l: Cand) = l.tr.inkFrac >= 0.6 && l.tr.maxRun >= 0.3 * l.len
+
+    fun accept(c: List<Cand>, w: Int, h: Int, lh: Double, maxThick: Double, inkRef: Double = 0.0, zones: List<DoubleArray> = emptyList()): BooleanArray {
         val n = c.size
+        // dentro de una tabla indicada (Jev; zonas en px x0, y0, x1, y1): reglas más permisivas, la tabla ya está probada
+        val zoned = BooleanArray(n) { k ->
+            val l = c[k]; val m = (l.a0 + l.a1) / 2
+            val x = if (l.hor) m else l.c; val y = if (l.hor) l.c else m
+            zones.any { z -> x >= z[0] && x <= z[2] && y >= z[1] && y <= z[3] &&
+                // tabla de rayas discontinuas impresas: sus trazos sueltos no deben unirse en líneas continuas
+                c.none { d -> d.tr.dashed && inside(d, z) } }
+        }
         // tenue pero inequívoca: casi continua en la foto y con contraste apreciable respecto de la tinta de la página
         // (la transparencia del reverso es mucho más pálida)
         val strong = BooleanArray(n) { k -> val tr = c[k].tr; tr.inkFrac >= 0.85 && tr.maxRun >= 0.5 * c[k].len && tr.amp >= FAINT_MIN * inkRef }
@@ -487,6 +504,13 @@ internal object TableLinesMath {
             val ov = min(a.a1, b.a1) - max(a.a0, b.a0)
             return ov >= 0.6 * max(a.len, b.len)
         }
+        // tenue o rota por la luz dentro de una tabla indicada: recta, fina, sin tocar texto, con algo de tinta seguida
+        for (k in 0 until n) if (zoned[k] && !basic[k]) {
+            val l = c[k]; val tr = l.tr
+            val minLen = max(2.5 * lh, 0.03 * (if (l.hor) w else h))
+            basic[k] = l.len >= minLen && !tr.dashed && tr.thick <= maxThick && tr.rms <= RMS_MAX_CONT && tr.embedded < 0.3 &&
+                tr.touching < 0.5 && tr.inkFrac >= 0.25 && (tr.maxRun >= 1.5 * lh || tr.maxRun >= 0.6 * l.len)
+        }
         val visible = BooleanArray(n) { basic[it] && c[it].outCov >= 0.1 }
         val support = BooleanArray(n) { visible[it] || (basic[it] && strong[it]) }
         val ok = BooleanArray(n)
@@ -508,6 +532,7 @@ internal object TableLinesMath {
                 // rejilla de un gráfico (barras que la cruzan y ninguna línea fina perpendicular): no se toca. Una
                 // tabla con columnas sombreadas sí tiene sus verticales finas
                 (l.tr.chartLike || parChart >= 2) && crLong < 2 -> false
+                zoned[k] && (visible[k] || (tr0(l) && l.tr.amp >= 0.5 * FAINT_MIN * inkRef)) -> true
                 visible[k] -> longRule || table
                 // la salida no la muestra: sólo dentro de la estructura de una tabla
                 strong[k] -> parS >= 2 || crS >= 2

@@ -64,6 +64,11 @@ object ImageEnhancer {
         val layoutImages: List<FloatArray> = emptyList(),
         /** Fotos de la página ([com.scannerpromax.domain.PageEdits.photoMode]; 0 automático). */
         val photoMode: Int = 0,
+        /**
+         * Tablas localizadas por Jev ("Mejorar con Jev"), normalizadas 0..1 como [layoutImages]: [TableLines] acepta líneas
+         * más tenues dentro y completa la rejilla por las zonas quemadas por la luz. Vacía = como siempre.
+         */
+        val tableHints: List<FloatArray> = emptyList(),
     ) {
         companion object {
             fun default(): Options {
@@ -553,7 +558,7 @@ object ImageEnhancer {
     private fun restoreTableLines(out: Mat, src: Mat, st: PrintedPage.Stats, opt: Options) {
         runCatching {
             val avoid = st.pictures + opt.layoutImages.map { b -> DoubleArray(4) { b[it].toDouble() } }
-            TableLines.restore(out, src, st.letterHeight, avoid)
+            TableLines.restore(out, src, st.letterHeight, avoid, opt.tableHints.map { b -> TableLines.Hint(DoubleArray(4) { b[it].toDouble() }) })
         }.onFailure { if (Cv.isOutOfMemory(it)) throw it }
     }
 

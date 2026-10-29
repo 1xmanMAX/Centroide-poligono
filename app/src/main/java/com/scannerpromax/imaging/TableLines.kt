@@ -53,7 +53,7 @@ internal object TableLines {
      * la página que se renderizó). [letterHeight] en px de [src] (0 = desconocida). [avoid] = recuadros relativos
      * (x0, y0, x1, y1 en 0..1) de fotos/figuras donde no se dibuja. Devuelve el número de líneas dibujadas.
      */
-    fun restore(out: Mat, src: Mat, letterHeight: Double, avoid: List<DoubleArray> = emptyList()): Int = MatBag().use { bag ->
+    fun restore(out: Mat, src: Mat, letterHeight: Double, avoid: List<DoubleArray> = emptyList(), hints: List<Hint> = emptyList()): Int = MatBag().use { bag ->
         if (!ENABLED || src.empty() || out.empty() || src.channels() < 3) return@use 0
         val w = src.cols(); val h = src.rows()
         if (min(w, h) < 200) return@use 0
@@ -89,13 +89,23 @@ internal object TableLines {
             gapMax = max((2.5 * lh).roundToInt(), (0.02 * side).roundToInt()),
         )
         val avoidRects = avoid.map { r -> doubleArrayOf(r[0] * w, r[1] * h, r[2] * w, r[3] * h) }
+        // tablas indicadas (Jev): px de la página con margen de ~1 letra / en px de análisis
+        val zones = hints.map { z -> doubleArrayOf(z.box[0] * w - lh, z.box[1] * h - lh, z.box[2] * w + lh, z.box[3] * h + lh) }
+        val zonesA = zones.map { z -> DoubleArray(4) { z[it] * s } }
         val t1 = System.nanoTime()
         var tTrack = 0L; var tMorph = 0L
         for (hor in booleanArrayOf(true, false)) {
             val tm0 = System.nanoTime()
             val bh = bag.mat()
             Imgproc.morphologyEx(nv, bh, Imgproc.MORPH_BLACKHAT, if (hor) Cv.kernel(Imgproc.MORPH_RECT, 1, kt) else Cv.kernel(Imgproc.MORPH_RECT, kt, 1))
-            val m = bag.mat(); Imgproc.threshold(bh, m, thr, 255.0, Imgproc.THRESH_BINARY)
+            // 2.ª pasada sólo dentro de las tablas indicadas ([Hint]): umbral más bajo (líneas tenues o quemadas por la luz)
+            for (pass in 0 until (if (zonesA.isEmpty()) 1 else 2)) {
+            val m = bag.mat(); Imgproc.threshold(bh, m, if (pass == 0) thr else max(4.0, HINT_THR_K * thr), 255.0, Imgproc.THRESH_BINARY)
+            if (pass == 1) {
+                val roi = bag.add(Mat.zeros(m.size(), m.type()))
+                for (z in zonesA) Imgproc.rectangle(roi, org.opencv.core.Point(z[0], z[1]), org.opencv.core.Point(z[2], z[3]), Scalar(255.0), -1)
+                Core.bitwise_and(m, roi, m)
+            }
             // puntos/trazos de una línea punteada o rota: cierre corto a lo largo antes de la apertura
             Imgproc.morphologyEx(m, m, Imgproc.MORPH_CLOSE, if (hor) Cv.kernel(Imgproc.MORPH_RECT, 5, 1) else Cv.kernel(Imgproc.MORPH_RECT, 1, 5))
             Imgproc.morphologyEx(m, m, Imgproc.MORPH_OPEN, if (hor) Cv.kernel(Imgproc.MORPH_RECT, lo, 1) else Cv.kernel(Imgproc.MORPH_RECT, 1, lo))
@@ -106,7 +116,7 @@ internal object TableLines {
             val nc = Imgproc.connectedComponentsWithStats(m, labels, stats, cents, 8, CvType.CV_32S)
             val st = IntArray(max(0, nc) * 5); if (nc > 0) stats.get(0, 0, st)
             val aw = nv.cols(); val ah = nv.rows()
-            val minLenA = if (hor) max(4.0 * lhA, 0.05 * aw) else max(2.5 * lhA, 0.025 * ah)
+            val minLenA = (if (hor) max(4.0 * lhA, 0.05 * aw) else max(2.5 * lhA, 0.025 * ah)) * (if (pass == 1) 0.5 else 1.0)
             // banda de la imagen completa para el seguimiento (filas para horizontales, columnas para verticales)
             val nAlong = if (hor) w else h; val nAcrossAll = if (hor) h else w
             for (c in 1 until nc) {
@@ -152,6 +162,7 @@ internal object TableLines {
                 cands.add(TableLinesMath.Cand(hor, tr.a0.toDouble(), tr.a1.toDouble(), t2.mean, t2))
                 }
             }
+            }
         }
         val t2 = System.nanoTime()
         log?.invoke("tiempos: prep=%.0f morf=%.0f seguimiento=%.0f ms".format((t1 - t0) / 1e6, tMorph / 1e6, (t2 - t1 - tMorph) / 1e6))
@@ -169,9 +180,11 @@ internal object TableLines {
             } ?: (0.0 to null)
             l.outCov = cov; colors[l] = col
         }
-        val ok = TableLinesMath.accept(kept, w, h, lh, maxThick, inkRef)
+        val ok = TableLinesMath.accept(kept, w, h, lh, maxThick, inkRef, zones)
         val drawn = ArrayList<DoubleArray>()
         val chn = out.channels()
+        // rejilla completada dentro de las tablas indicadas: prolongaciones por zonas QUEMADAS por la luz
+        val ext = if (zones.isEmpty()) emptyList() else completeGrid(kept, ok, zones, vFull, lh)
         for ((idx, l) in kept.withIndex()) {
             log?.invoke("cand ${if (l.hor) "H" else "V"} a=%.0f..%.0f c=%.1f len=%.0f thick=%.2f amp=%.0f ink=%.2f gap=${l.tr.maxGap} dash=${l.tr.dashed} rms=%.2f emb=%.2f touch=%.2f run=${l.tr.maxRun} irr=${l.tr.irregular} blk=%.2f/${l.tr.blockedRuns} out=%.2f -> ${ok[idx]}".format(l.a0, l.a1, l.c, l.len, l.tr.thick, l.tr.amp, l.tr.inkFrac, l.tr.rms, l.tr.embedded, l.tr.touching, l.tr.blockedFrac, l.outCov))
             if (!ok[idx]) continue
@@ -184,10 +197,103 @@ internal object TableLines {
             val pa = (l.a0 + 0.5) * k - 0.5; val pb = (l.a1 + 0.5) * k - 0.5
             drawn.add(if (l.hor) doubleArrayOf(1.0, pa, ca, pb, cb) else doubleArrayOf(0.0, ca, pa, cb, pb))
         }
+        for ((e, parent) in ext) {
+            val color = lineColor(colors[parent] ?: (if (chn >= 3) sourceColor(src, parent, lh) else null), chn)
+            val tOut = max(1.0, parent.tr.thick * k).coerceAtMost(maxThick * k)
+            withOutBand(out, e, k, write = true) { buf, bw, bh, cc, u0, u1, ctr, _ -> TableLinesMath.drawBand(buf, bw, bh, cc, e.hor, u0, u1, ctr, tOut, color) }
+            val ca = (e.tr.centerAt(e.a0) + 0.5) * k - 0.5; val cb = (e.tr.centerAt(e.a1) + 0.5) * k - 0.5
+            val pa = (e.a0 + 0.5) * k - 0.5; val pb = (e.a1 + 0.5) * k - 0.5
+            drawn.add(if (e.hor) doubleArrayOf(1.0, pa, ca, pb, cb) else doubleArrayOf(0.0, ca, pa, cb, pb))
+            log?.invoke("prolongación ${if (e.hor) "H" else "V"} a=%.0f..%.0f c=%.1f".format(e.a0, e.a1, e.c))
+        }
         log?.invoke("fin %.0f ms".format((System.nanoTime() - t2) / 1e6))
         log?.invoke("tabla: candidatas=${cands.size} únicas=${kept.size} dibujadas=${drawn.size} kt=$kt lo=$lo gap=$gap thr=%.1f noise=%.1f lh=%.1f inkRef=%.0f".format(thr, noise, lh, inkRef))
         onDraw?.invoke(drawn)
         drawn.size
+    }
+
+    /**
+     * Tabla indicada desde fuera (Jev): [box] = x0, y0, x1, y1 en 0..1 de la página; [rows] / [cols] = recuento (0 =
+     * desconocido). Dentro: segunda pasada con umbral más bajo, aceptación más permisiva ([TableLinesMath.accept]) y
+     * rejilla completada a través de las zonas quemadas por la luz ([completeGrid]). Sin indicaciones, todo igual.
+     */
+    class Hint(val box: DoubleArray, val rows: Int = 0, val cols: Int = 0)
+
+    /** Factor del umbral del black-hat en la 2.ª pasada dentro de las tablas indicadas. */
+    @Volatile @JvmField var HINT_THR_K = 0.55
+    /** Nivel (canal mínimo de la foto) a partir del cual el papel está "quemado" por la luz (la línea no se puede ver). */
+    @Volatile @JvmField var BURN_LEVEL = 232
+    /** Fracción del hueco que debe estar quemada para prolongar una línea a través de él. */
+    @Volatile @JvmField var BURN_FRAC = 0.7
+
+    private fun inZone(l: TableLinesMath.Cand, z: DoubleArray): Boolean {
+        val m = (l.a0 + l.a1) / 2
+        val x = if (l.hor) m else l.c; val y = if (l.hor) l.c else m
+        return x >= z[0] && x <= z[2] && y >= z[1] && y <= z[3]
+    }
+
+    /**
+     * Prolongaciones de las líneas aceptadas dentro de cada zona: (1) hasta el extremo de la tabla (la perpendicular
+     * aceptada más exterior o el extremo más lejano de otra paralela), (2) uniendo dos trozos alineados de la misma
+     * línea; en ambos casos SOLO si el hueco está quemado por la luz (>= [BURN_FRAC] del recorrido con el canal mínimo
+     * >= [BURN_LEVEL]): donde la foto muestra papel normal sin línea, la línea de verdad no sigue.
+     */
+    private fun completeGrid(kept: List<TableLinesMath.Cand>, ok: BooleanArray, zones: List<DoubleArray>, vFull: Mat, lh: Double): List<Pair<TableLinesMath.Cand, TableLinesMath.Cand>> {
+        val w = vFull.cols(); val h = vFull.rows()
+        val out = ArrayList<Pair<TableLinesMath.Cand, TableLinesMath.Cand>>()
+        val px = ByteArray(1)
+        fun v(x: Int, y: Int): Int { if (x < 0 || y < 0 || x >= w || y >= h) return 0; vFull.get(y, x, px); return px[0].toInt() and 0xFF }
+        fun slopeAt(l: TableLinesMath.Cand, end: Boolean): Double {
+            val d = min(l.len, 200.0).coerceAtLeast(1.0)
+            return if (end) (l.tr.centerAt(l.a1) - l.tr.centerAt(l.a1 - d)) / d else (l.tr.centerAt(l.a0 + d) - l.tr.centerAt(l.a0)) / d
+        }
+        /** Recta desde (a, c) con pendiente [sl] entre [from]..[to] (a lo largo) si está quemada. */
+        fun bridge(parent: TableLinesMath.Cand, from: Double, to: Double, cAt: (Double) -> Double): TableLinesMath.Cand? {
+            val a0 = kotlin.math.ceil(from).toInt(); val a1 = floor(to).toInt()
+            if (a1 - a0 < max(4.0, 0.5 * lh)) return null
+            var n = 0; var burned = 0
+            var i = a0
+            while (i <= a1) { val c = cAt(i.toDouble()).roundToInt(); n++; if ((if (parent.hor) v(i, c) else v(c, i)) >= BURN_LEVEL) burned++; i += 2 }
+            if (n == 0 || burned < BURN_FRAC * n) return null
+            val centers = DoubleArray(a1 - a0 + 1) { cAt((a0 + it).toDouble()) }
+            val tr = TableLinesMath.Track(a0, a1, centers, parent.tr.thick, parent.tr.amp, 1.0, 0, false, 0.0, 0.0, maxRun = a1 - a0 + 1)
+            return TableLinesMath.Cand(parent.hor, a0.toDouble(), a1.toDouble(), centers.average(), tr)
+        }
+        for (z in zones) {
+            if (kept.any { it.tr.dashed && inZone(it, z) }) continue
+            for (hor in booleanArrayOf(true, false)) {
+                val par = kept.indices.filter { ok[it] && kept[it].hor == hor && inZone(kept[it], z) }.map { kept[it] }
+                val perp = kept.indices.filter { ok[it] && kept[it].hor != hor && inZone(kept[it], z) }.map { kept[it] }
+                if (par.isEmpty() || par.size + perp.size < 3) continue
+                val e0 = (perp.map { it.c } + par.map { it.a0 }).min()
+                val e1 = (perp.map { it.c } + par.map { it.a1 }).max()
+                // trozos de una misma línea (alineados): ordenados a lo largo
+                val groups = ArrayList<MutableList<TableLinesMath.Cand>>()
+                for (l in par.sortedBy { it.c }) {
+                    val g = groups.firstOrNull { gg -> abs(gg.last().c - l.c) <= max(2.0, 1.5 * max(gg.last().tr.thick, l.tr.thick)) }
+                    if (g != null) g.add(l) else groups.add(mutableListOf(l))
+                }
+                for (g in groups) {
+                    val seg = g.sortedBy { it.a0 }
+                    for (q in 0 until seg.size - 1) {
+                        val a = seg[q]; val b = seg[q + 1]
+                        if (b.a0 <= a.a1) continue
+                        val ca = a.tr.centerAt(a.a1); val cb = b.tr.centerAt(b.a0); val L = b.a0 - a.a1
+                        bridge(a, a.a1 + 1, b.a0 - 1) { i -> ca + (cb - ca) * (i - a.a1) / L }?.let { out.add(it to a) }
+                    }
+                    val first = seg.first(); val last = seg.last()
+                    if (e1 - last.a1 > max(lh, 4.0)) {
+                        val c0 = last.tr.centerAt(last.a1); val sl = slopeAt(last, true)
+                        bridge(last, last.a1 + 1, e1) { i -> c0 + sl * (i - last.a1) }?.let { out.add(it to last) }
+                    }
+                    if (first.a0 - e0 > max(lh, 4.0)) {
+                        val c0 = first.tr.centerAt(first.a0); val sl = slopeAt(first, false)
+                        bridge(first, e0, first.a0 - 1) { i -> c0 + sl * (i - first.a0) }?.let { out.add(it to first) }
+                    }
+                }
+            }
+        }
+        return out
     }
 
     /** Color de la línea: el medido en la salida (núcleo), oscurecido si queda muy claro; por defecto gris oscuro. */
