@@ -915,7 +915,10 @@ internal object PrintedPage {
             if (pf > TEX_MAX_PAPER) continue
             if (pf > TEX_PALE_PAPER && (bw < TEX_PALE_SIDE * side || bh < TEX_PALE_SIDE * side)) continue
             if (gaps.first > TEX_MAX_GAPS) continue
-            val r = Cv.clampRect(Rect((x * kx).toInt(), (y * ky).toInt(), (bw * kx).roundToInt(), (bh * ky).roundToInt()), ow, oh)
+            // la densidad recorta los bordes (y una franja lisa de la foto -calle, cielo- queda fuera): se amplía cada lado
+            // mientras la fila/columna siguiente siga con textura en ≥ 50 % (hasta un 25 % del tamaño)
+            val g4 = growRect(tex, w, h, x, y, bw, bh)
+            val r = Cv.clampRect(Rect((g4[0] * kx).toInt(), (g4[1] * ky).toInt(), ((g4[2] - g4[0]) * kx).roundToInt(), ((g4[3] - g4[1]) * ky).roundToInt()), ow, oh)
             if (r.width > 0 && r.height > 0) out.add(r)
         }
         log?.invoke("textura: ruido=%.1f fotos=${out.size} ${out.joinToString { "${it.x},${it.y} ${it.width}x${it.height}" }}".format(noise))
@@ -936,6 +939,19 @@ internal object PrintedPage {
             inGap = gap
         }
         return gapRows.toDouble() / max(1, bh) to runs
+    }
+
+    /** Amplía la caja (x0, y0, x1, y1 exclusivo) por los lados con textura ≥ 50 % en la línea siguiente. */
+    private fun growRect(tex: FloatArray, w: Int, h: Int, x: Int, y: Int, bw: Int, bh: Int): IntArray {
+        var x0 = x; var y0 = y; var x1 = x + bw; var y1 = y + bh
+        fun rowF(yy: Int): Double { var s = 0.0; for (xx in x0 until x1) s += tex[yy * w + xx]; return s / max(1, x1 - x0) }
+        fun colF(xx: Int): Double { var s = 0.0; for (yy in y0 until y1) s += tex[yy * w + xx]; return s / max(1, y1 - y0) }
+        val my = (0.25 * bh).toInt(); val mx = (0.25 * bw).toInt()
+        var k = 0; while (k < my && y0 > 0 && rowF(y0 - 1) >= 0.5) { y0--; k++ }
+        k = 0; while (k < my && y1 < h && rowF(y1) >= 0.5) { y1++; k++ }
+        k = 0; while (k < mx && x0 > 0 && colF(x0 - 1) >= 0.5) { x0--; k++ }
+        k = 0; while (k < mx && x1 < w && colF(x1) >= 0.5) { x1++; k++ }
+        return intArrayOf(x0, y0, x1, y1)
     }
 
     private const val TEX_SIDE = 1000
