@@ -223,6 +223,8 @@ internal object TableLines {
     @Volatile @JvmField var HINT_THR_K = 0.55
     /** Nivel (canal mínimo de la foto) a partir del cual el papel está "quemado" por la luz (la línea no se puede ver). */
     @Volatile @JvmField var BURN_LEVEL = 232
+    /** Cuánto más claro que el papel típico de la página (percentil 60 del canal mínimo) debe estar lo quemado. */
+    @Volatile @JvmField var BURN_ABOVE_PAPER = 14.0
     /** Fracción del hueco que debe estar quemada para prolongar una línea a través de él. */
     @Volatile @JvmField var BURN_FRAC = 0.7
 
@@ -241,6 +243,11 @@ internal object TableLines {
     private fun completeGrid(kept: List<TableLinesMath.Cand>, ok: BooleanArray, zones: List<DoubleArray>, vFull: Mat, lh: Double): List<Pair<TableLinesMath.Cand, TableLinesMath.Cand>> {
         val w = vFull.cols(); val h = vFull.rows()
         val out = ArrayList<Pair<TableLinesMath.Cand, TableLinesMath.Cand>>()
+        // "quemado" = bastante más claro que el papel normal de la página (un escaneo con papel a 250 no tiene zonas
+        // quemadas: su blanco es papel, y una línea que no se ve ahí es que no existe)
+        val sm = Mat(); Cv.downscale(vFull, sm, 400)
+        val paper = Cv.percentile(Cv.histogram(sm), 0.6); sm.release()
+        val burnLevel = max(BURN_LEVEL.toDouble(), paper + BURN_ABOVE_PAPER)
         val px = ByteArray(1)
         fun v(x: Int, y: Int): Int { if (x < 0 || y < 0 || x >= w || y >= h) return 0; vFull.get(y, x, px); return px[0].toInt() and 0xFF }
         fun slopeAt(l: TableLinesMath.Cand, end: Boolean): Double {
@@ -253,7 +260,7 @@ internal object TableLines {
             if (a1 - a0 < max(4.0, 0.5 * lh)) return null
             var n = 0; var burned = 0
             var i = a0
-            while (i <= a1) { val c = cAt(i.toDouble()).roundToInt(); n++; if ((if (parent.hor) v(i, c) else v(c, i)) >= BURN_LEVEL) burned++; i += 2 }
+            while (i <= a1) { val c = cAt(i.toDouble()).roundToInt(); n++; if ((if (parent.hor) v(i, c) else v(c, i)) >= burnLevel) burned++; i += 2 }
             if (n == 0 || burned < BURN_FRAC * n) return null
             val centers = DoubleArray(a1 - a0 + 1) { cAt((a0 + it).toDouble()) }
             val tr = TableLinesMath.Track(a0, a1, centers, parent.tr.thick, parent.tr.amp, 1.0, 0, false, 0.0, 0.0, maxRun = a1 - a0 + 1)
