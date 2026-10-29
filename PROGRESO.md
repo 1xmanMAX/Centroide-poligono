@@ -210,3 +210,6 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
   firmas/sellos/logos/cabeceras (con y sin Jev). Banco fotos Jev: syn photo IoU 0,84 (86 % aceptadas), gráficos 0 (a propósito),
   papel tratado 0,85 % -> 0,01 %. DIBCO FM 79,33 -> 79,30, DRD 10,86 -> 10,88; tablas syn2 = (97,4/97,2 %). 570 tests.
 - Láminas /tmp/claude-0/bench/fotos_exactas/; notas /tmp/claude-0/bench/notes_fotos_exactas.md.
+- Banco Color natural (271, v29 vs nuevo): NAT FM 79,0 (-0,01), pérdida 1,38 (-0,09), espurio 6,97 (-0,50), ΔE color +0,68, +177 ms;
+  B/N FM 78,4 (+2,75: sin bloques de "foto" falsos en páginas con sombras), espurio +0,66. Pendiente/riesgo: fotos digitales muy lisas
+  (sin grano de impresión) pueden quedar "dudosas" sin Jev (banco sintético: 86 % aceptadas); gráficos y dibujos ya no reciben trato de foto.
