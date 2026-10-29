@@ -976,6 +976,11 @@ internal object PrintedPage {
             if (pf > TEX_MAX_PAPER) continue
             if (pf > TEX_PALE_PAPER && (bw < TEX_PALE_SIDE * side || bh < TEX_PALE_SIDE * side)) continue
             if (gaps.first > TEX_MAX_GAPS) continue
+            // texto denso y borroso (foto de baja resolución: los renglones se funden y no dejan huecos): el perfil por
+            // filas oscila mucho (renglón / interlineado) y el de columnas casi nada; en una foto, poco y parecido
+            val an = profileAnisotropy(gb, w, x, y, bw, bh)
+            log?.invoke("textura cand perfiles filas=%.1f cols=%.1f".format(an[0], an[1]))
+            if (max(an[0], an[1]) >= TEX_TEXT_VAR && max(an[0], an[1]) >= TEX_TEXT_RATIO * max(1e-6, min(an[0], an[1]))) continue
             // la densidad recorta los bordes (y una franja lisa de la foto -calle, cielo- queda fuera): se amplía cada lado
             // mientras la fila/columna siguiente siga con textura en ≥ 75 % (hasta un 25 % del tamaño)
             val g4 = growRect(tex, w, h, x, y, bw, bh)
@@ -1014,6 +1019,31 @@ internal object PrintedPage {
         k = 0; while (k < mx && x1 < w && colF(x1) >= GROW_TEX) { x1++; k++ }
         return intArrayOf(x0, y0, x1, y1)
     }
+
+    /**
+     * Varianza del perfil de medias por filas y por columnas de la caja (gris [g], ancho [w]), sin la tendencia lenta
+     * (media móvil de 15 px): un bloque de texto oscila mucho en filas (renglones) y nada en columnas.
+     */
+    private fun profileAnisotropy(g: ByteArray, w: Int, x: Int, y: Int, bw: Int, bh: Int): DoubleArray {
+        val rows = DoubleArray(bh); val cols = DoubleArray(bw)
+        for (yy in 0 until bh) { val o = (y + yy) * w + x; for (xx in 0 until bw) { val v = (g[o + xx].toInt() and 0xFF).toDouble(); rows[yy] += v; cols[xx] += v } }
+        for (i in rows.indices) rows[i] /= bw
+        for (i in cols.indices) cols[i] /= bh
+        fun hpVar(p: DoubleArray): Double {
+            val k = 7; if (p.size <= 2 * k + 2) return 0.0
+            var s = 0.0; var s2 = 0.0; var n = 0
+            for (i in k until p.size - k) {
+                var m = 0.0; for (j in i - k..i + k) m += p[j]
+                val d = p[i] - m / (2 * k + 1); s += d; s2 += d * d; n++
+            }
+            return s2 / n - (s / n) * (s / n)
+        }
+        return doubleArrayOf(hpVar(rows), hpVar(cols))
+    }
+
+    /** Texto denso ([profileAnisotropy]): varianza mínima del perfil dominante y razón con el otro. */
+    private const val TEX_TEXT_VAR = 100.0
+    private const val TEX_TEXT_RATIO = 20.0
 
     private const val TEX_SIDE = 1000
     /** Textura mínima de la línea siguiente para ampliar la caja de una foto (un renglón de texto al lado no llega). */
