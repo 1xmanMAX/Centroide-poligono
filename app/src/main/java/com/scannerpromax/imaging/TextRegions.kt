@@ -1024,6 +1024,25 @@ object TextRegions {
     enum class Style { COLOR, BLACK_WHITE, NATURAL }
 
     /**
+     * Fotografías de las cajas de la maquetación ([layoutImages], PP-DocLayoutV3 / Jev) sobre la imagen normalizada [n]
+     * (tamaño de la salida): recuadro exacto y sólo las fotografías de cámara ([PhotoBoxRefine]); vacía con
+     * [photoMode] = 2 o sin cajas.
+     */
+    private fun layoutPhotos(n: Mat, layoutImages: List<FloatArray>, rgb: Mat, photoMode: Int): List<Rect> {
+        if (photoMode == 2) return emptyList()
+        val cands = NaturalColor.layoutRects(layoutImages, n.cols(), n.rows()).map { PhotoBoxRefine.Cand(it, PhotoBoxRefine.SRC_LAYOUT) }
+        if (cands.isEmpty()) return emptyList()
+        return runCatching {
+            MatBag().use { bag ->
+                val an = bag.mat(); Cv.downscale(n, an, 1200)
+                val g = bag.add(Cv.gray(an))
+                val pm = max(1.0, Cv.paperStats(Cv.histogram(g)).second)
+                PhotoBoxRefine.photos(PhotoBoxRefine.refine(an, pm, cands, n.cols(), n.rows(), full = rgb, verdicts = PrintedPage.photoVerdicts(layoutImages)))
+            }
+        }.onFailure { if (Cv.isOutOfMemory(it)) throw it }.getOrDefault(emptyList())
+    }
+
+    /**
      * Render del filtro sobre [rgb] (8UC3, resolución completa; no se modifica). COLOR: 8UC3 (tinta con su
      * color reforzado sobre blanco puro); BLACK_WHITE: 8UC1 (tinta negra con bordes suaves sobre blanco puro).
      */
@@ -1059,17 +1078,23 @@ object TextRegions {
                         val bw = out
                         try {
                             out = NaturalColor.compose(NaturalColor.Inputs(bw, p.nColor ?: p.n, lay.letterHeight, lay.strokeHalf,
-                                images = lay.regions.filter { it.kind == Kind.IMAGE }.map { Rect(it.left, it.top, it.width, it.height) } +
-                                    NaturalColor.layoutRects(layoutImages, bw.cols(), bw.rows()),
+                                images = lay.regions.filter { it.kind == Kind.IMAGE }.map { Rect(it.left, it.top, it.width, it.height) },
                                 allowed = lay.regions.map { Rect(it.left, it.top, it.width, it.height) },
                                 exclude = p.ruling, exclude2 = lay.blank, gridColor = p.rulingColor, orig = rgb, writing = region?.second, photoMode = photoMode,
-                                soft = NaturalColor.inkRects(layoutImages, bw.cols(), bw.rows())))
+                                soft = if (NaturalColor.SOFT_INKS) NaturalColor.inkRects(layoutImages, bw.cols(), bw.rows()) else emptyList()))
                         } finally { bw.release() }
                         // (lo de color fuera de la escritura que el B/N no tenía: misma limpieza de bordes)
                         runCatching { EdgeClean.clean(out, rgb, lay.letterHeight, region?.second) }.onFailure { if (Cv.isOutOfMemory(it)) throw it }
                     }
                     // (zona de escritura con medio paso de margen: la rejilla dibujada no entra en el hueco entre páginas)
                     if (keepRuling && fullGrid != null) runCatching { drawRuling(out, p, lay, style != Style.BLACK_WHITE, fullGrid, region?.second) }.onFailure { if (Cv.isOutOfMemory(it)) throw it }
+                    // capa de fotos ([PhotoLayer]): las cajas de la maquetación (PP-DocLayoutV3 / Jev) con recuadro exacto, sólo
+                    // fotografías de cámara, pegadas encima de la capa base
+                    if (natural && PrintedPage.PHOTO_LAYER) runCatching {
+                        val n = p.nColor ?: p.n
+                        val photos = layoutPhotos(n, layoutImages, rgb, photoMode)
+                        if (photos.isNotEmpty()) PhotoLayer.paste(out, rgb, photos, PhotoLayer.paperWhite(rgb, n, Cv.PAPER_LEVEL))
+                    }.onFailure { if (Cv.isOutOfMemory(it)) throw it }
                     out
                 } finally { lay.release() }
             } finally { region?.first?.release(); region?.second?.release() }

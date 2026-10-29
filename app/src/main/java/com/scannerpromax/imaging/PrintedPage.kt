@@ -51,6 +51,37 @@ internal object PrintedPage {
     /** Banco de pruebas: bloques de imagen clásicos (px de la salida) y tamaño de la salida. */
     internal var onImages: ((List<org.opencv.core.Rect>, Int, Int) -> Unit)? = null
 
+    /** Banco de pruebas: candidatas de foto, cajas ajustadas ([PhotoBoxRefine]) y tamaño de la salida. */
+    internal var onPhotoBoxes: ((List<PhotoBoxRefine.Cand>, List<PhotoBoxRefine.Found>, Int, Int) -> Unit)? = null
+
+    /**
+     * Cajas candidatas a FOTOGRAFÍA de la página rectificada [page] (RGB/RGBA), ya con su recuadro exacto
+     * ([PhotoBoxRefine]): las que podrían serlo (fotografía clara o dudosa, de tamaño suficiente), en fracciones (x0, y0,
+     * x1, y1). Las mismas fuentes locales que el render (bloques de color y textura), para preguntar a Jev por su recorte
+     * ("Mejorar con Jev"); el render las vuelve a calcular y casa las opiniones por solape.
+     */
+    fun photoCandidates(page: Mat): List<FloatArray> = photoFound(page).filter { it.big && it.local != PhotoMath.Kind.NOT }
+        .map { f -> floatArrayOf(f.rect.x.toFloat() / page.cols(), f.rect.y.toFloat() / page.rows(), (f.rect.x + f.rect.width).toFloat() / page.cols(), (f.rect.y + f.rect.height).toFloat() / page.rows()) }
+
+    /** Cajas ajustadas ([PhotoBoxRefine]) de [page] desde las fuentes locales y las de [layoutImages] (fracciones). */
+    internal fun photoFound(page: Mat, layoutImages: List<FloatArray> = emptyList()): List<PhotoBoxRefine.Found> = MatBag().use { bag ->
+        val rgb = if (page.channels() == 4) bag.mat().also { Imgproc.cvtColor(page, it, Imgproc.COLOR_RGBA2RGB) } else page
+        val w = rgb.cols(); val h = rgb.rows()
+        val bg = bag.add(Cv.estimateBackground(rgb, 384, refine = true, refineSide = 1024))
+        val sm = bag.mat(); Cv.downscale(rgb, sm, ANALYSIS_SIDE)
+        val sb = bag.mat(); Imgproc.resize(bg, sb, sm.size(), 0.0, 0.0, Imgproc.INTER_AREA)
+        val smN = bag.mat(); Cv.divideByBackground(sm, sb, smN)
+        val pm = max(1.0, Cv.paperStats(Cv.histogram(bag.add(Cv.gray(smN)))).second)
+        val cands = findImageBlocks(smN, w, h, bag).map { PhotoBoxRefine.Cand(it, PhotoBoxRefine.SRC_COLOR) } +
+            (if (TEXTURE_PHOTOS) textureBlocks(smN, pm, w, h, bag).map { PhotoBoxRefine.Cand(it, PhotoBoxRefine.SRC_TEX) } else emptyList()) +
+            NaturalColor.layoutRects(layoutImages, w, h).map { PhotoBoxRefine.Cand(it, PhotoBoxRefine.SRC_LAYOUT) }
+        PhotoBoxRefine.refine(smN, pm, cands, w, h, full = rgb, verdicts = photoVerdicts(layoutImages))
+    }
+
+    /** Opiniones de Jev ([NaturalColor.isVerdict]) de [layoutImages]. */
+    internal fun photoVerdicts(layoutImages: List<FloatArray>): List<PhotoBoxRefine.Verdict> =
+        layoutImages.filter { NaturalColor.isVerdict(it) }.map { PhotoBoxRefine.Verdict(floatArrayOf(it[0], it[1], it[2], it[3]), it[5].toDouble()) }
+
     /**
      * [printed] = usar este render (todo lo que no es una hoja de cuaderno con rayado, ver [PrintClassifier]);
      * [notebook] = hoja de cuaderno -> recuadros de escritura. [letterHeight] en px de la imagen analizada (completa).
@@ -331,7 +362,8 @@ internal object PrintedPage {
      * Render de [rgb] (8UC3) con [style]. [fast] = vista previa (sin ampliación). [maxPixels] = límite de píxeles
      * de la salida (la ampliación de la letra pequeña no lo supera). COLOR -> 8UC3, BLACK_WHITE -> 8UC1.
      */
-    fun render(rgb: Mat, style: TextRegions.Style, fast: Boolean, maxPixels: Int, stats: Stats? = null, sheetSides: Int = 0, layoutImages: List<FloatArray> = emptyList(), photoMode: Int = 0): Mat = MatBag().use { bag ->
+    fun render(rgb: Mat, style: TextRegions.Style, fast: Boolean, maxPixels: Int, stats: Stats? = null, sheetSides: Int = 0, layoutImages: List<FloatArray> = emptyList(), photoMode: Int = 0,
+               photoSink: ((List<Rect>, DoubleArray?) -> Unit)? = null): Mat = MatBag().use { bag ->
         val st = stats ?: analyze(rgb)
         val w = rgb.cols(); val h = rgb.rows()
         val color = style == TextRegions.Style.COLOR
@@ -398,8 +430,24 @@ internal object PrintedPage {
         val oh = if (f > 1.0) (h * f).roundToInt() else h
         val lh = max(4.0, if (st.letterHeight > 0) st.letterHeight * f else oh / 250.0)
         // Bloques de imagen (logos, fotos: compactos y de color) -> en B/N se conservan en gris
-        val images = if (color) emptyList() else findImageBlocks(smNz, ow, oh, bag) + pictureBlocks(st, ow, oh) +
-            (if (photoMode == 2 || !TEXTURE_PHOTOS) emptyList() else textureBlocks(smNz, pm, ow, oh, bag))
+        val blocks = if (color) emptyList() else findImageBlocks(smNz, ow, oh, bag) + pictureBlocks(st, ow, oh)
+        // FOTOGRAFÍAS: toda caja de foto (bloques, textura, maquetación PP-DocLayoutV3 / Jev) pasa por el recuadro exacto
+        // ([PhotoBoxRefine]); sólo las fotografías de cámara reciben el tratamiento de foto
+        val photos: List<Rect> = if (color || photoMode == 2) emptyList() else {
+            val cands = blocks.map { PhotoBoxRefine.Cand(it, PhotoBoxRefine.SRC_COLOR) } +
+                (if (TEXTURE_PHOTOS) textureBlocks(smNz, pm, ow, oh, bag).map { PhotoBoxRefine.Cand(it, PhotoBoxRefine.SRC_TEX) } else emptyList()) +
+                NaturalColor.layoutRects(layoutImages, ow, oh).map { PhotoBoxRefine.Cand(it, PhotoBoxRefine.SRC_LAYOUT) }
+            val found = runCatching { PhotoBoxRefine.refine(smNz, pm, cands, ow, oh, full = rgb, verdicts = photoVerdicts(layoutImages)) }
+                .onFailure { if (Cv.isOutOfMemory(it)) throw it }.getOrDefault(emptyList())
+            onPhotoBoxes?.invoke(cands, found, ow, oh)
+            PhotoBoxRefine.photos(found)
+        }
+        // CAPA BASE ([PhotoLayer]): el render normal, como si no hubiera fotos. B/N: los bloques de imagen de siempre
+        // (logos, cabeceras) en gris, sin los trozos de las fotos (bloques dentro de una foto o que la desbordan: la foto
+        // va entera, pegada en su recuadro exacto). Color natural: ningún bloque (texto, firmas, sellos y logos con su
+        // tinta sobre blanco). Las fotografías se pegan después encima ([PhotoLayer.paste]).
+        val images = if (natural) emptyList() else blocks.filter { b -> photos.none { p -> PhotoMath.overlaps(b, p) } }
+        val photoWhite = if (photos.isEmpty()) null else runCatching { PhotoLayer.paperWhite(rgb, smNz, pm) }.onFailure { if (Cv.isOutOfMemory(it)) throw it }.getOrNull()
         onImages?.invoke(images, ow, oh)
         val outsideFull = if (outside == null) null else bag.mat().also { Imgproc.resize(outside, it, Size(ow.toDouble(), oh.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR) }
         // Sombras: la división por el fondo amplifica el ruido del papel (ganancia g) -> el punto blanco local baja
@@ -507,16 +555,24 @@ internal object PrintedPage {
         }
         levels.release(); satLut.release(); tmp.release()
         log?.invoke("render ${style} ${w}x$h -> ${ow}x$oh f=%.2f lh=%.1f win=$win black=%.0f white=%.0f noise=%.1f images=${images.size} satK=%.2f".format(f, lh, black, white, noise, satK))
-        if (natBuf != null && bridgeBw) {
+        val base = if (natBuf != null && bridgeBw) {
             // B/N: continuidad del trazo (los bloques de imagen y el fondo ajeno no se tocan)
             runCatching { NaturalColor.bridge(out, natBuf, lh, 0.0, outsideFull, images) }.onFailure { if (Cv.isOutOfMemory(it)) throw it }
             out
         } else if (natBuf != null) {
             try {
-                NaturalColor.compose(NaturalColor.Inputs(out, natBuf, lh, 0.0, images = images + NaturalColor.layoutRects(layoutImages, ow, oh), exclude = outsideFull, excludeForeign = true, orig = rgb, photoMode = photoMode, soft = NaturalColor.inkRects(layoutImages, ow, oh)))
+                NaturalColor.compose(NaturalColor.Inputs(out, natBuf, lh, 0.0, exclude = outsideFull, excludeForeign = true, orig = rgb, photoMode = photoMode,
+                    soft = if (NaturalColor.SOFT_INKS) NaturalColor.inkRects(layoutImages, ow, oh) else emptyList()))
             } finally { out.release() }
         } else out
+        // capa de fotos: quien llama la pega al final (tras sus retoques de la capa base) o, sin él, aquí
+        if (photoSink != null) photoSink(photos, photoWhite)
+        else if (photos.isNotEmpty() && PHOTO_LAYER) PhotoLayer.paste(base, rgb, photos, photoWhite)
+        base
     }
+
+    /** Capa de fotos ([PhotoLayer]); false = sólo la capa base (test de identidad, banco). */
+    @Volatile internal var PHOTO_LAYER = true
 
     /**
      * Punto negro para páginas de tinta TENUE. Contraste de cada trazo = black-hat (cierre - imagen) del canal

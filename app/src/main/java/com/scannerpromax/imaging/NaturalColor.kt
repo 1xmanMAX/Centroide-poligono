@@ -327,11 +327,26 @@ internal object NaturalColor {
 
     fun isInk(b: FloatArray) = b.size >= 5 && b[4] == INK_FLAG
 
+    /**
+     * Marca de [layoutImages] (5.º valor) para una OPINIÓN de Jev sobre una caja: 6.º valor = probabilidad de que sea una
+     * fotografía de cámara ([PhotoBoxRefine.Verdict]). No es una caja de foto.
+     */
+    const val VERDICT_FLAG = 8f
+
+    fun isVerdict(b: FloatArray) = b.size >= 6 && b[4] == VERDICT_FLAG
+
+    /**
+     * Zonas de tinta de las firmas y sellos de Jev ([Inputs.soft]). Sólo PROTEGEN la tinta (los trazos candidatos de la
+     * zona pasan aunque sean tenues: un sello desvaído no se borra); el papel de la zona queda blanco puro. (Antes toda la
+     * zona era trazo y el papel salía gris o beige: un recuadro bajo la firma.) false = sin zonas (banco).
+     */
+    @Volatile var SOFT_INKS = true
+
     /** Cajas de tinta ([isInk]) de [boxes] -> rectángulos en px (para [Inputs.soft]). */
     fun inkRects(boxes: List<FloatArray>, w: Int, h: Int): List<Rect> = rects(boxes.filter { isInk(it) }, w, h)
 
     /** Cajas normalizadas 0..1 (izq., arriba, dcha., abajo) de la maquetación -> rectángulos en px de una salida [w] x [h] (sin las de tinta). */
-    fun layoutRects(boxes: List<FloatArray>, w: Int, h: Int): List<Rect> = rects(boxes.filter { !isInk(it) }, w, h)
+    fun layoutRects(boxes: List<FloatArray>, w: Int, h: Int): List<Rect> = rects(boxes.filter { !isInk(it) && !isVerdict(it) }, w, h)
 
     private fun rects(boxes: List<FloatArray>, w: Int, h: Int): List<Rect> = boxes.mapNotNull { b ->
         val x0 = (b[0] * w).roundToInt().coerceIn(0, w); val y0 = (b[1] * h).roundToInt().coerceIn(0, h)
@@ -652,9 +667,15 @@ internal object NaturalColor {
                     Imgproc.rectangle(photos, org.opencv.core.Point(x, y), org.opencv.core.Point(x + rw - 1, y + rh - 1), Scalar(255.0), -1)
                 }
             }
-            // Firmas y sellos: toda la zona es trazo candidato (alfa = evidencia continua, color propio; sin binarizar ni trocear)
-            if (!inp.bridgeOnly) for (r in inp.soft) {
-                Imgproc.rectangle(support, org.opencv.core.Point(r.x * s, r.y * s), org.opencv.core.Point((r.x + r.width) * s - 1, (r.y + r.height) * s - 1), Scalar(255.0), -1)
+            // Firmas y sellos: dentro de la zona, TODO candidato a trazo (oscuro o de color) es tinta, aunque sea tenue o esté a
+            // trozos (un sello desvaído no se borra); el papel de entre los trazos no es candidato -> blanco puro (antes toda la
+            // zona era trazo y el papel salía gris o beige, un recuadro)
+            if (!inp.bridgeOnly && inp.soft.isNotEmpty()) {
+                val zone = bag.add(Mat.zeros(sm.size(), CvType.CV_8U))
+                for (r in inp.soft) Imgproc.rectangle(zone, org.opencv.core.Point(r.x * s, r.y * s), org.opencv.core.Point((r.x + r.width) * s - 1, (r.y + r.height) * s - 1), Scalar(255.0), -1)
+                Core.bitwise_and(zone, cm, zone)
+                Imgproc.dilate(zone, zone, Cv.kernel(Imgproc.MORPH_ELLIPSE, 3))
+                Core.bitwise_or(support, zone, support)
             }
             // (la foto se pinta desde el original: nunca sobre el fondo ajeno -fuera de la hoja, mesa-)
             foreignAll2?.let { f -> val nf = bag.mat(); Core.bitwise_not(f, nf); Core.bitwise_and(photos, nf, photos); Core.bitwise_and(figures, nf, figures) }

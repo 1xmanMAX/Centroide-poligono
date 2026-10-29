@@ -52,7 +52,7 @@ class PageProcessor(val tier: DeviceTier) {
         // (el callback de progreso puede lanzar para cancelar un render en segundo plano: nada queda sin liberar)
         try { progress?.invoke(0.3f) } catch (e: Throwable) { geo.release(); throw e }
         val hints = jev?.let { f -> runCatching { f(geo) }.getOrNull() }
-        val photos = hints?.let { h -> com.scannerpromax.ai.jev.JevPage.mergePhotos(layoutImages, h.photos) + h.inks.map { floatArrayOf(it[0], it[1], it[2], it[3], NaturalColor.INK_FLAG) } } ?: layoutImages
+        val photos = hints?.let { h -> com.scannerpromax.ai.jev.JevPage.mergePhotos(layoutImages, h.photos) + h.inks.map { floatArrayOf(it[0], it[1], it[2], it[3], NaturalColor.INK_FLAG) } + h.verdicts } ?: layoutImages
         val tables = hints?.let { tableHints + it.tables } ?: tableHints
         val out = finish(geo, edits, ImageEnhancer.Options.of(tier, fast = false).copy(layoutImages = photos, tableHints = tables), progress)
         try {

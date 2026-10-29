@@ -194,3 +194,26 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
 - 2026-10-29: QUEJA v29: caja de foto demasiado grande en pág. 25 (pie, firma y blanco con tratamiento de foto, fondo gris). Agente "fotos_exactas": paso único PhotoBoxRefine (recuadro exacto por bordes/textura, partir, descartar; Jev solo pista), fuera de cajas idéntico al render normal. Notas notes_fotos_exactas.md, láminas /tmp/claude-0/bench/fotos_exactas.
 - 2026-10-29: QUEJA v29: margen izquierdo curvado (antes se alineaba). Agente "margen_curvo" en paralelo: buscar regresión v27→v29 (detección/Jev/stripAxis) y corregir curvatura (guía vertical curva en GridDewarp). Notas notes_margen_curvo.md, láminas /tmp/claude-0/bench/margen_curvo.
 - Margen curvo INTEGRADO (e6caef1): no era regresión de v29; MarginCurve (guías de texto ajustadas con polinomio ≤3, desplazamiento horizontal en la malla, un solo remuestreo). warpdoc 6,41→3,56 px/1000, dir300 4,23→3,40; rectas sin cambios. Pendiente menor: doccorner_smartdoc_000880 sale de lado desde stripAxis.
+
+## 2026-10-29: fotos con su recuadro EXACTO + capa de fotos (queja v29 pág. 25 y firma en recuadro gris) — rama del agente (sin push)
+- Causa raíz (13 fotos juliaca2, cajas dibujadas): ninguna fuente sola; las cajas de foto se usaban tal cual. Jev (JevPhotos pide
+  "pictures" incluidos logos y sellos): caja de la cabecera a media página (j02 0,21-0,42 x 0,03-0,83, como la pág. 25), firmas y
+  cabeceras como foto; PP-DocLayoutV3: la FIRMA como image/footer_image y los logos; textureBlocks: el pie de foto dentro de la caja;
+  findImageBlocks: trozos que desbordan la foto; firmas/sellos de Jev (zona suave): toda la zona como trazo -> recuadro gris.
+- imaging/PhotoBoxRefine (paso único): evidencia propia (grano/tono medio/color, zonas densas); cada caja candidata (bloques,
+  textura, PP, Jev) sólo SELECCIONA zonas densas; perfiles por filas/columnas con puentes en franjas pálidas y sin rayas del marco
+  ni pie de foto; división de cajas con varias fotos; borde exacto a resolución completa (escalón de gris + textura, fuera = papel);
+  clasificación "¿fotografía de cámara?" (papel, grano, top2 colores planos -> logos/cabeceras/firmas/sellos fuera); Jev: pregunta
+  de cámara por caja ordinal y por recorte EN LA MISMA petición (JevPage cam_i/camc_k), veto < 0,3, confirma dudosas >= 0,75; nunca amplía.
+- imaging/PhotoLayer: DOS CAPAS. Base = render normal sin fotos (+ bordes + líneas de tabla); fotos = recorte del original
+  rectificado con filtro natural (balance con el papel, hombro en luces, curva suave, saturación + vibrance, enfoque; B/N en gris),
+  pegado con 1 px de fundido hacia dentro. Fuera de los recuadros: idéntico píxel a píxel (test).
+- Firmas/sellos de Jev: la zona sólo protege la tinta (candidatos a trazo), papel blanco puro.
+- Medido: juliaca 13 fotos (verdad a mano): IoU 0,973 -> 0,990 (mín 0,976), papel tratado como foto 13,8 % -> 0,19 %, 0 cajas en
+  firmas/sellos/logos/cabeceras (con y sin Jev). Banco fotos Jev: syn photo IoU 0,84 (86 % aceptadas), gráficos 0 (a propósito),
+  papel tratado 0,85 % -> 0,01 %. DIBCO FM 79,33 -> 79,30, DRD 10,86 -> 10,88; tablas syn2 = (97,4/97,2 %). 570 tests.
+- Láminas /tmp/claude-0/bench/fotos_exactas/; notas /tmp/claude-0/bench/notes_fotos_exactas.md.
+- Banco Color natural (271, v29 vs nuevo): NAT FM 79,0 (-0,01), pérdida 1,38 (-0,09), espurio 6,97 (-0,50), ΔE color +0,68, +177 ms;
+  B/N FM 78,4 (+2,75: sin bloques de "foto" falsos en páginas con sombras), espurio +0,66. Pendiente/riesgo: fotos digitales muy lisas
+  (sin grano de impresión) pueden quedar "dudosas" sin Jev (banco sintético: 86 % aceptadas); gráficos y dibujos ya no reciben trato de foto.
+- Fotos exactas INTEGRADAS (f9232da): PhotoBoxRefine (paso único, clasificación foto de cámara, Jev solo pista/veto), PhotoLayer (dos capas: base normal + fotos del original con filtro natural; fuera idéntico). Papel tratado como foto 13,8 %→0,19 %; firmas/sellos/logos 0 falsos. v30 COMPILADA (fotos + margen curvo).

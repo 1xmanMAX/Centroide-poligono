@@ -535,9 +535,13 @@ object ImageEnhancer {
         if (stats != null && stats.printed) {
             val k = base.cols().toDouble() / max(1, rgb.cols())
             val st = if (k != 1.0) stats.scaled(k) else stats
-            return@use PrintedPage.render(base, style, opt.fast, opt.maxPixels, st, sheetSides = opt.sheetSides, layoutImages = opt.layoutImages, photoMode = opt.photoMode).also {
+            // capa base (render normal + bordes + líneas de tabla) y, encima, la capa de fotos ([PhotoLayer])
+            var photos: List<Rect> = emptyList(); var white: DoubleArray? = null
+            return@use PrintedPage.render(base, style, opt.fast, opt.maxPixels, st, sheetSides = opt.sheetSides, layoutImages = opt.layoutImages, photoMode = opt.photoMode,
+                photoSink = { p, w -> photos = p; white = w }).also {
                 cleanEdges(it, base, opt.sheetSides)
-                if (opt.keepRuling) restoreTableLines(it, base, st, opt)
+                if (opt.keepRuling) restoreTableLines(it, base, st, opt, photos)
+                if (photos.isNotEmpty() && PrintedPage.PHOTO_LAYER) PhotoLayer.paste(it, base, photos, white)
             }
         }
         // Si la segmentación de cuaderno falla con una imagen atípica (no por memoria), la ruta que conserva todo
@@ -558,9 +562,11 @@ object ImageEnhancer {
      * Líneas de tabla limpias y continuas en su sitio ([TableLines]); con "Conservar cuadrícula / renglones"
      * ([Options.keepRuling]), igual que la cuadrícula del cuaderno. Nada sobre las fotos de la página.
      */
-    private fun restoreTableLines(out: Mat, src: Mat, st: PrintedPage.Stats, opt: Options) {
+    private fun restoreTableLines(out: Mat, src: Mat, st: PrintedPage.Stats, opt: Options, photos: List<Rect> = emptyList()) {
         runCatching {
-            val avoid = st.pictures + opt.layoutImages.map { b -> DoubleArray(4) { b[it].toDouble() } }
+            // (fotografías: las de la capa de fotos, que tapa lo de debajo; sin ellas, las cajas de siempre)
+            val avoid = st.pictures + opt.layoutImages.filter { !NaturalColor.isVerdict(it) && !NaturalColor.isInk(it) }.map { b -> DoubleArray(4) { b[it].toDouble() } } +
+                photos.map { r -> doubleArrayOf(r.x.toDouble() / out.cols(), r.y.toDouble() / out.rows(), (r.x + r.width).toDouble() / out.cols(), (r.y + r.height).toDouble() / out.rows()) }
             TableLines.restore(out, src, st.letterHeight, avoid, opt.tableHints.map { b -> TableLines.Hint(DoubleArray(4) { b[it].toDouble() }, hLines = b.getOrElse(4) { 1f } > 0.5f, vLines = b.getOrElse(5) { 1f } > 0.5f) })
         }.onFailure { if (Cv.isOutOfMemory(it)) throw it }
     }

@@ -1167,7 +1167,7 @@ class DocumentRepository(
         val wantInks = edits.filter == FilterType.NATURAL
         if (!wantPhotos && !wantTables && !wantInks) return null
         val cache = File(dir, jevCacheName(pageId, edits))
-        return { geo -> j.pageHints(geo, cache, wantPhotos, wantTables, wantInks)?.let { JevRenderHints(it.photos, it.tables, it.inks) } }
+        return { geo -> j.pageHints(geo, cache, wantPhotos, wantTables, wantInks)?.let { JevRenderHints(it.photos, it.tables, it.inks, it.verdicts) } }
     }
 
     private suspend fun regenerateThumb(docId: String, page: Page, processed: File) {
