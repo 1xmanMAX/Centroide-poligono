@@ -190,3 +190,4 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
   duplicados: 0 falsos (antes 11 en juliaca), seguros del banco 22 -> 13/30 (resto a la zona gris de Jev). 556 tests OK.
 - Pendiente: celdas gris claro de tablas (ΔE < 7, no son relleno), fila de sección gris clara; pie de foto dentro del marco con
   fondo claro entra en la caja de la foto (texto algo gris); "sólo B/N" deja las fotos en gris (decisión de diseño).
+- 2026-10-29: mejoras con fotos reales INTEGRADAS (4f5f6f4): orientación por tiras (stripAxis), fotos por textura, bandas rellenas (cabeceras), rayas finas largas, detección (red no sustituye contorno limpio), duplicados con parecido de contenido. 556 tests. Pendiente: celdas gris muy claro (ΔE<7), pie de foto dentro del marco algo gris. v29 COMPILADA.
