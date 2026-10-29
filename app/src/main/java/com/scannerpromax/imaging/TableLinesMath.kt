@@ -438,6 +438,8 @@ internal object TableLinesMath {
         val hor: Boolean, val a0: Double, val a1: Double, val c: Double, val tr: Track,
         /** Fracción de la línea que la salida ya muestra con tinta (antes de redibujar). */
         var outCov: Double = 0.0,
+        /** Papel junto a la línea bastante más claro que el de la página: zona deslumbrada (solo con zonas indicadas). */
+        var glare: Boolean = false,
     ) { val len get() = a1 - a0 }
 
     /**
@@ -505,7 +507,7 @@ internal object TableLinesMath {
             return ov >= 0.6 * max(a.len, b.len)
         }
         // tenue o rota por la luz dentro de una tabla indicada: recta, fina, sin tocar texto, con algo de tinta seguida
-        for (k in 0 until n) if (zoned[k] && !basic[k]) {
+        for (k in 0 until n) if (zoned[k] && c[k].glare && !basic[k]) {
             val l = c[k]; val tr = l.tr
             // (una palabra subrayada junto a la tabla no debe pasar: horizontales algo más largas)
             val minLen = if (l.hor) max(4.0 * lh, 0.05 * w) else max(2.5 * lh, 0.03 * h)
@@ -533,7 +535,9 @@ internal object TableLinesMath {
                 // rejilla de un gráfico (barras que la cruzan y ninguna línea fina perpendicular): no se toca. Una
                 // tabla con columnas sombreadas sí tiene sus verticales finas
                 (l.tr.chartLike || parChart >= 2) && crLong < 2 -> false
-                zoned[k] && parS + crS >= 1 && (visible[k] || (tr0(l) && l.tr.amp >= 0.5 * FAINT_MIN * inkRef)) -> true
+                // dentro de una tabla indicada y en zona DESLUMBRADA: basta una paralela o perpendicular y vale tenue
+                // (fuera del deslumbramiento, reglas de siempre: la transparencia del reverso también es tenue)
+                zoned[k] && l.glare && parS + crS >= 1 && (visible[k] || (tr0(l) && l.tr.amp >= 0.5 * FAINT_MIN * inkRef)) -> true
                 visible[k] -> longRule || table
                 // la salida no la muestra: sólo dentro de la estructura de una tabla
                 strong[k] -> parS >= 2 || crS >= 2

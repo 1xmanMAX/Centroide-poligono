@@ -139,7 +139,15 @@ Maqueta en lienzo de diseño: https://claude.ai/artifact/1axPwJgQ3TRA16puB75DTG 
 - Banco /tmp/claude-0/bench/alinear (225 reales + 40 sintéticos + captura): reales cambiadas 11, deriva del margen 13,6 -> 0,9 px/1000, ángulo local 0,90 -> 0,23°; sintéticos cizalla 20,3 -> 2,1 px/1000, trapecio 10,5 -> 3,9, local peor columna 2,40 -> 0,12°, rectas sin cambios; enderezado gt_plana (112) MS-SSIM 0,4275 -> 0,4277, LD 15,86 -> 15,83. Láminas /tmp/claude-0/bench/alinear/laminas/. Notas /tmp/claude-0/bench/notes_alinear.md.
 - 2026-10-27: Líneas de tabla reconstruidas INTEGRADAS (45491d0: TableLines/TableLinesMath tras el render impreso, con keepRuling; cobertura sintética 78→94 %, 1 falsa/816). Alineación del margen (MarginAlign) INTEGRADA (a55b5a7). 510 tests. v27 COMPILADA: recorte manual, fotos, reescanear, margen, tablas.
 
-## Jev (TypeSafe) — en curso (2026-10-29)
+## Jev (TypeSafe) — 2026-10-29 (rama del agente lista para integrar)
 - Petición: usar Jev (TypeSafe, modelo de decisión: noul/choice/score/box, imágenes en preview, $0,042/M tokens de entrada) para: (1) localizar FOTOS y aplicarles filtro de foto, (2) localizar TABLAS/celdas para reconstruir líneas, (3) verificar OCR dudoso (Indra), (4) otras: encuadre, reconstrucción. Medir si mejora; clave temporal del usuario (NUNCA al repo; fichero /tmp/claude-0/bench/.jev_key).
 - API: POST https://api.typesafe.ai/v1/systemone, Bearer, cabecera TypeSafe-Danger-Zone-Images: true, multipart o assets data_base64; imagen 280..1568 px/lado; box = 1 caja por pregunta (fracciones top/bottom/left/right) + noul para presencia.
-- Agente en worktree; notas /tmp/claude-0/bench/notes_jev.md.
+- Agente en worktree (rama local `worktree-agent-aa5e80e31178702c8`, sin push); notas /tmp/claude-0/bench/notes_jev.md.
+- HECHO en la rama (pendiente de integrar): ai/jev (JevClient OkHttp con reintentos 429/529/5xx, JevImages ajuste 280..1568 +
+  JPEG ligero, JevPhotos con ajuste local, JevTables, JevOcr, JevPage = fotos+tablas en UNA petición, JevEnhancer), clave en
+  CloudKeyStore ("JEV"), Ajustes › IA en la nube › "Jev (TypeSafe)" con "Mejorar con Jev" (fotos, tablas, texto dudoso; apagado
+  sin clave; coste estimado), caché docDir/jev/<página>_<hash geometría>.json, PageProcessor.render(jev=…) -> layoutImages /
+  tableHints, TableLines.Hint (2.ª pasada en la tabla, aceptación permisiva, rejilla completada por zonas quemadas por la luz).
+- Medido (protocolo final, 1568 px, ~6 000 tokens ≈ 0,00025 $/pág, p50 220 ms): fotos IoU medio 0,48 (clásico) -> 0,75 (Jev);
+  PP-DocLayoutV3 0,87, PP+Jev 0,88. Tablas con deslumbramiento (sintético) cobertura 74,5 -> 90,9 % (continuas 44 -> 74 %),
+  sin deslumbramiento 94,3 -> 95,2 %. OCR: CER 27,3 -> 27,3 (sin efecto) -> OCR apagado por defecto.
