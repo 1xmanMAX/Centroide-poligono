@@ -15,6 +15,7 @@ import org.opencv.core.Point
 import org.opencv.features2d.DescriptorMatcher
 import org.opencv.features2d.ORB
 import kotlin.math.max
+import kotlin.math.min
 
 /**
  * Páginas DUPLICADAS en un lote (la misma hoja capturada dos veces), en local y sin red: puntos ORB de las dos páginas
@@ -25,8 +26,8 @@ import kotlin.math.max
  * Además, el duplicado seguro exige que el CONTENIDO coincida ([Match.similarity] ≥ [SIM_SURE]): las páginas distintas
  * de un mismo informe (membrete, logo, pie, firma, marcos de foto y pies de foto iguales y en el mismo sitio) daban
  * 40–460 inliers y se avisaban como duplicadas (fotos reales juliaca2: 11 pares falsos -> 0). Con la página B llevada
- * al marco de A, el detalle (paso banda) de las fotos y del texto distinto no se parece: plantillas ≤ 0,59, la misma
- * hoja 0,9. Banco i7 procesado por la app (30 + 45 pares): duplicados seguros 22 -> 14, 0 falsos; el resto pasa a la
+ * al marco de A, el detalle (paso banda) por celdas (cuartil inferior: el membrete común no basta) no se parece: plantillas ≤ 0,30, la misma
+ * hoja 0,94. Banco i7 procesado por la app (30 + 45 pares): duplicados seguros 22 -> 13, 0 falsos; el resto pasa a la
  * zona gris (Jev, si está activo).
  */
 object DuplicatePages {
@@ -39,7 +40,10 @@ object DuplicatePages {
     @Volatile internal var SIM_HI = 2.0
     @Volatile internal var SIM_LO = 8.0
     /** Parecido del contenido mínimo para el duplicado seguro. */
-    const val SIM_SURE = 0.6
+    const val SIM_SURE = 0.5
+    /** Rejilla de celdas del parecido y detalle mínimo (σ del paso banda) de una celda para contar. */
+    const val SIM_GRID = 4
+    const val SIM_CELL_SD = 3.0
 
     enum class Verdict { DIFFERENT, GRAY, DUPLICATE }
 
@@ -136,7 +140,31 @@ object DuplicatePages {
             ta32.convertTo(fa, CvType.CV_32F, 1.0, -ma.get(0, 0)[0]); tb32.convertTo(fb, CvType.CV_32F, 1.0, -mb.get(0, 0)[0])
             Core.multiply(fa, fb, pr)
             val den = sda.get(0, 0)[0] * sdb.get(0, 0)[0]
-            return if (den < 1e-6) 0.0 else Core.mean(pr, valid).`val`[0] / den
+            val global = if (den < 1e-6) 0.0 else Core.mean(pr, valid).`val`[0] / den
+            // por celdas ([SIM_GRID]²): el membrete y el pie comunes dan correlación alta en sus celdas, pero las fotos o el
+            // texto propios de cada página no; la misma hoja se parece en TODAS -> cuartil inferior de las celdas con detalle
+            val cells = ArrayList<Double>()
+            val cw = ta.cols() / SIM_GRID; val ch = ta.rows() / SIM_GRID
+            if (cw >= 8 && ch >= 8) for (gy in 0 until SIM_GRID) for (gx in 0 until SIM_GRID) {
+                val r = org.opencv.core.Rect(gx * cw, gy * ch, cw, ch)
+                val v = valid.submat(r); val nv = Core.countNonZero(v)
+                if (nv < 0.5 * r.area()) { v.release(); continue }
+                val a = ta32.submat(r); val b = tb32.submat(r)
+                val m1 = MatOfDouble(); val s1 = MatOfDouble(); val m2 = MatOfDouble(); val s2 = MatOfDouble()
+                Core.meanStdDev(a, m1, s1, v); Core.meanStdDev(b, m2, s2, v)
+                val sa1 = s1.get(0, 0)[0]; val sb1 = s2.get(0, 0)[0]
+                if (sa1 >= SIM_CELL_SD && sb1 >= SIM_CELL_SD) {
+                    val x = Mat(); val y = Mat(); val p = Mat()
+                    a.convertTo(x, CvType.CV_32F, 1.0, -m1.get(0, 0)[0]); b.convertTo(y, CvType.CV_32F, 1.0, -m2.get(0, 0)[0])
+                    Core.multiply(x, y, p)
+                    cells.add(Core.mean(p, v).`val`[0] / (sa1 * sb1))
+                    x.release(); y.release(); p.release()
+                }
+                v.release(); a.release(); b.release()
+            }
+            if (cells.size < 4) return global
+            cells.sort()
+            return min(global, cells[(cells.size - 1) / 4])
         } finally { listOf(saInv, sb, t1, ht, wb, valid, ones, fa, fb, pr, ta32, tb32).forEach { it.release() } }
     }
 

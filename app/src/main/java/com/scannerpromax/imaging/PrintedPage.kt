@@ -1008,8 +1008,8 @@ internal object PrintedPage {
         fun rowF(yy: Int): Double { var s = 0.0; for (xx in x0 until x1) s += tex[yy * w + xx]; return s / max(1, x1 - x0) }
         fun colF(xx: Int): Double { var s = 0.0; for (yy in y0 until y1) s += tex[yy * w + xx]; return s / max(1, y1 - y0) }
         val my = (0.25 * bh).toInt(); val mx = (0.25 * bw).toInt()
-        var k = 0; while (k < my && y0 > 0 && rowF(y0 - 1) >= GROW_TEX) { y0--; k++ }
-        k = 0; while (k < my && y1 < h && rowF(y1) >= GROW_TEX) { y1++; k++ }
+        var k = 0; while (k < my && y0 > 0 && rowF(y0 - 1) >= GROW_TEX_ROW) { y0--; k++ }
+        k = 0; while (k < my && y1 < h && rowF(y1) >= GROW_TEX_ROW) { y1++; k++ }
         k = 0; while (k < mx && x0 > 0 && colF(x0 - 1) >= GROW_TEX) { x0--; k++ }
         k = 0; while (k < mx && x1 < w && colF(x1) >= GROW_TEX) { x1++; k++ }
         return intArrayOf(x0, y0, x1, y1)
@@ -1018,6 +1018,8 @@ internal object PrintedPage {
     private const val TEX_SIDE = 1000
     /** Textura mínima de la línea siguiente para ampliar la caja de una foto (un renglón de texto al lado no llega). */
     private const val GROW_TEX = 0.75
+    /** Hacia arriba y abajo basta la mitad (un renglón de texto vecino se corta en el primer hueco entre renglones). */
+    private const val GROW_TEX_ROW = 0.5
     private const val TEX_MIN_SIDE = 0.12
     private const val TEX_MIN_FILL = 0.55
     private const val TEX_MAX_PAPER = 0.45
