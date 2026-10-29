@@ -194,8 +194,8 @@ class JevEnhancer(private val context: Context, private val keys: CloudKeyStore)
         /** Tokens típicos por página (fotos + tablas + firmas a 1568 px, medido): ~6 400; OCR dudoso: ~9 000 más. */
         const val TYPICAL_PAGE_TOKENS = 6_400L
         const val TYPICAL_OCR_TOKENS = 9_000L
-        /** Petición de la captura (foto a 1024 px, 9 preguntas). Se ajusta con la medida del banco. */
-        const val TYPICAL_CAPTURE_TOKENS = 2_700L
+        /** Petición de la captura (foto a 1024 px, 9 preguntas): mediana medida 2 860 tokens (p90 3 380). */
+        const val TYPICAL_CAPTURE_TOKENS = 2_900L
 
         fun typicalPageCost(ocr: Boolean, capture: Boolean = true): Double =
             JevApi.cost(TYPICAL_PAGE_TOKENS + (if (ocr) TYPICAL_OCR_TOKENS else 0) + if (capture) TYPICAL_CAPTURE_TOKENS else 0)

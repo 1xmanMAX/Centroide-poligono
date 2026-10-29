@@ -115,10 +115,12 @@ internal fun JevCard(
     val hasKey = savedMasked != null
     InsetGroup(
         separatorInset = SeparatorInsetPlain,
-        footer = "Jev localiza en una versión ligera de cada página (≈ 1568 px, sin el original) las fotos, para darles " +
-            "el filtro de foto sin trocearlas, y las tablas, para reconstruir sus líneas donde la luz las quemó. Se " +
-            "pregunta una vez por página y se guarda. Sin red o si falla, la página sale como siempre. La verificación " +
-            "del texto dudoso envía recortes de palabras; en nuestras pruebas apenas cambia el resultado.",
+        footer = "Jev mira una versión ligera de cada foto (≈ 1024 px al capturar y ≈ 1568 px de la página, nunca el " +
+            "original): elige el filtro según el tipo de documento si no elegiste otro, sugiere una carpeta, rescata el " +
+            "recorte cuando la detección falla o no hay documento, avisa de reflejos, dedos, cortes o sombras, localiza " +
+            "fotos y tablas, y conserva el color de firmas y sellos. Se pregunta una vez y se guarda. Sin red o si falla, " +
+            "la página sale como siempre. La verificación del texto dudoso envía recortes de palabras; en nuestras " +
+            "pruebas apenas cambia el resultado.",
     ) {
         item {
             Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -127,7 +129,7 @@ internal fun JevCard(
                 Column(Modifier.weight(1f)) {
                     Text("Jev (TypeSafe)", style = MaterialTheme.typography.titleSmall, color = ui.label)
                     Text(
-                        "Servidores en EE. UU. · ≈ ${usdJev(JevEnhancer.typicalPageCost(settings.ocr))} por página",
+                        "Servidores en EE. UU. · ≈ ${usdJev(JevEnhancer.typicalPageCost(settings.ocr, settings.capture))} por página",
                         style = MaterialTheme.typography.bodySmall, color = ui.secondaryLabel,
                     )
                 }
@@ -177,15 +179,17 @@ internal fun JevCard(
         item {
             ToggleRow(
                 title = "Mejorar con Jev",
-                subtitle = if (hasKey) "Fotos y tablas de las páginas nuevas o reprocesadas." else "Guarda antes una clave.",
+                subtitle = if (hasKey) "Las páginas nuevas o reprocesadas." else "Guarda antes una clave.",
                 checked = settings.enabled && hasKey,
                 enabled = hasKey,
                 onCheckedChange = { v -> onChange { it.copy(enabled = v) } },
             )
         }
         if (settings.enabled && hasKey) {
+            item { ToggleRow(title = "Al escanear", subtitle = "Tipo de documento, carpeta, recorte y avisos de calidad.", checked = settings.capture, onCheckedChange = { v -> onChange { it.copy(capture = v) } }) }
             item { ToggleRow(title = "Fotos", subtitle = "Rectángulos precisos para el filtro de foto (Color natural).", checked = settings.photos, onCheckedChange = { v -> onChange { it.copy(photos = v) } }) }
             item { ToggleRow(title = "Tablas", subtitle = "Líneas reconstruidas dentro de la tabla, también donde la luz las borró.", checked = settings.tables, onCheckedChange = { v -> onChange { it.copy(tables = v) } }) }
+            item { ToggleRow(title = "Firmas y sellos", subtitle = "Conservan su tinta y su color en Color natural, aunque sean tenues.", checked = settings.inks, onCheckedChange = { v -> onChange { it.copy(inks = v) } }) }
             item { ToggleRow(title = "Texto dudoso (OCR)", subtitle = "Verifica con el recorte las palabras que Indra leyó con poca confianza.", checked = settings.ocr, onCheckedChange = { v -> onChange { it.copy(ocr = v) } }) }
         }
         item {
