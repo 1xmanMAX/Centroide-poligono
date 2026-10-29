@@ -287,6 +287,7 @@ fun ReviewScreen(
     var moreMenu by remember { mutableStateOf(false) }
     var showApplyAll by remember { mutableStateOf(false) }
     var showMerge by remember { mutableStateOf(false) }
+    var showFolder by remember { mutableStateOf(false) }
     var mergeSource by remember { mutableStateOf<Document?>(null) }
     var bulkProgress by remember { mutableStateOf<Float?>(null) }
     var bulkMessage by remember { mutableStateOf("") }
@@ -486,6 +487,7 @@ fun ReviewScreen(
         listOf(
             MoreMenuItem("Renombrar", AppIcons.Rename, enabled = d != null) { renaming = true },
             MoreMenuItem("Seleccionar páginas", AppIcons.Select, enabled = order.isNotEmpty()) { selectionMode = true },
+            MoreMenuItem("Carpeta…", AppIcons.Folder, enabled = d != null) { showFolder = true },
         ),
         listOf(
             MoreMenuItem("Filtro para todas las páginas", AppIcons.Wand, enabled = order.isNotEmpty()) { showApplyAll = true },
@@ -517,7 +519,7 @@ fun ReviewScreen(
 
     ReviewContent(
         title = d?.title,
-        subtitle = d?.let { reviewSubtitle(order, it.mode) },
+        subtitle = d?.let { reviewSubtitle(order, it.mode, it.category) },
         pages = order,
         loading = d == null || !loaded,
         showEmpty = order.isEmpty() && pendingDeletes.isEmpty(),
@@ -609,6 +611,19 @@ fun ReviewScreen(
         snackbar = snackbar,
         backLabel = callerMode?.backLabel ?: "Documentos",
         primaryLabel = callerMode?.primaryLabel,
+        notices = {
+            ReviewNoticeList(
+                pages = order,
+                doc = d,
+                onDeleteDuplicate = { p -> deleteWithUndo(listOf(p)) },
+                onKeepDuplicate = { p -> scope.launch { runCatching { repo.dismissDuplicate(docId, p.id) } } },
+                onAcceptFolder = {
+                    val key = d?.suggestedCategory?.takeIf { it.isNotEmpty() }
+                    if (key != null) scope.launch { runCatching { repo.setCategory(docId, key) } }
+                },
+                onDismissFolder = { scope.launch { runCatching { repo.dismissSuggestedCategory(docId) } } },
+            )
+        },
     ) {
         viewerIndex?.let { start ->
             PageViewerDialog(
@@ -619,6 +634,7 @@ fun ReviewScreen(
                 onDismiss = { viewerIndex = null },
                 onEdit = { p -> viewerIndex = null; reopenViewerPageId = p.id; onEditPage(p.id) },
                 onRetake = onRetakePage?.let { r -> { p: Page -> viewerIndex = null; r(p.id) } },
+                onDismissIssues = { p -> scope.launch { runCatching { repo.dismissIssues(docId, p.id) } } },
             )
         }
         // Vuelta del editor: se reabre el visor en la página editada (ya con su procesado nuevo). Solo en la composición
@@ -668,6 +684,14 @@ fun ReviewScreen(
         )
     }
 
+    if (showFolder && d != null) {
+        FolderPickerSheet(
+            current = d.category,
+            onDismiss = { showFolder = false },
+            onPick = { k -> scope.launch { runCatching { repo.setCategory(docId, k) } } },
+        )
+    }
+
     if (showMerge) {
         val all by repo.documents.collectAsState()
         val others = all.filter { it.id != docId && it.pages.isNotEmpty() }
@@ -692,8 +716,8 @@ fun ReviewScreen(
 data class ReviewCallerMode(val backLabel: String, val primaryLabel: String)
 
 /** "4 páginas · Documento" (el texto se reconoce solo y se selecciona en el visor: no se anuncia). */
-internal fun reviewSubtitle(pages: List<Page>, mode: ScanMode): String =
-    listOf(pagesLabel(pages.size), mode.label).joinToString(" · ")
+internal fun reviewSubtitle(pages: List<Page>, mode: ScanMode, category: String? = null): String =
+    listOfNotNull(pagesLabel(pages.size), mode.label, com.scannerpromax.ai.jev.JevCapture.folderLabel(category)).joinToString(" · ")
 
 /**
  * Progreso del reconocimiento de las páginas del documento ([statuses] = estados de la cola de ESTE documento):
@@ -767,6 +791,8 @@ internal fun ReviewContent(
     backLabel: String = "Documentos",
     /** Texto del botón principal en lugar de "Exportar" (edición para otra app); con él siempre está activo. */
     primaryLabel: String? = null,
+    /** Avisos discretos bajo la cabecera (duplicados, carpeta sugerida); vacío = ninguno. */
+    notices: @Composable () -> Unit = {},
     overlays: @Composable BoxScope.() -> Unit = {},
 ) {
     val ui = MaterialTheme.ui
@@ -853,6 +879,7 @@ internal fun ReviewContent(
                             modifier = Modifier.padding(top = 10.dp),
                         )
                         if (aiStatus != null) AiStatusRow(aiStatus, onCancelAi, Modifier.padding(top = 12.dp))
+                        if (!selectionMode) Box(Modifier.padding(top = 12.dp)) { notices() }
                     }
                 }
                 itemsIndexed(pages, key = { _, p -> p.id }, contentType = { _, _ -> "page" }) { index, page ->
@@ -1111,6 +1138,7 @@ private fun PageCell(
                 ),
         ) {
             thumbnail(Modifier.fillMaxSize())
+            if (!selectionMode && !page.issues.isNullOrEmpty()) IssueBadge(page, Modifier.align(Alignment.TopStart).padding(6.dp))
             if (selectionMode) {
                 // Velo suave sobre las marcadas (como Fotos) y círculo de check arriba a la derecha.
                 if (selected) Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = if (ui.isDark) 0.08f else 0.18f)))

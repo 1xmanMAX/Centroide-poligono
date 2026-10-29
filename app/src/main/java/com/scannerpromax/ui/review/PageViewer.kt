@@ -186,8 +186,12 @@ internal fun PageViewerDialog(
     onDismiss: () -> Unit,
     onEdit: (Page) -> Unit,
     onRetake: ((Page) -> Unit)? = null,
+    /** El usuario descartó los avisos de calidad de la página ("Mejorar con Jev"). */
+    onDismissIssues: (Page) -> Unit = {},
 ) {
     var index by remember { mutableIntStateOf(startIndex.coerceIn(0, max(0, pages.size - 1))) }
+    // (la lista es una instantánea: los avisos descartados aquí se ocultan sin esperar al repositorio)
+    var dismissedIssues by remember { mutableStateOf(emptySet<String>()) }
     val page = pages.getOrNull(index)
     Dialog(
         onDismissRequest = onDismiss,
@@ -346,6 +350,16 @@ internal fun PageViewerDialog(
                 onEdit = { onEdit(page) },
                 onRetake = onRetake?.let { r -> { r(page) } },
             )
+            // Aviso de calidad de la captura (reflejo, dedo, página cortada, sombra fuerte): bajo la barra superior
+            val issues = page.issues.orEmpty()
+            if (issues.isNotEmpty() && page.id !in dismissedIssues && !showRebuilt) {
+                ViewerIssueBanner(
+                    issues,
+                    onRetake = onRetake?.let { r -> { r(page) } },
+                    onDismiss = { dismissedIssues = dismissedIssues + page.id; onDismissIssues(page) },
+                    modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 58.dp, start = 16.dp, end = 16.dp),
+                )
+            }
             val hintText = when {
                 showRebuilt || live.range != null -> null
                 live.status == LiveTextStatus.LOADING -> "Reconociendo texto…"

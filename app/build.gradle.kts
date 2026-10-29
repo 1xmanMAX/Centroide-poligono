@@ -188,6 +188,8 @@ tasks.withType<Test>().configureEach {
         // JevOcrEvalTest (banco del OCR con Jev, red): -PjevOcr=DIR [-PjevOpts="minp=0.85;lines=1"]. Clave: fichero
         // /tmp/claude-0/bench/.jev_key (nunca en el repo).
         "jevOcr" to "jev.ocr", "jevOpts" to "jev.opts",
+        // JevIdeasEvalTest (captura, duplicados, firmas con la API real): -PjevIdeas=DIR con DIR/list.tsv (scratch jev_impl).
+        "jevIdeas" to "jev.ideas",
     ).forEach { (p, sp) ->
         (project.findProperty(p) as String?)?.let { systemProperty(sp, it) }
     }

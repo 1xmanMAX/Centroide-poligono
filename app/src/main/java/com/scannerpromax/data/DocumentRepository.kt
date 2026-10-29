@@ -334,11 +334,11 @@ class DocumentRepository(
                         val hints = if (autoDetect && m != ScanMode.PHOTO && m != ScanMode.ID_CARD) captureHints(bmp, dir, pageId) else null
                         capture = hints
                         var q0 = det?.first
-                        when (val f = JevCapture.framing(hints, q0 != null, det?.second, q0 != null && nearlyFull(q0, bmp.width, bmp.height))) {
+                        when (val f = JevCapture.framing(hints, q0?.let { boxOf(it, bmp.width, bmp.height) }, det?.second, q0 != null && nearlyFull(q0, bmp.width, bmp.height))) {
                             JevCapture.Framing.Keep -> Unit
                             // no hay documento: sin recorte (antes se recortaba el 82 % de las fotos sin documento)
                             JevCapture.Framing.FullPage -> q0 = null
-                            is JevCapture.Framing.Roi -> q0 = rescueQuad(bmp, f.roi, hints?.box)
+                            is JevCapture.Framing.Roi -> q0 = rescueQuad(bmp, f, hints?.box)
                         }
                         docBox = q0?.let { boxOf(it, bmp.width, bmp.height) }
                         val quad = q0?.let { toSpace(it, bmp.width, bmp.height, pw, ph) }
@@ -876,15 +876,18 @@ class DocumentRepository(
     }
 
     /**
-     * Rescate del encuadre: vuelve a lanzar el detector clásico DENTRO de [roi] (la caja de Jev ampliada; fracciones de
-     * [bmp]) y, si tampoco da un cuadrilátero creíble ([JevCapture.roiQuadOk]), usa la zona como recorte. Quad en
-     * coordenadas de [bmp].
+     * Rescate del encuadre: vuelve a lanzar el detector clásico DENTRO de la zona de Jev ([JevCapture.Framing.Roi.roi], la
+     * caja ampliada; fracciones de [bmp]) y, si tampoco da un cuadrilátero creíble ([JevCapture.roiQuadOk]), recorta por
+     * la caja de Jev ([JevCapture.Framing.Roi.fallback]). Quad en coordenadas de [bmp].
      */
-    private fun rescueQuad(bmp: Bitmap, roi: JevBox, box: JevBox?): Quad {
+    private fun rescueQuad(bmp: Bitmap, f: JevCapture.Framing.Roi, box: JevBox?): Quad {
         val w = bmp.width; val h = bmp.height
+        val roi = f.roi
         val x0 = (roi.left * w).toInt().coerceIn(0, w - 1); val y0 = (roi.top * h).toInt().coerceIn(0, h - 1)
         val x1 = (roi.right * w).toInt().coerceIn(x0 + 1, w); val y1 = (roi.bottom * h).toInt().coerceIn(y0 + 1, h)
-        val rect = Quad(Pt(x0.toFloat(), y0.toFloat()), Pt(x1.toFloat(), y0.toFloat()), Pt(x1.toFloat(), y1.toFloat()), Pt(x0.toFloat(), y1.toFloat()))
+        val fb = f.fallback
+        val fx0 = (fb.left * w).toFloat(); val fy0 = (fb.top * h).toFloat(); val fx1 = (fb.right * w).toFloat(); val fy1 = (fb.bottom * h).toFloat()
+        val rect = Quad(Pt(fx0, fy0), Pt(fx1, fy0), Pt(fx1, fy1), Pt(fx0, fy1))
         var crop: Bitmap? = null
         return try {
             crop = Bitmap.createBitmap(bmp, x0, y0, x1 - x0, y1 - y0)

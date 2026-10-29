@@ -145,7 +145,7 @@ object JevCapture {
 
     /** Umbrales de los avisos de calidad (altos: pocos falsos positivos; banco i3 / i3r). */
     const val GLARE_T = 0.9
-    const val CUT_T = 0.8
+    const val CUT_T = 0.6
     const val FINGER_T = 0.85
     const val SHADOW_T = 0.8
 
@@ -155,25 +155,41 @@ object JevCapture {
         data object Keep : Framing()
         /** No hay documento: página completa, sin recorte. */
         data object FullPage : Framing()
-        /** Volver a detectar dentro de [roi] (fracciones x0, y0, x1, y1 de la foto); si falla, usar [roi] como recorte. */
-        data class Roi(val roi: JevBox) : Framing()
+        /**
+         * Volver a detectar dentro de [roi] (la caja de Jev ampliada; fracciones x0, y0, x1, y1 de la foto); si tampoco
+         * sale un cuadrilátero creíble, recortar por [fallback] (la caja de Jev casi tal cual: en el banco, IoU mediano
+         * 0,84 con la verdad frente a 0,53 de la caja ampliada un 8 %).
+         */
+        data class Roi(val roi: JevBox, val fallback: JevBox) : Framing()
     }
 
+    /** Desacuerdo: la caja del cuadrilátero del detector y la de Jev se solapan menos que esto (banco: aciertos ≥ 0,76). */
+    const val DISAGREE_IOU = 0.6
+    /** ...y Jev está seguro de su caja. */
+    const val BOX_SURE = 0.6
+    /** Margen de la caja de Jev cuando se usa como recorte (que no se coma el borde de la hoja). */
+    const val BOX_PAD = 0.01
+
     /**
-     * [detected] = el detector dio un quad usable; [confidence] su confianza (null si no dio nada); [nearlyFull] = el quad
-     * es casi la foto entera. Sin [h] (sin Jev): siempre [Framing.Keep].
+     * [quadBox] = caja envolvente del cuadrilátero del detector (fracciones de la foto) o null si no dio uno usable;
+     * [confidence] su confianza (null si no dio nada); [nearlyFull] = el quad es casi la foto entera. Se rescata si el
+     * detector es débil o si su cuadrilátero contradice a la caja de Jev. Sin [h] (sin Jev): siempre [Framing.Keep].
      */
-    fun framing(h: CaptureHints?, detected: Boolean, confidence: Float?, nearlyFull: Boolean): Framing {
+    fun framing(h: CaptureHints?, quadBox: JevBox?, confidence: Float?, nearlyFull: Boolean): Framing {
         val p = h?.docP ?: return Framing.Keep
         if (p < NO_DOC) return Framing.FullPage
-        val weak = !detected || (confidence ?: 0f) < RESCUE_CONFIDENCE || nearlyFull
-        if (!weak || p < DOC_SURE) return Framing.Keep
+        if (p < DOC_SURE) return Framing.Keep
         val b = h.box ?: return Framing.Keep
         // (una caja diminuta o que es toda la foto no ayuda)
         if (b.width < 0.08 || b.height < 0.08 || b.area > 0.97) return Framing.Keep
-        return Framing.Roi(JevBox((b.left - ROI_PAD).coerceAtLeast(0.0), (b.top - ROI_PAD).coerceAtLeast(0.0),
-            (b.right + ROI_PAD).coerceAtMost(1.0), (b.bottom + ROI_PAD).coerceAtMost(1.0)))
+        val weak = quadBox == null || (confidence ?: 0f) < RESCUE_CONFIDENCE || nearlyFull
+        val disagree = quadBox != null && (h.boxConf ?: 0.0) >= BOX_SURE && quadBox.iou(b) < DISAGREE_IOU
+        if (!weak && !disagree) return Framing.Keep
+        return Framing.Roi(pad(b, ROI_PAD), pad(b, BOX_PAD))
     }
+
+    private fun pad(b: JevBox, d: Double) =
+        JevBox((b.left - d).coerceAtLeast(0.0), (b.top - d).coerceAtLeast(0.0), (b.right + d).coerceAtMost(1.0), (b.bottom + d).coerceAtMost(1.0))
 
     /**
      * ¿Vale el cuadrilátero [q] (x0, y0 … x3, y3 en fracciones de la foto) que el detector clásico encontró dentro de
@@ -219,9 +235,9 @@ object JevCapture {
         h?.folder?.takeIf { it != "otro" && h.folderP >= FOLDER_MIN_P && folderLabel(it) != null }
 
     /**
-     * Avisos de calidad (códigos [PageIssue]). [box] = dónde está el documento (fracciones de la foto; el quad final o la
-     * caja de Jev): "cortada" solo cuenta si el documento toca algún borde de la foto pero no los cuatro (una página
-     * escaneada que llena la foto no está cortada).
+     * Avisos de calidad (códigos [PageIssue]). [box] = caja del recorte final (fracciones de la foto) o null: "cortada"
+     * solo cuenta si el documento (ese recorte o la caja de Jev) toca algún borde de la foto pero no los cuatro (una
+     * página escaneada que llena la foto no está cortada).
      */
     fun issues(h: CaptureHints?, box: JevBox?): List<String> {
         if (h == null || (h.docP ?: 1.0) < NO_DOC) return emptyList()
@@ -229,14 +245,19 @@ object JevCapture {
         if ((h.glare ?: 0.0) >= GLARE_T) out += PageIssue.GLARE
         if ((h.finger ?: 0.0) >= FINGER_T) out += PageIssue.FINGER
         if ((h.cut ?: 0.0) >= CUT_T) {
-            val b = box ?: h.box
-            val e = 0.015
-            val touching = b?.let { listOf(it.left <= e, it.top <= e, it.right >= 1 - e, it.bottom >= 1 - e).count { t -> t } } ?: 0
-            if (touching in 1..3) out += PageIssue.CUT
+            val bs = listOfNotNull(box, h.box)
+            val e = EDGE
+            val touched = listOf(
+                bs.any { it.left <= e }, bs.any { it.top <= e }, bs.any { it.right >= 1 - e }, bs.any { it.bottom >= 1 - e },
+            ).count { it }
+            if (touched in 1..3) out += PageIssue.CUT
         }
         if ((h.shadow ?: 0.0) >= SHADOW_T) out += PageIssue.SHADOW
         return out
     }
+
+    /** Distancia al borde de la foto (fracción) a la que el documento "toca" el borde. */
+    const val EDGE = 0.02
 }
 
 /** Códigos de los avisos de calidad de una página ([com.scannerpromax.domain.Page.issues]). */

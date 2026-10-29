@@ -79,7 +79,7 @@ object JevPage {
     /** Sello: noul ≥ [STAMP_T] (banco i6, sellos sintéticos: TPR 0,93, FPR 0). */
     const val STAMP_T = 0.8
     /** Margen de la caja de la firma (fracción de su tamaño por lado; IoU mediano 0,58: la caja de Jev se queda corta). */
-    const val SIG_PAD = 0.25
+    const val SIG_PAD = 0.5
     const val STAMP_PAD = 0.1
 
     /** Petición combinada (fotos, tablas y/o firmas y sellos) sobre [img]. */
