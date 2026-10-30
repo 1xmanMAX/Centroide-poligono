@@ -108,6 +108,15 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
+        <!-- ONNX Runtime 1.31 (Android) trae un ContentProvider de TELEMETRÍA de Microsoft que, al arrancar la app, carga
+             libonnxruntime.so y prepara envíos HTTP con datos del dispositivo (android_id, tipo, red, batería). Fuera:
+             la app no envía telemetría a nadie (política de privacidad / Seguridad de los datos) y arranca más rápido.
+             Además OrtNative llama a OrtEnvironment.setTelemetry(false). -->
+        <provider
+            android:name="ai.onnxruntime.TelemetryInitializer"
+            android:authorities="${applicationId}.onnxruntime_telemetry_initializer"
+            tools:node="remove" />
+
         <!-- Servicio en primer plano de WorkManager para descargar modelos de IA (tipo dataSync, Android 14+) -->
         <service
             android:name="androidx.work.impl.foreground.SystemForegroundService"

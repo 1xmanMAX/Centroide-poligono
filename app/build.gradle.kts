@@ -28,6 +28,9 @@ val uploadSigningMissing: List<String> = buildList {
     uploadSigning["UPLOAD_STORE_FILE"]?.let { if (!file(it).isFile) add("UPLOAD_STORE_FILE (no existe: $it)") }
 }
 
+/** ¿Se están generando APKs (assemble*)? Entonces splits por ABI; si no (bundleRelease para Play), ndk.abiFilters. */
+val buildingApks: Boolean = gradle.startParameter.taskNames.any { it.substringAfterLast(":").startsWith("assemble") }
+
 android {
     namespace = "com.scannerpromax"
     // Google Play exige targetSdk 36 (Android 16) a apps nuevas y actualizaciones desde el 31-08-2026.
@@ -44,12 +47,16 @@ android {
         // Solo español (textos de la app) e inglés: quita cientos de traducciones de AndroidX/Material
         // (APK y resources.arsc más pequeños = menos memoria y arranque algo más rápido).
         resourceConfigurations += listOf("es", "en")
+        // ABIs del AAB (Play entrega a cada teléfono solo la suya). Sin x86 de 32 bits: antes el AAB llevaba un
+        // lib/x86/ con solo libc++_shared.so (sin OpenCV ni ONNX Runtime), que habría roto la app en esos equipos.
+        // (AGP no admite ndk.abiFilters junto con splits.abi: los splits solo se activan al generar APKs con assemble*.)
+        if (!buildingApks) ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
 
     // APKs por ABI: cada celular descarga solo las librerías nativas que necesita (APK más liviano).
     splits {
         abi {
-            isEnable = true
+            isEnable = buildingApks
             reset()
             include("arm64-v8a", "armeabi-v7a", "x86_64")
             // El APK universal (las 3 ABIs de OpenCV, mucho más pesado) solo sirve para repartir un único archivo.
@@ -113,7 +120,8 @@ android {
 
 // Release sin keystore de subida: falla ANTES de empaquetar, con instrucciones (nunca se firma con la clave de debug).
 tasks.matching { t ->
-    t.name.endsWith("Release") && listOf("pre", "bundle", "assemble", "package", "sign", "install").any { t.name.startsWith(it) }
+    t.name == "preReleaseBuild" ||
+        t.name.endsWith("Release") && listOf("bundle", "assemble", "package", "sign", "install").any { t.name.startsWith(it) }
 }.configureEach {
     doFirst {
         if (uploadSigningMissing.isNotEmpty()) throw GradleException(

@@ -36,7 +36,9 @@ object OrtNative {
         if (tried) return false
         tried = true
         return try {
-            ai.onnxruntime.OrtEnvironment.getEnvironment()
+            val env = ai.onnxruntime.OrtEnvironment.getEnvironment()
+            // Sin telemetría de ONNX Runtime (su ContentProvider ya se quita en el manifiesto).
+            runCatching { env.setTelemetry(false) }.onFailure { Log.w(TAG, "setTelemetry(false)", it) }
             loaded = true
             lastError = null
             true
