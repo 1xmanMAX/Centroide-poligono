@@ -8,7 +8,7 @@ Escáner de documentos para Android con mejora de imagen avanzada, OCR sin inter
 - **3 filtros**: *Blanco y negro* (texto negro nítido sobre blanco puro, sin sombras ni motas; quita la cuadrícula de color clara de los cuadernos conservando la escritura), *Texto resaltado* (por defecto: sin sombras, papel blanco neutro, tinta reforzada con su color; des-ruido, super-resolución y gamma para poca luz automáticos) y *Color original* (colores fieles, solo recorte y un toque de nitidez). Los filtros antiguos de documentos guardados se siguen renderizando y se muestran como su equivalente.
 - **Recorte preciso**: esquinas arrastrables con lupa, perspectiva corregida con relación de aspecto real, enderezado automático del texto y **enderezado de hojas curvadas/combadas** usando las líneas de tablas, cuadrículas o renglones (interruptor "Enderezar hoja curvada" en Limpieza).
 - **Limpieza**: quita ruido y rayas automáticamente; borrador manual (reparación inteligente o pintar blanco) con deshacer/rehacer.
-- **OCR** en el dispositivo con **Indra** (único lector de texto; se descarga solo la primera vez, ~38 MB) y **PDF con texto buscable**, contraseña opcional.
+- **OCR** en el dispositivo con **Indra** (único lector de texto; sus pesos se descargan solos la primera vez, ~25 MB) y **PDF con texto buscable**, contraseña opcional.
 - **Texto en el PDF** (Ajustes → "Texto en el PDF", también en Exportar): *Solo imagen*, *Buscable* (capa invisible palabra a palabra), *Buscable + texto reconocido* (páginas legibles con el texto, tras cada página o al final) y *Solo texto*. Fuente Liberation Sans incrustada (acentos, ñ, ¿¡, €). Las correcciones hechas en la pantalla OCR se usan en el PDF, la búsqueda y las exportaciones.
 - **Exportar texto** como **.txt** (UTF-8) o **Word (.docx)**, desde Exportar o desde la pantalla OCR.
 - **Detección robusta**: segmentación por color (Cb/Cr) insensible a sombras duras y madera clara, cuadriláteros envolventes que recuperan esquinas tapadas o redondeadas, cuadernos abiertos (ambas páginas) y documentos que se salen del encuadre (el lado queda sobre el borde de la foto).
@@ -138,7 +138,7 @@ Desde adb: `adb shell am start -a com.scannerpromax.action.SCAN --es mode book -
 ## Reconocimiento de texto (Indra)
 - **Indra** (Datalab, `ocr/indra/`, ONNX Runtime en el procesador) es el ÚNICO OCR de la app: detector de líneas,
   reconocedor, orden de lectura, orientación y modelo de lenguaje para las líneas dudosas (solo latín).
-- Sus pesos (24,7 MB) y ONNX Runtime (`libonnxruntime.so`, ~13 MB para arm64) **no van en el APK**: se descargan solos en
+- Sus pesos (24,7 MB, solo DATOS) **no van en el APK**: se descargan solos en
   el primer arranque (`ocr/indra/IndraProvisioner`, WorkManager con notificación silenciosa), respetando *Descargas solo
   con Wi-Fi*. Sin red, las páginas quedan **pendientes** y se reconocen solas al terminar la descarga.
 - Cada página se reconoce en segundo plano al añadirse (Texto en vivo, búsqueda y PDF buscable).
@@ -152,7 +152,7 @@ Desde adb: `adb shell am start -a com.scannerpromax.action.SCAN --es mode book -
 |---|---|---|---|
 | Indra OCR (datalab-to/indra) — código portado a Kotlin | OCR | Apache-2.0 | En el APK (`ocr/indra/`) |
 | Indra OCR — pesos v1.1.0 (`datalab-to/indra-ocr`, latín) | OCR | OpenRAIL-M modificada (Datalab): gratis para uso personal/investigación y empresas < 20 M$; no para productos que compitan con Datalab. **Uso personal**: una distribución comercial necesitaría licencia de Datalab y trasladar sus restricciones de uso | Descarga automática (24,7 MB) |
-| ONNX Runtime 1.31 (Microsoft) | Motor de Indra y de la maquetación | MIT | API Java + JNI en el APK; `libonnxruntime.so` se descarga (~13 MB) |
+| ONNX Runtime 1.31 (Microsoft) | Motor de Indra y de la maquetación | MIT | En el AAB/APK (incluida `libonnxruntime.so`: Google Play prohíbe descargar código ejecutable). Su telemetría está desactivada (proveedor `TelemetryInitializer` quitado del manifiesto + `setTelemetry(false)`) |
 | PP-DocLayoutV3 + PP-LCNet doc_ori (PaddlePaddle, ONNX) | Maquetación por partes y orientación (opcional) | Apache-2.0 | Descarga opcional (137 MB) |
 | OpenCV 4.10 | Imagen | Apache-2.0 | En el APK |
 | PdfBox-Android | PDF | Apache-2.0 | En el APK |
@@ -165,11 +165,34 @@ Eliminados: ML Kit Text Recognition, PaddleOCR-VL-1.5 ("Lector de documentos"), 
 llama.cpp (submódulo `third_party/llama.cpp` y JNI `app/src/main/cpp`).
 
 ## Compilar
-Requisitos: JDK 17+, Android SDK 35 (ya no hace falta el NDK ni CMake).
+Requisitos: JDK 17+, Android SDK 36 (compileSdk/targetSdk 36: Google Play lo exige desde el 31-08-2026; ya no hace
+falta el NDK ni CMake).
+
+La release se firma con la **clave de subida de Google Play**, que NUNCA va en el repo. Defínela en
+`keystore.properties` (o `local.properties`; ambos en `.gitignore`) o como variables de entorno:
 ```
-./gradlew :app:assembleRelease   # APKs por ABI en app/build/outputs/apk/release/
+UPLOAD_STORE_FILE=/ruta/fuera/del/repo/upload-keystore.jks
+UPLOAD_STORE_PASSWORD=...
+UPLOAD_KEY_ALIAS=upload
+UPLOAD_KEY_PASSWORD=...
+```
+Sin ellas, cualquier tarea de release falla con un mensaje claro (nunca se firma con la clave de debug).
+```
+./gradlew :app:bundleRelease     # AAB para Google Play (Play App Signing): app/build/outputs/bundle/release/
+./gradlew :app:assembleRelease   # APKs por ABI (fuera de Play) en app/build/outputs/apk/release/
 ./gradlew :app:testDebugUnitTest
 ```
+
+### Google Play
+- AAB con arm64-v8a, armeabi-v7a y x86_64 (Play entrega a cada teléfono solo su ABI; descarga ≈ 33 MB en arm64).
+- Nada de código descargado: los modelos solo traen datos (ONNX/tablas) de Hugging Face (`ModelCatalogTest`).
+- Permisos: cámara, internet/estado de red, notificaciones, servicio en primer plano `dataSync` (descargas de modelos
+  y trabajos largos con notificación) y `WRITE_EXTERNAL_STORAGE` solo hasta Android 9. Sin `READ_MEDIA_*` (selector
+  de fotos del sistema) ni `QUERY_ALL_PACKAGES` (`PlayPolicyTest`).
+- Servicios en la nube (Jev, Claude, DeepSeek): desactivados, con la clave del usuario y un aviso de consentimiento
+  (qué se envía y a quién) antes del primer uso de cada uno.
+- Actividades exportadas: `MainActivity` solo acepta `content://` de otras apps; `ScanForResultActivity` valida
+  extras, id de documento y `EXTRA_OUTPUT` (nunca `file://` ni el propio FileProvider).
 
 ## Arquitectura
 `imaging/` (OpenCV: detección, perspectiva, filtros, limpieza) · `data/` (documentos locales, ajustes) · `ocr/` · `pdf/` (exportación y compresión con PdfBox) · `export/` · `ui/` (Jetpack Compose).

@@ -217,3 +217,17 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
   B/N FM 78,4 (+2,75: sin bloques de "foto" falsos en páginas con sombras), espurio +0,66. Pendiente/riesgo: fotos digitales muy lisas
   (sin grano de impresión) pueden quedar "dudosas" sin Jev (banco sintético: 86 % aceptadas); gráficos y dibujos ya no reciben trato de foto.
 - Fotos exactas INTEGRADAS (f9232da): PhotoBoxRefine (paso único, clasificación foto de cámara, Jev solo pista/veto), PhotoLayer (dos capas: base normal + fotos del original con filtro natural; fuera idéntico). Papel tratado como foto 13,8 %→0,19 %; firmas/sellos/logos 0 falsos. v30 COMPILADA (fotos + margen curvo).
+
+## 2026-10-30: preparación para Google Play (agente "play", rama local worktree-agent-aac78eabf00a9382b, sin push)
+- targetSdk/compileSdk 36 (Play lo exige desde el 31-08-2026). Firma de subida desde keystore.properties/local.properties/env
+  (UPLOAD_*); sin ella la release FALLA (nunca clave de debug). Keystore de subida RSA 4096/30 años/alias upload FUERA del repo
+  (scratchpad/play/upload-keystore.jks + LEEME-CLAVE.txt). versionCode 1 / versionName 1.0.0.
+- libonnxruntime.so DENTRO del AAB (política «descarga de código ejecutable»): eliminada la descarga de Maven (ZipEntryFetcher,
+  NativeLibs, NativeAbi, OrtNative.System.load); se purgan <models>/<id>/lib heredados. Telemetría de ONNX Runtime quitada
+  (TelemetryInitializer tools:node=remove + setTelemetry(false)). AAB sin lib/x86 parcial (abiFilters en bundle).
+- Consentimiento de Jev al activar «Mejorar con Jev» (JevSettings.consent/on). MainActivity solo content:// ajenos. Log.i fuera en release.
+- AAB: scratchpad/play/EscanerProMax-1.0.0.aab (descarga arm64 ≈ 33 MB, armv7 ≈ 31, x86_64 ≈ 49). 571 tests OK.
+- Documentos en scratchpad/play/: politica-privacidad.html, seguridad-datos.md, ficha-play.md (incl. riesgo de marca «Pro Max»),
+  nota-cifrado-exportacion.md. Notas: /tmp/claude-0/bench/notes_play.md.
+- Pendiente del usuario: subir la política a un hosting, rellenar Play Console (ver notas), prueba cerrada 12 testers/14 días si la
+  cuenta es personal y nueva, probar la release en un móvil real (R8 + SDK de Anthropic sin probar en dispositivo).
