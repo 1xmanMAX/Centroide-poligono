@@ -34,8 +34,15 @@ data class JevSettings(
     val requests: Long = 0,
     val inputTokens: Long = 0,
     val lastError: String? = null,
+    /**
+     * Consentimiento explícito (divulgación destacada de Google Play) para enviar imágenes a TypeSafe. Sin él no sale
+     * ninguna petición aunque [enabled] esté activo (p. ej. ajustes de versiones anteriores).
+     */
+    val consent: Boolean = false,
 ) {
     val costUsd: Double get() = JevApi.cost(inputTokens)
+    /** Interruptor efectivo: activado Y consentido. */
+    val on: Boolean get() = enabled && consent
 }
 
 /**
@@ -59,13 +66,13 @@ class JevEnhancer(private val context: Context, private val keys: CloudKeyStore)
 
     fun setKey(key: String) { keys.set(CloudKeyStore.JEV, key); cached = null; cachedQuick = null }
 
-    fun removeKey() { keys.remove(CloudKeyStore.JEV); cached = null; cachedQuick = null; update { it.copy(enabled = false) } }
+    fun removeKey() { keys.remove(CloudKeyStore.JEV); cached = null; cachedQuick = null; update { it.copy(enabled = false, consent = false) } }
 
     @Synchronized
     fun update(f: (JevSettings) -> JevSettings) {
         val n = f(_settings.value)
         prefs.edit().putBoolean("enabled", n.enabled).putBoolean("photos", n.photos).putBoolean("tables", n.tables).putBoolean("ocr", n.ocr)
-            .putBoolean("capture", n.capture).putBoolean("inks", n.inks)
+            .putBoolean("capture", n.capture).putBoolean("inks", n.inks).putBoolean("consent", n.consent)
             .putLong("pages", n.pages).putLong("requests", n.requests).putLong("tokens", n.inputTokens).putString("lastError", n.lastError).apply()
         _settings.value = n
     }
@@ -74,10 +81,11 @@ class JevEnhancer(private val context: Context, private val keys: CloudKeyStore)
         prefs.getBoolean("enabled", false), prefs.getBoolean("photos", true), prefs.getBoolean("tables", true), prefs.getBoolean("ocr", false),
         prefs.getBoolean("capture", true), prefs.getBoolean("inks", true),
         prefs.getLong("pages", 0), prefs.getLong("requests", 0), prefs.getLong("tokens", 0), prefs.getString("lastError", null),
+        prefs.getBoolean("consent", false),
     )
 
     /** ¿Hay que preguntar algo a Jev? (interruptor + clave + red). */
-    fun active(): Boolean = _settings.value.enabled && hasKey() && CloudNetwork.isAvailable(context, unmeteredOnly = false)
+    fun active(): Boolean = _settings.value.on && hasKey() && CloudNetwork.isAvailable(context, unmeteredOnly = false)
 
     private fun client(): JevClient? {
         val key = keys.get(CloudKeyStore.JEV) ?: return null
@@ -98,7 +106,7 @@ class JevEnhancer(private val context: Context, private val keys: CloudKeyStore)
     }
 
     /** ¿Se pregunta sobre la foto al capturar? (interruptor general + subopción + clave). */
-    fun captureEnabled(): Boolean = _settings.value.let { it.enabled && it.capture } && hasKey()
+    fun captureEnabled(): Boolean = _settings.value.let { it.on && it.capture } && hasKey()
 
     /**
      * Tipo, carpeta, encuadre y calidad de la FOTO capturada [photo] (RGB/RGBA, sin recortar). Usa [cacheFile] si ya
@@ -124,7 +132,7 @@ class JevEnhancer(private val context: Context, private val keys: CloudKeyStore)
 
     /** Zona gris de los duplicados: probabilidad de que [a] y [b] sean la misma hoja, o null sin Jev. */
     fun samePage(a: Mat, b: Mat): Double? {
-        if (!_settings.value.enabled || !active()) return null
+        if (!_settings.value.on || !active()) return null
         val cli = client() ?: return null
         return try {
             val (p, tok) = JevDuplicates.samePage(a, b, cli)
@@ -144,7 +152,7 @@ class JevEnhancer(private val context: Context, private val keys: CloudKeyStore)
     fun pageHints(geo: Mat, cacheFile: File, photos: Boolean, tables: Boolean, inks: Boolean = false): JevPageResult? {
         val s = _settings.value
         val wantP = photos && s.photos; val wantT = tables && s.tables; val wantI = inks && s.inks
-        if (!s.enabled || !(wantP || wantT || wantI)) return null
+        if (!s.on || !(wantP || wantT || wantI)) return null
         JevPageResult.read(cacheFile)?.takeIf { it.covers(wantP, wantT, wantI) }?.let { return it }
         if (!active()) return null
         val cli = client() ?: return null
@@ -164,7 +172,7 @@ class JevEnhancer(private val context: Context, private val keys: CloudKeyStore)
     /** OCR dudoso verificado con Jev sobre [image] (la página que leyó el OCR). Si no aplica o falla, [res] tal cual. */
     fun fixOcr(res: OcrResult, image: Mat, suggest: (String) -> List<String>): OcrResult {
         val s = _settings.value
-        if (!s.enabled || !s.ocr || (res.doubtful.isEmpty() && res.blocks.none { b -> b.lines.any { l -> l.words.any { it.isDoubtful } } })) return res
+        if (!s.on || !s.ocr || (res.doubtful.isEmpty() && res.blocks.none { b -> b.lines.any { l -> l.words.any { it.isDoubtful } } })) return res
         if (!active()) return res
         val cli = client() ?: return res
         return try {

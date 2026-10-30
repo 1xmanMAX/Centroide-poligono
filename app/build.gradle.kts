@@ -113,7 +113,7 @@ android {
 
 // Release sin keystore de subida: falla ANTES de empaquetar, con instrucciones (nunca se firma con la clave de debug).
 tasks.matching { t ->
-    t.name.endsWith("Release") && listOf("bundle", "assemble", "package", "sign", "install").any { t.name.startsWith(it) }
+    t.name.endsWith("Release") && listOf("pre", "bundle", "assemble", "package", "sign", "install").any { t.name.startsWith(it) }
 }.configureEach {
     doFirst {
         if (uploadSigningMissing.isNotEmpty()) throw GradleException(

@@ -25,10 +25,12 @@
 }
 -keep,includedescriptorclasses class com.scannerpromax.**$$serializer { *; }
 -dontnote kotlinx.serialization.**
-# Release: quitar los logs verbose/debug (menos trabajo y menos cadenas en el hilo principal).
+# Release: quitar los logs verbose/debug/info (menos trabajo, menos cadenas y nada de detalles internos en logcat).
+# Solo quedan w/e, que nunca llevan claves, texto reconocido ni imágenes.
 -assumenosideeffects class android.util.Log {
     public static int v(...);
     public static int d(...);
+    public static int i(...);
 }
 
 # ONNX Runtime (maquetación de páginas): el código nativo busca por nombre las clases Java (OnnxTensor, OrtSession$Result,

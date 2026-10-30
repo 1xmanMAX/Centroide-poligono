@@ -998,7 +998,7 @@ class DocumentRepository(
 
     /** Zona gris: ¿la misma hoja según Jev? (false sin Jev o si falla). */
     private suspend fun grayDuplicate(docId: String, a: Page, b: Page): Boolean {
-        val j = jev?.takeIf { it.settings.value.enabled && it.hasKey() } ?: return false
+        val j = jev?.takeIf { it.settings.value.on && it.hasKey() } ?: return false
         val fa = processedFileIfReady(docId, a) ?: return false
         val fb = processedFileIfReady(docId, b) ?: return false
         return withContext(Dispatchers.Default) {
@@ -1160,7 +1160,7 @@ class DocumentRepository(
      * null = sin Jev (apagado, sin clave o filtro sin uso): render de siempre.
      */
     private fun jevHook(dir: File, pageId: String, edits: PageEdits): ((org.opencv.core.Mat) -> JevRenderHints?)? {
-        val j = jev?.takeIf { it.settings.value.enabled && it.hasKey() } ?: return null
+        val j = jev?.takeIf { it.settings.value.on && it.hasKey() } ?: return null
         val wantPhotos = edits.filter == FilterType.NATURAL
         val wantTables = edits.keepRuling && edits.filter.uiFilter != FilterType.ORIGINAL
         // firmas y sellos con su color: solo en "Color natural"
@@ -1443,7 +1443,7 @@ class DocumentRepository(
             val r0 = if (geo != null) ocr().recognize(bmp, geo.second.first, geo.second.second, partial)
             else ocr().recognize(bmp, edits.filter, lightweight, partial)
             // "Mejorar con Jev" › OCR: palabras/líneas dudosas verificadas con el recorte (si falla, r0 tal cual)
-            jev?.takeIf { it.settings.value.let { s -> s.enabled && s.ocr } }?.let { j ->
+            jev?.takeIf { it.settings.value.let { s -> s.on && s.ocr } }?.let { j ->
                 withContext(Dispatchers.IO) {
                     runCatching {
                         val m = com.scannerpromax.imaging.Cv.toRgba(bmp)

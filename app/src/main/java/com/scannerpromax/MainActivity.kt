@@ -102,7 +102,7 @@ class MainActivity : ComponentActivity() {
             Intent.ACTION_SEND -> listOfNotNull(intent.streamExtra()).ifEmpty { listOfNotNull(intent.data) }
             Intent.ACTION_SEND_MULTIPLE -> intent.streamListExtra()
             else -> emptyList()
-        }
+        }.filter(::isSafeIncomingUri)
         if (uris.isEmpty()) return
         // Muchos gestores de archivos lanzan VIEW solo con data (sin MIME): se resuelve con el ContentResolver.
         val types = uris.map { u -> (intent.type?.takeIf { it != "*/*" } ?: runCatching { contentResolver.getType(u) }.getOrNull()).orEmpty().lowercase() }
@@ -118,6 +118,17 @@ class MainActivity : ComponentActivity() {
         }
         // Intent consumido: no volver a procesarlo.
         setIntent(Intent(this, MainActivity::class.java))
+    }
+
+    /**
+     * Actividad exportada: solo se aceptan Uris content:// de OTRAS apps. Un file:// (o un Uri de nuestro propio
+     * FileProvider) permitiría a una app maliciosa hacernos leer/importar archivos privados de la app (claves cifradas,
+     * documentos). Ver también integration/ScanRequest.outputUriProblem para ScanForResultActivity.
+     */
+    private fun isSafeIncomingUri(u: Uri): Boolean {
+        if (!u.scheme.equals("content", ignoreCase = true)) return false
+        val auth = u.authority?.lowercase() ?: return false
+        return !(auth == packageName || auth.startsWith("$packageName."))
     }
 
     private fun Intent.streamExtra(): Uri? = if (Build.VERSION.SDK_INT >= 33) {

@@ -41,7 +41,9 @@ import com.scannerpromax.ai.cloud.CloudException
 import com.scannerpromax.ai.jev.JevEnhancer
 import com.scannerpromax.ai.jev.JevSettings
 import com.scannerpromax.di.AppContainer
+import com.scannerpromax.ui.components.AlertAction
 import com.scannerpromax.ui.components.AppIcons
+import com.scannerpromax.ui.components.IosAlert
 import com.scannerpromax.ui.components.IconTile
 import com.scannerpromax.ui.components.InsetGroup
 import com.scannerpromax.ui.components.IosTextField
@@ -67,6 +69,7 @@ fun JevSettingsGroup(container: AppContainer) {
     val masked = remember(keyVersion) { jev.maskedKey() }
     var testing by remember { mutableStateOf(false) }
     var testResult by remember { mutableStateOf<String?>(null) }
+    var askConsent by remember { mutableStateOf(false) }
     JevCard(
         settings = s,
         savedMasked = masked,
@@ -94,8 +97,24 @@ fun JevSettingsGroup(container: AppContainer) {
                 testing = false
             }
         },
-        onChange = { f -> jev.update(f) },
+        onChange = { f ->
+            // Divulgación destacada: activar por primera vez exige aceptar el aviso (qué se envía y a quién).
+            val next = f(s)
+            if (next.enabled && !s.enabled && !s.consent) askConsent = true else jev.update(f)
+        },
     )
+    if (askConsent) {
+        IosAlert(
+            title = "Enviar imágenes a TypeSafe (Jev)",
+            icon = AppIcons.Cloud,
+            message = JEV_CONSENT_TEXT,
+            onDismiss = { askConsent = false },
+            actions = listOf(
+                AlertAction("No, gracias") { },
+                AlertAction("Acepto", bold = true) { jev.update { it.copy(enabled = true, consent = true) } },
+            ),
+        )
+    }
 }
 
 @Composable
@@ -180,12 +199,12 @@ internal fun JevCard(
             ToggleRow(
                 title = "Mejorar con Jev",
                 subtitle = if (hasKey) "Las páginas nuevas o reprocesadas." else "Guarda antes una clave.",
-                checked = settings.enabled && hasKey,
+                checked = settings.on && hasKey,
                 enabled = hasKey,
                 onCheckedChange = { v -> onChange { it.copy(enabled = v) } },
             )
         }
-        if (settings.enabled && hasKey) {
+        if (settings.on && hasKey) {
             item { ToggleRow(title = "Al escanear", subtitle = "Tipo de documento, carpeta, recorte y avisos de calidad.", checked = settings.capture, onCheckedChange = { v -> onChange { it.copy(capture = v) } }) }
             item { ToggleRow(title = "Fotos", subtitle = "Rectángulos precisos para el filtro de foto (Color natural).", checked = settings.photos, onCheckedChange = { v -> onChange { it.copy(photos = v) } }) }
             item { ToggleRow(title = "Tablas", subtitle = "Líneas reconstruidas dentro de la tabla, también donde la luz las borró.", checked = settings.tables, onCheckedChange = { v -> onChange { it.copy(tables = v) } }) }
@@ -202,6 +221,17 @@ internal fun JevCard(
         }
     }
 }
+
+/** Aviso de la divulgación destacada de Jev (Google Play: datos personales/sensibles a terceros). */
+internal const val JEV_CONSENT_TEXT =
+    "Si activas «Mejorar con Jev», la app enviará a TypeSafe, Inc. (servicio Jev, servidores en EE. UU.), con TU " +
+        "clave de API:\n" +
+        "• una copia reducida de cada foto al escanear o importar (≈ 1024 px),\n" +
+        "• una copia reducida de cada página procesada (≈ 1568 px),\n" +
+        "• si activas «Texto dudoso», recortes de las palabras que la app no pudo leer bien.\n\n" +
+        "Esas imágenes pueden contener datos personales que aparezcan en tus documentos. Las trata TypeSafe según su " +
+        "política de privacidad; el desarrollador de la app no las recibe ni las guarda. El coste lo cobra TypeSafe a tu " +
+        "cuenta. Puedes desactivarlo cuando quieras en este mismo ajuste.\n\n¿Aceptas?"
 
 private fun usdJev(v: Double): String = when {
     v == 0.0 -> "0 $"
