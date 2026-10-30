@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -5,14 +7,36 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Firma de SUBIDA para Google Play (Play App Signing re-firma con la clave de la app). Nada de esto va en el repo:
+// se lee de keystore.properties o local.properties (ambos en .gitignore) o de variables de entorno, en este orden.
+//   UPLOAD_STORE_FILE=/ruta/fuera/del/repo/upload-keystore.jks
+//   UPLOAD_STORE_PASSWORD=...   UPLOAD_KEY_ALIAS=upload   UPLOAD_KEY_PASSWORD=...
+// Sin estas claves la release NO se firma con la clave de debug: las tareas de release fallan con un mensaje claro.
+// ---------------------------------------------------------------------------------------------------------------
+val uploadSigning: Map<String, String?> = run {
+    val props = Properties()
+    listOf("keystore.properties", "local.properties").map { rootProject.file(it) }.filter { it.isFile }
+        .reversed() // keystore.properties manda sobre local.properties
+        .forEach { f -> f.inputStream().use { props.load(it) } }
+    listOf("UPLOAD_STORE_FILE", "UPLOAD_STORE_PASSWORD", "UPLOAD_KEY_ALIAS", "UPLOAD_KEY_PASSWORD").associateWith { k ->
+        (props.getProperty(k) ?: System.getenv(k))?.trim()?.takeIf { it.isNotEmpty() }
+    }
+}
+val uploadSigningMissing: List<String> = buildList {
+    uploadSigning.filterValues { it == null }.keys.forEach { add(it) }
+    uploadSigning["UPLOAD_STORE_FILE"]?.let { if (!file(it).isFile) add("UPLOAD_STORE_FILE (no existe: $it)") }
+}
+
 android {
     namespace = "com.scannerpromax"
-    compileSdk = 35
+    // Google Play exige targetSdk 36 (Android 16) a apps nuevas y actualizaciones desde el 31-08-2026.
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.scannerpromax"
         minSdk = 24
-        targetSdk = 35
+        targetSdk = 36
         versionCode = 1
         versionName = "1.0.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -35,13 +59,28 @@ android {
         }
     }
 
+    signingConfigs {
+        if (uploadSigningMissing.isEmpty()) {
+            create("release") {
+                storeFile = file(uploadSigning.getValue("UPLOAD_STORE_FILE")!!)
+                storePassword = uploadSigning["UPLOAD_STORE_PASSWORD"]
+                keyAlias = uploadSigning["UPLOAD_KEY_ALIAS"]
+                keyPassword = uploadSigning["UPLOAD_KEY_PASSWORD"]
+                enableV1Signing = true
+                enableV2Signing = true
+            }
+        }
+    }
+
     buildTypes {
         release {
+            isDebuggable = false
             // R8 completo (modo full por defecto en AGP 8) + recorte de recursos.
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("debug")
+            // NUNCA la clave de debug: sin keystore de subida la release queda sin firmar y las tareas fallan (abajo).
+            signingConfig = signingConfigs.findByName("release")
         }
     }
     compileOptions {
@@ -66,12 +105,23 @@ android {
             pickFirsts += setOf("**/libc++_shared.so")
             // Sin x86 de 32 bits (como los splits): ONNX Runtime y OpenCV lo traen y engordaría el APK universal.
             excludes += setOf("lib/x86/**")
-            // ONNX Runtime nativo (libonnxruntime.so: 12,9 MB comprimido en arm64) FUERA del APK: se descarga con
-            // el lector Indra / la "Maquetación de páginas" (ai/ModelCatalog.ORT_NATIVE, misma versión) y se precarga con System.load
-            // (ai/parts/OrtNative). El puente JNI libonnxruntime4j_jni.so (~36 KB) SE QUEDA: en Android ORT lo carga
-            // con System.loadLibrary, que solo busca en las librerías del APK (ignora onnxruntime.native.path).
-            excludes += setOf("lib/*/libonnxruntime.so")
+            // ONNX Runtime nativo (libonnxruntime.so) VA DENTRO del AAB/APK: la política de Google Play prohíbe
+            // descargar código ejecutable (.so/.dex/.jar). Con AAB cada teléfono recibe solo su ABI (~13 MB).
         }
+    }
+}
+
+// Release sin keystore de subida: falla ANTES de empaquetar, con instrucciones (nunca se firma con la clave de debug).
+tasks.matching { t ->
+    t.name.endsWith("Release") && listOf("bundle", "assemble", "package", "sign", "install").any { t.name.startsWith(it) }
+}.configureEach {
+    doFirst {
+        if (uploadSigningMissing.isNotEmpty()) throw GradleException(
+            "Release sin firma de subida. Faltan: ${uploadSigningMissing.joinToString()}.\n" +
+                "Defínelas en keystore.properties o local.properties (fuera del repo, en .gitignore) o como variables de " +
+                "entorno: UPLOAD_STORE_FILE, UPLOAD_STORE_PASSWORD, UPLOAD_KEY_ALIAS, UPLOAD_KEY_PASSWORD. " +
+                "La release nunca se firma con la clave de debug."
+        )
     }
 }
 

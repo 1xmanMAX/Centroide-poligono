@@ -58,10 +58,8 @@ class IndraEngine(
         ocr?.let { return it }
         if (!isReady()) return null
         val model = ModelCatalog.FAST_READER
-        // ONNX Runtime nativo: el del propio modelo (o el de la Maquetación, si se cargó antes en este proceso).
-        if (!OrtNative.ensureLoaded(models.storage.nativeLibDir(model)) &&
-            !OrtNative.ensureLoaded(models.storage.nativeLibDir(ModelCatalog.PAGE_LAYOUT))
-        ) {
+        // ONNX Runtime nativo incluido en la app (nunca se descarga).
+        if (!OrtNative.ensureLoaded()) {
             Log.w(TAG, "ONNX Runtime no disponible: ${OrtNative.lastError}")
             return null
         }

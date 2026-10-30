@@ -34,43 +34,28 @@ class ModelCatalogTest {
         assertTrue(m.totalDownloadBytes in 130_000_000L..140_000_000L)
     }
 
-    @Test fun onnxRuntimeNativoSeBajaConLaMaquetacion() {
-        val n = ModelCatalog.PAGE_LAYOUT.nativeLibs!!
-        // Los dos modelos ONNX (Maquetación e Indra) la traen, y la comparten (se copia si ya está).
-        assertTrue(ModelCatalog.all.filter { it !== ModelCatalog.PAGE_LAYOUT && it !== ModelCatalog.FAST_READER }.all { it.nativeLibs == null })
-        assertTrue(ModelCatalog.FAST_READER.nativeLibs === n)
-        assertEquals(
-            "https://repo1.maven.org/maven2/com/microsoft/onnxruntime/onnxruntime-android/${n.version}/onnxruntime-android-${n.version}.aar",
-            n.url,
-        )
-        // Las ABIs que empaqueta la app (splits): sin x86 de 32 bits.
-        assertEquals(setOf("arm64-v8a", "armeabi-v7a", "x86_64"), n.abis.toSet())
-        for (l in n.libs) {
-            assertEquals("libonnxruntime.so", l.fileName)
-            assertEquals("jni/${l.abi}/libonnxruntime.so", l.entryName)
-            assertTrue(l.sha256.matches(Regex("[0-9a-f]{64}")))
-            assertTrue(l.compressedBytes in 10_000_000L until l.sizeBytes)
+    /**
+     * Política de Google Play («Device and Network Abuse»): nada de código ejecutable descargado. Los modelos solo
+     * traen datos (ONNX / tablas) de Hugging Face y libonnxruntime.so va DENTRO del AAB (no excluida del empaquetado).
+     */
+    @Test fun soloSeDescarganDatosNuncaCodigo() {
+        val exec = Regex("""\.(so|dex|jar|apk|aab|zip|aar)$""", RegexOption.IGNORE_CASE)
+        for (m in ModelCatalog.all) for (f in m.files) {
+            assertTrue(f.fileName, !exec.containsMatchIn(f.fileName))
+            assertTrue(f.url, f.url.startsWith("https://huggingface.co/"))
         }
-        assertTrue(n.archiveSha256.matches(Regex("[0-9a-f]{64}")))
-        // Con la ABI conocida, la descarga incluye la .so comprimida de esa ABI (~13 MB en arm64).
-        assertEquals(130_502_049L + 6_788_069L + 12_887_720L, ModelCatalog.PAGE_LAYOUT.downloadBytes("arm64-v8a"))
-        assertEquals(130_502_049L + 6_788_069L, ModelCatalog.PAGE_LAYOUT.downloadBytes(null))
-    }
-
-    /** La .so descargada DEBE ser de la misma versión que la API Java/JNI de ORT empaquetada (dependencia Gradle). */
-    @Test fun versionDeOrtIgualQueLaDependencia() {
         val gradle = listOf(File("build.gradle.kts"), File("app/build.gradle.kts")).first { it.isFile }.readText()
+        assertTrue("libonnxruntime.so debe ir en el AAB/APK", !gradle.contains("\"lib/*/libonnxruntime.so\""))
         val dep = Regex("""implementation\("com\.microsoft\.onnxruntime:onnxruntime-android:([^"]+)"\)""").find(gradle)!!.groupValues[1]
         assertEquals(dep, ModelCatalog.ORT_VERSION)
-        assertEquals(dep, ModelCatalog.ORT_NATIVE.version)
-        assertTrue("libonnxruntime.so debe quedar fuera del APK", gradle.contains("\"lib/*/libonnxruntime.so\""))
+        assertEquals(130_502_049L + 6_788_069L, ModelCatalog.PAGE_LAYOUT.totalDownloadBytes)
     }
 
     @Test fun lectorRapidoIndraSoloLatin() {
         val m = ModelCatalog.FAST_READER
         assertEquals(com.scannerpromax.ocr.indra.IndraOcr.FILES.toSet(), m.files.map { it.fileName }.toSet())
-        // ~25 MB (sin CJK/RTL/world ni matemáticas) + ORT
-        assertEquals(24_684_875L, m.downloadBytes(null))
+        // ~25 MB (sin CJK/RTL/world ni matemáticas); ORT va en la app
+        assertEquals(24_684_875L, m.totalDownloadBytes)
         for (f in m.files) assertTrue(f.url, f.url.contains("/datalab-to/indra-ocr/resolve/${ModelCatalog.INDRA_REVISION}/"))
     }
 

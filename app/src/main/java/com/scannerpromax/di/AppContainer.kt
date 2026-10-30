@@ -61,19 +61,8 @@ class AppContainer(context: Context) {
     /** El árbitro neuronal solo si ya existe (para liberar memoria sin crearlo). */
     fun neuralCornersIfCreated(): com.scannerpromax.imaging.NeuralCorners? = if (neuralCornersLazy.isInitialized()) neuralCorners else null
 
-    /**
-     * ONNX Runtime nativo ya cargado, o cargable AHORA desde una descarga completa (Indra o maquetación). Nunca descarga:
-     * sin la .so el árbitro neuronal simplemente no actúa.
-     */
-    private fun ortAvailableNow(): Boolean {
-        val ort = com.scannerpromax.ai.parts.OrtNative
-        if (ort.isLoaded) return true
-        for (m in listOf(com.scannerpromax.ai.ModelCatalog.FAST_READER, com.scannerpromax.ai.ModelCatalog.PAGE_LAYOUT)) {
-            val dir = models.storage.nativeLibDir(m)
-            if (models.isReady(m) && java.io.File(dir, ort.LIB_FILE).isFile && ort.ensureLoaded(dir)) return true
-        }
-        return false
-    }
+    /** ONNX Runtime (incluido en la app) arrancado o arrancable ahora. */
+    private fun ortAvailableNow(): Boolean = com.scannerpromax.ai.parts.OrtNative.ensureLoaded()
 
     /** Modelo de orientación (doc_ori) para la tubería normal: se carga al primer uso y sólo si está descargado. */
     private val orientationEngine by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {

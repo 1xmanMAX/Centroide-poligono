@@ -51,7 +51,6 @@ class ModelManager(context: Context) {
     val storage = ModelStorage(File(appContext.filesDir, "models"))
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val downloader = ResumableDownloader()
-    private val zipFetcher = ZipEntryFetcher()
 
     /** Estado transitorio publicado por el worker en curso (mismo proceso). */
     private val live = ConcurrentHashMap<String, ModelState>()
@@ -62,7 +61,8 @@ class ModelManager(context: Context) {
     val states: StateFlow<Map<String, ModelState>> = _states.asStateFlow()
 
     init {
-        scope.launch { refresh() }
+        // Restos de versiones anteriores que descargaban libonnxruntime.so: se borran (ya va en la app).
+        scope.launch(Dispatchers.IO) { runCatching { storage.purgeLegacyNativeLibs() }; refresh() }
         scope.launch {
             runCatching {
                 WorkManager.getInstance(appContext).getWorkInfosByTagFlow(WORK_TAG)
@@ -112,10 +112,10 @@ class ModelManager(context: Context) {
 
     private fun readyState(m: AiModel) = ModelState.Ready(
         storage.diskUsage(m),
-        warning = if (m.nativeLibs != null) com.scannerpromax.ai.parts.OrtNative.lastError else null,
+        warning = com.scannerpromax.ai.parts.OrtNative.lastError,
     )
 
-    /** Bytes a bajar de [model] en este teléfono (incluye las librerías nativas de su ABI). */
+    /** Bytes a bajar de [model] (solo datos: pesos y tablas). */
     fun downloadSize(model: AiModel): Long = storage.totalBytes(model)
 
     private fun publishLive(id: String, s: ModelState?) {
@@ -131,9 +131,6 @@ class ModelManager(context: Context) {
      * (p. ej. sin espacio), o null si quedó en cola.
      */
     fun enqueueDownload(model: AiModel, wifiOnly: Boolean): String? {
-        if (storage.nativeLibs(model) == null) {
-            return "Tu procesador (${storage.abi ?: "desconocido"}) no es compatible con ${model.name}"
-        }
         val need = requiredFreeBytes(model)
         val free = freeBytes()
         if (need > free) return "Espacio insuficiente: hacen falta ${formatBytes(need)} y hay ${formatBytes(free)} libres"
@@ -229,76 +226,8 @@ class ModelManager(context: Context) {
                     throw ModelDownloadException("Fallo de red al descargar ${f.fileName}: ${e.message ?: e.javaClass.simpleName}", e)
                 }
             }
-            downloadNativeLibs(model, total, isCancelled, onProgress)
         } finally {
             publishLive(model.id, null)
-        }
-    }
-
-    /**
-     * Librerías nativas del modelo (ONNX Runtime de la maquetación): de [AiModel.nativeLibs] solo las de la ABI de este
-     * proceso, extraídas del AAR remoto por rango (sin bajar el AAR entero) a `<id>/lib/<abi>/` y verificadas.
-     */
-    private fun downloadNativeLibs(
-        model: AiModel,
-        total: Long,
-        isCancelled: () -> Boolean,
-        onProgress: (Long, Long, String) -> Unit,
-    ) {
-        val pkg = model.nativeLibs ?: return
-        val libs = storage.nativeLibs(model)
-            ?: throw ModelDownloadException("Tu procesador (${storage.abi ?: "desconocido"}) no es compatible con ${model.name}")
-        val source = zipFetcher.http(pkg.url)
-        for (lib in libs) {
-            if (storage.isNativeLibComplete(model, lib)) continue
-            // Ya bajada por otro modelo (Maquetación ↔ Indra): copia local verificada en vez de 13 MB de red.
-            if (copySharedNativeLib(model, lib)) continue
-            val before = total - libs.filterNot { storage.isNativeLibComplete(model, it) }.sumOf { it.compressedBytes }
-            try {
-                zipFetcher.fetch(
-                    source = source,
-                    entryName = lib.entryName,
-                    dest = storage.nativeLibFile(model, lib),
-                    expectedSize = lib.sizeBytes,
-                    sha256 = lib.sha256,
-                    isCancelled = isCancelled,
-                ) { done, _ ->
-                    val overall = before + done
-                    publishLive(model.id, ModelState.Downloading(overall, total, 0, "ONNX Runtime ${pkg.version} (${lib.abi})"))
-                    onProgress(overall, total, "Descargando motor ONNX Runtime")
-                }
-            } catch (e: ResumableDownloader.CancelledException) {
-                throw e
-            } catch (e: ResumableDownloader.VerificationException) {
-                throw ModelDownloadException("Verificación fallida de ${lib.fileName}: ${e.message}", e)
-            } catch (e: java.io.IOException) {
-                throw ModelDownloadException("Fallo de red al descargar ${lib.fileName}: ${e.message ?: e.javaClass.simpleName}", e)
-            }
-        }
-        com.scannerpromax.ai.parts.OrtNative.resetError()
-    }
-
-    private fun copySharedNativeLib(model: AiModel, lib: NativeLib): Boolean {
-        val src = storage.sharedNativeLib(model, lib) ?: return false
-        val dest = storage.nativeLibFile(model, lib)
-        val tmp = File(dest.parentFile, dest.name + ".copy")
-        return try {
-            dest.parentFile?.mkdirs()
-            val md = java.security.MessageDigest.getInstance("SHA-256")
-            src.inputStream().use { inp ->
-                tmp.outputStream().use { out ->
-                    val buf = ByteArray(1 shl 16)
-                    while (true) {
-                        val n = inp.read(buf)
-                        if (n < 0) break
-                        md.update(buf, 0, n); out.write(buf, 0, n)
-                    }
-                }
-            }
-            val sha = md.digest().joinToString("") { "%02x".format(it) }
-            if (sha != lib.sha256 || tmp.length() != lib.sizeBytes || !tmp.renameTo(dest)) { tmp.delete(); false } else true
-        } catch (e: java.io.IOException) {
-            Log.w(TAG, "copia de ${lib.fileName}", e); tmp.delete(); false
         }
     }
 
@@ -306,8 +235,7 @@ class ModelManager(context: Context) {
 
     fun requiredFreeBytes(model: AiModel): Long {
         val remaining = storage.remainingBytes(model)
-        // Librerías nativas: se guardan comprimidas (.zpart) y además descomprimidas.
-        return remaining + storage.nativeUnpackedRemaining(model) + SAFETY_MARGIN_BYTES
+        return remaining + SAFETY_MARGIN_BYTES
     }
 
     fun freeBytes(): Long = runCatching {

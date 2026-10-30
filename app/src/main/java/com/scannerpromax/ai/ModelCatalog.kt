@@ -11,34 +11,8 @@ package com.scannerpromax.ai
 object ModelCatalog {
 
     /**
-     * ONNX Runtime nativo (libonnxruntime.so, ~13 MB comprimido por ABI) FUERA del APK: se baja con la maquetación
-     * desde el AAR oficial de Maven Central, solo la entrada de la ABI del proceso (petición HTTP Range sobre el ZIP,
-     * ~12–15 MB en vez de los 55 MB del AAR). La API Java de ORT y su puente JNI pequeño (libonnxruntime4j_jni.so,
-     * ~36 KB) siguen en el APK: en Android OnnxRuntime.init() hace System.loadLibrary("onnxruntime4j_jni") e ignora
-     * "onnxruntime.native.path"; precargando antes libonnxruntime.so con System.load el enlazador resuelve la
-     * dependencia por su soname (ver parts/OrtNative). La versión DEBE coincidir con la dependencia de Gradle
-     * (onnxruntime-android) — lo comprueba ModelCatalogTest. Tamaños/sha256 verificados con curl el 2026-10-15
-     * (AAR: 55 138 854 B, sha256 72683787…40a7, sha1 09e43472…091e = .sha1 de Maven Central).
-     */
-    val ORT_NATIVE = NativeLibs(
-        version = ORT_VERSION,
-        url = "https://repo1.maven.org/maven2/com/microsoft/onnxruntime/onnxruntime-android/$ORT_VERSION/" +
-            "onnxruntime-android-$ORT_VERSION.aar",
-        archiveSize = 55_138_854L,
-        archiveSha256 = "72683787a80d0608a3121b967d8e1239aef48286826661c953211626690540a7",
-        libs = listOf(
-            NativeLib("arm64-v8a", "libonnxruntime.so", 34_208_680L, 12_887_720L,
-                "8005a741e57117b4d7b476417706c0e9af13cf1b89db47e60f0cbc56e1af91e0"),
-            NativeLib("armeabi-v7a", "libonnxruntime.so", 24_182_012L, 11_639_973L,
-                "2a63f9a56b211511209dbf4b5bc143f18d0b365977dd7a0afd57d95c85479af6"),
-            NativeLib("x86_64", "libonnxruntime.so", 40_827_944L, 14_993_057L,
-                "068896846a7fe679cf780c1c532745286d9ef2e469f3dbde5bb9cf2c02095b18"),
-        ),
-    )
-
-    /**
      * Maquetación de páginas: PP-DocLayoutV3 (detector RT-DETR con orden de lectura, Apache 2.0) + PP-LCNet doc_ori
-     * (orientación). No es un modelo de lenguaje: se ejecuta con ONNX Runtime (su librería nativa se baja con el modelo: [ORT_NATIVE]) / OpenCV DNN en
+     * (orientación). No es un modelo de lenguaje: se ejecuta con ONNX Runtime (motor incluido en la app; la librería nativa va en el AAB/APK, nunca se descarga) / OpenCV DNN en
      * ~1–3 s por página. Banco recon2: bloques DocLayNet recall 0,72 frente a 0,34 de la maquetación clásica; páginas
      * giradas 94/96. Variante fp32 oficial (la int8 total pierde 7 puntos de recall y la int8-MatMul no está publicada).
      */
@@ -51,7 +25,7 @@ object ModelCatalog {
             "cabeceras y pies con su orden de lectura, y endereza las páginas giradas. Mejora el PDF reconstruido " +
             "(texto de Indra colocado región a región).",
         description = "Detector de maquetación de documentos (no lee texto): cada región va a la herramienta adecuada. " +
-            "Incluye el motor ONNX Runtime para tu procesador (~13 MB).",
+            "Solo se descargan los pesos (datos); el motor ONNX Runtime ya va incluido en la app.",
         role = ModelRole.PAGE_LAYOUT,
         files = listOf(
             ModelFile(
@@ -71,15 +45,14 @@ object ModelCatalog {
         ),
         recommendedRamMb = 3072,
         minRamMb = 2048,
-        nativeLibs = ORT_NATIVE,
     )
 
     /**
      * Lector de texto (ÚNICO OCR de la app): Indra OCR de Datalab (github.com/datalab-to/indra, pesos v1.1.0 en datalab-to/indra-ocr), solo lo
      * necesario para latín (incluye manuscrito latino): detector de líneas, reconocedor CTC, orden de lectura +
      * bloques de maquetación, orientación y modelo de lenguaje n-grama para las líneas dudosas (≈25 MB; el paquete
-     * completo son 76 MB con CJK/RTL/índicas). Se ejecuta con ONNX Runtime ([ORT_NATIVE], compartido con la
-     * Maquetación: si ya está, no se baja otra vez). Banco (notes_indra.md, 54 imágenes): CER 27,7 / %palabras 76,2
+     * completo son 76 MB con CJK/RTL/índicas). Se ejecuta con ONNX Runtime (incluido en la app; solo se
+     * descargan los pesos). Banco (notes_indra.md, 54 imágenes): CER 27,7 / %palabras 76,2
      * frente a 53,8 / 46,5 de Tesseract (≈ ML Kit, el OCR anterior), a ~0,4 s por página en el PC. Se descarga sola en
      * el primer arranque (ocr/indra/IndraProvisioner).
      * LICENCIA de los pesos: OpenRAIL-M modificada (gratis para uso personal/investigación/empresas < 20 M$ y sin
@@ -94,7 +67,7 @@ object ModelCatalog {
         purpose = "El lector de texto de la app: reconoce texto impreso (y manuscrito sencillo) en ~1 s por página, con " +
             "líneas, palabras, orden de lectura y bloques. Hace posible el Texto en vivo, la búsqueda y el PDF buscable.",
         description = "OCR ligero en el procesador (sin GPU): detector de líneas, reconocedor y orden de lectura de " +
-            "Datalab. Incluye el motor ONNX Runtime (~13 MB).",
+            "Datalab. Solo se descargan los pesos; el motor ONNX Runtime va incluido en la app.",
         role = ModelRole.FAST_READER,
         files = listOf(
             indra("det.onnx", 389_948L, "f2bd4cba23e9c328cf7ec824634e423e191a2c6aacbbf35c62bd79dd70f62f59"),
@@ -106,7 +79,6 @@ object ModelCatalog {
         ),
         recommendedRamMb = 2048,
         minRamMb = 1024,
-        nativeLibs = ORT_NATIVE,
     )
 
     /** Commit de la etiqueta v1.1.0 de datalab-to/indra-ocr (los archivos de una etiqueta no cambian). */
@@ -150,32 +122,6 @@ data class ModelFile(
     val sha256: String? = null,
 )
 
-/**
- * Librerías nativas dentro de un ZIP/AAR remoto ([url]): cada una es la entrada `jni/<abi>/<fileName>` y se guarda en
- * `<modelo>/lib/<abi>/<fileName>`. [NativeLib.sizeBytes]/[NativeLib.sha256] = archivo descomprimido;
- * [NativeLib.compressedBytes] = lo que se baja.
- */
-data class NativeLibs(
-    val version: String,
-    val url: String,
-    val archiveSize: Long,
-    val archiveSha256: String,
-    val libs: List<NativeLib>,
-) {
-    fun forAbi(abi: String?): List<NativeLib>? = libs.filter { it.abi == abi }.takeIf { it.isNotEmpty() }
-    val abis: List<String> get() = libs.map { it.abi }.distinct()
-}
-
-data class NativeLib(
-    val abi: String,
-    val fileName: String,
-    val sizeBytes: Long,
-    val compressedBytes: Long,
-    val sha256: String,
-) {
-    val entryName: String get() = "jni/$abi/$fileName"
-}
-
 data class AiModel(
     val id: String,
     val name: String,
@@ -187,12 +133,10 @@ data class AiModel(
     val files: List<ModelFile>,
     val recommendedRamMb: Int,
     val minRamMb: Int,
-    /** Librerías nativas que se bajan con el modelo (solo las de la ABI del dispositivo), o null. */
-    val nativeLibs: NativeLibs? = null,
 ) {
-    /** Bytes a bajar en este dispositivo: archivos + librerías nativas comprimidas de su ABI ([NativeAbi.current]). */
-    val totalDownloadBytes: Long get() = downloadBytes(NativeAbi.current)
-
-    fun downloadBytes(abi: String?): Long =
-        files.sumOf { it.sizeBytes.coerceAtLeast(0) } + (nativeLibs?.forAbi(abi)?.sumOf { it.compressedBytes } ?: 0L)
+    /**
+     * Bytes a bajar: SOLO archivos de datos (pesos ONNX, tablas). Nunca código ejecutable: ONNX Runtime nativo va en el
+     * AAB/APK (política de Google Play sobre descarga de código).
+     */
+    val totalDownloadBytes: Long get() = files.sumOf { it.sizeBytes.coerceAtLeast(0) }
 }

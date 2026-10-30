@@ -9,3 +9,8 @@ build/
 .cxx
 .kotlin/
 .claude/worktrees/
+
+# Firma de subida de Google Play: NUNCA en el repo
+keystore.properties
+*.jks
+*.keystore

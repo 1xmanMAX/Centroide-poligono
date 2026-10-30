@@ -37,7 +37,7 @@ fun interface NeuralCornerSource {
  *     centroide ponderado de la componente conexa más grande (sin componentes: el máximo);
  *  4. puntuación = mínimo de los 4 picos (máximos de los mapas originales).
  *
- * ORT no va en el APK: la `.so` llega con la descarga de Indra. Mientras no esté ([ortReady] = false) devuelve null y
+ * ORT va en la app (AAB/APK). Si no arranca ([ortReady] = false) devuelve null y
  * el detector se comporta exactamente como sin la red. Sesión con 2 hilos, cargada al primer uso; [close] la libera
  * (poca memoria) y se recarga sola. Thread-safe (una inferencia a la vez).
  */

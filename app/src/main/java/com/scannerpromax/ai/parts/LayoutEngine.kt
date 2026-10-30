@@ -69,8 +69,8 @@ class LayoutEngine(private val models: ModelManager, private val threads: Int = 
     @Synchronized
     fun regions(img: Rgb): List<PpLayout.Region>? {
         val f = models.storage.readyFile(ModelCatalog.PAGE_LAYOUT, ModelCatalog.LAYOUT_FILE) ?: return null
-        // ONNX Runtime nativo descargado con el modelo: precargar ANTES de tocar ai.onnxruntime (ver OrtNative).
-        if (!OrtNative.ensureLoaded(models.storage.nativeLibDir(ModelCatalog.PAGE_LAYOUT))) {
+        // ONNX Runtime (incluido en la app): comprobar que arranca ANTES de tocar ai.onnxruntime (ver OrtNative).
+        if (!OrtNative.ensureLoaded()) {
             Log.w(TAG, "maquetación no disponible: ${OrtNative.lastError}")
             return null
         }
