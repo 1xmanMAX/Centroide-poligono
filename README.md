@@ -156,6 +156,7 @@ Desde adb: `adb shell am start -a com.scannerpromax.action.SCAN --es mode book -
 | PP-DocLayoutV3 + PP-LCNet doc_ori (PaddlePaddle, ONNX) | Maquetación por partes y orientación (opcional) | Apache-2.0 | Descarga opcional (137 MB) |
 | OpenCV 4.10 | Imagen | Apache-2.0 | En el APK |
 | PdfBox-Android | PDF | Apache-2.0 | En el APK |
+| pdfsqueeze (Max Antony, `1xmanMAX/Thesis`, Rust) | Motor principal de compresión de PDF (Comprimir PDF y «Optimizar tamaño» al exportar) | MIT (`assets/licenses/pdfsqueeze-LICENSE.txt`) | En el APK (`libpdfsqueeze.so`, ~1,6–2,6 MB por ABI). Submódulo `native/pdfsqueeze` + puente JNI propio `native/pdfsqueeze-ffi`; las `.so` las genera `native/build-android.sh` |
 | SDK de Anthropic para Java / OkHttp | IA en la nube (opcional, clave del usuario) | MIT / Apache-2.0 | En el APK |
 | FSRCNN (super-resolución) | Imagen | Apache-2.0 | En el APK (`assets/models/`) |
 | DocAligner lcnet100 (DocsaidLab / Ze Yuan, github.com/DocsaidLab/DocAligner, v1.1.1) | Encuadre IA (árbitro del recorte) | Apache-2.0 (aviso en `assets/models/README-DocAligner.txt`) | En el APK (`assets/models/docaligner_lcnet100.onnx`, 4,8 MB; usa el ONNX Runtime de Indra) |
@@ -165,8 +166,12 @@ Eliminados: ML Kit Text Recognition, PaddleOCR-VL-1.5 ("Lector de documentos"), 
 llama.cpp (submódulo `third_party/llama.cpp` y JNI `app/src/main/cpp`).
 
 ## Compilar
-Requisitos: JDK 17+, Android SDK 36 (compileSdk/targetSdk 36: Google Play lo exige desde el 31-08-2026; ya no hace
-falta el NDK ni CMake).
+Requisitos: JDK 17+, Android SDK 36 (compileSdk/targetSdk 36: Google Play lo exige desde el 31-08-2026).
+
+Motor pdfsqueeze (opcional para compilar; sin él la app usa el compresor clásico): `git submodule update --init
+native/pdfsqueeze`, Rust (`rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android`),
+`cargo install cargo-ndk` y el NDK (p. ej. 27.3). `preBuild` ejecuta `native/build-android.sh` si faltan las
+`libpdfsqueeze.so` (forzar: `./gradlew buildPdfsqueeze -PpdfsqueezeRebuild`).
 
 La release se firma con la **clave de subida de Google Play**, que NUNCA va en el repo. Defínela en
 `keystore.properties` (o `local.properties`; ambos en `.gitignore`) o como variables de entorno:

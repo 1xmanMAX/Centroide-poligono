@@ -80,7 +80,7 @@ fun binaryHintFor(filter: FilterType): Boolean = filter == FilterType.BLACK_WHIT
  *  - Fuente Liberation Sans (incluida en pdfbox-android) incrustada como subconjunto: soporte completo de
  *    español (á é í ó ú ñ ü ¿ ¡ €) tanto en la capa invisible como en el texto visible.
  */
-class PdfExporter(private val context: Context) {
+class PdfExporter(private val context: Context, private val squeeze: SqueezeEngine? = null) {
 
     /** Escribe el PDF en [output] (archivo). Devuelve el archivo. */
     suspend fun export(pages: List<PdfPageInput>, options: PdfOptions, output: File, progress: ProgressCallback? = null): File =
@@ -90,6 +90,9 @@ class PdfExporter(private val context: Context) {
             val tmp = File(output.parentFile, output.name + ".part")
             val doc = PDDocument(PdfSupport.tempMemorySetting(context))
             val mode = options.effectiveTextMode
+            // «Optimizar tamaño»: pdfsqueeze sobre el PDF ya generado; la contraseña se aplica DESPUÉS.
+            val optimize = options.optimizeSize && squeeze?.available == true
+            val buildShare = if (optimize) 0.85f else 1f
             try {
                 PdfSupport.applyMetadata(doc, output.nameWithoutExtension)
                 val fonts = Fonts(doc)
@@ -121,13 +124,13 @@ class PdfExporter(private val context: Context) {
                             }
                         }
                     }
-                    progress?.invoke((index + 1f) / (pages.size + 1f))
+                    progress?.invoke(buildShare * (index + 1f) / (pages.size + 1f))
                 }
                 for ((pageNo, ocr) in deferredText) {
                     currentCoroutineContext().ensureActive()
                     addTextPages(doc, titleFor(pageNo, pages.size), ocr, textPageSize(options, null), fonts)
                 }
-                options.password?.takeIf { it.isNotEmpty() }?.let { PdfSupport.protect(doc, it) }
+                if (!optimize) options.password?.takeIf { it.isNotEmpty() }?.let { PdfSupport.protect(doc, it) }
                 tmp.delete()
                 doc.save(tmp)
             } catch (t: Throwable) {
@@ -136,10 +139,64 @@ class PdfExporter(private val context: Context) {
             } finally {
                 doc.close()
             }
+            if (optimize) {
+                try {
+                    optimizeSize(tmp, options) { p -> progress?.invoke(0.85f + 0.14f * p) }
+                } catch (t: Throwable) {
+                    tmp.delete()
+                    throw t
+                }
+            }
             PdfSupport.moveReplacing(tmp, output)
             progress?.invoke(1f)
             output
         }
+
+    /**
+     * Pasa pdfsqueeze sobre [file] (en el sitio): conserva la resolución, SSIM ≥ 0,97, B/N a 1 bit sin pérdida
+     * (JBIG2/G4) y, con «Máxima (HD)», solo transformaciones sin pérdida. La capa OCR (texto invisible) no se toca:
+     * el motor verifica que el texto del resultado coincide. Si el motor falla, no cabe en memoria o no reduce, se
+     * queda el PDF tal cual. Al final se aplica la contraseña, si la hay.
+     */
+    private suspend fun optimizeSize(file: File, options: PdfOptions, progress: (Float) -> Unit) {
+        val engine = squeeze ?: return
+        val optimized = File(file.parentFile, file.name + ".sq")
+        try {
+            val analysis = try { engine.analyze(file) } catch (c: kotlinx.coroutines.CancellationException) { throw c } catch (_: Throwable) { null }
+            val probe = SqueezeProbe.of(analysis?.analysis?.takeIf { analysis.ok })
+            val threads = SqueezePlan.fitThreads(SqueezePlan.threadsFor(engine.tier), probe.maxImagePixels, file.length(), engine.availableMemory())
+            if (analysis?.ok == true && threads > 0) {
+                val env = try {
+                    engine.compress(file, optimized, SqueezePlan.forExport(options.quality), threads, progress)
+                } catch (c: kotlinx.coroutines.CancellationException) {
+                    throw c
+                } catch (t: Throwable) {
+                    Log.w(TAG, "pdfsqueeze falló al exportar", t)
+                    null
+                }
+                if (env?.ok == true && !env.returnedOriginal && optimized.isFile && optimized.length() in 1 until file.length()) {
+                    PdfSupport.moveReplacing(optimized, file)
+                } else if (env != null && !env.ok) {
+                    Log.w(TAG, "pdfsqueeze no optimizó la exportación: ${env.status} ${env.message}")
+                }
+            }
+            options.password?.takeIf { it.isNotEmpty() }?.let { pw ->
+                val protectedFile = File(file.parentFile, file.name + ".pw")
+                try {
+                    PDDocument.load(file, PdfSupport.tempMemorySetting(context)).use { d ->
+                        PdfSupport.protect(d, pw)
+                        d.save(protectedFile)
+                    }
+                    PdfSupport.moveReplacing(protectedFile, file)
+                } finally {
+                    protectedFile.delete()
+                }
+            }
+            progress(1f)
+        } finally {
+            optimized.delete()
+        }
+    }
 
     private val reconstructor by lazy { PdfReconstructor(context) }
 

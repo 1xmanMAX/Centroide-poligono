@@ -270,3 +270,29 @@ tasks.withType<Test>().configureEach {
 tasks.withType<Test>().configureEach {
     if (project.findProperty("screenshots") == null) exclude("**/screenshots/**")
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// pdfsqueeze (motor de compresión de PDF en Rust, MIT): las libpdfsqueeze.so NO se versionan. Si falta alguna,
+// preBuild ejecuta native/build-android.sh (submódulo native/pdfsqueeze + cargo-ndk). Si falta el submódulo o la
+// cadena de herramientas se avisa y la compilación sigue: la app carga la librería de forma perezosa y, sin ella,
+// usa el compresor de respaldo (LegacyPdfCompressor). Forzar recompilación: ./gradlew buildPdfsqueeze -PpdfsqueezeRebuild
+// ---------------------------------------------------------------------------------------------------------------
+val pdfsqueezeLibs = listOf("arm64-v8a", "armeabi-v7a", "x86_64").map { file("src/main/jniLibs/$it/libpdfsqueeze.so") }
+val buildPdfsqueeze by tasks.registering(Exec::class) {
+    group = "build"
+    description = "Compila libpdfsqueeze.so (Rust, cargo-ndk) si falta"
+    val rebuild = project.hasProperty("pdfsqueezeRebuild")
+    val libs = pdfsqueezeLibs
+    onlyIf { rebuild || libs.any { !it.isFile } }
+    workingDir = rootProject.projectDir
+    commandLine("bash", rootProject.file("native/build-android.sh").absolutePath)
+    isIgnoreExitValue = true
+    doLast {
+        when (val code = executionResult.get().exitValue) {
+            0 -> Unit
+            2 -> logger.warn("pdfsqueeze: no se generó la librería nativa; la app usará el compresor de respaldo.")
+            else -> throw GradleException("native/build-android.sh falló (código $code)")
+        }
+    }
+}
+tasks.named("preBuild") { dependsOn(buildPdfsqueeze) }
