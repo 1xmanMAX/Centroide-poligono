@@ -235,3 +235,4 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
 - 2026-11-06: el contenedor se REINICIÓ: se perdió todo lo no subido (integración pdfsqueeze, AAB 1.1.0, keystore de
   subida en scratchpad —el usuario ya la tiene—, SDK de Android). SDK reinstalado en /opt/android-sdk (NDK 27.3).
   Nuevas ramas `libre` (desarrollo, APK) y `playstore` (Google Play); ver CLAUDE.md. Rehaciendo pdfsqueeze en `libre`.
+- 2026-11-06: APK libre 1.0.0-libre (arm64) firmado con clave propia de la rama libre (enviada al usuario; en scratchpad/libre). 571 tests OK. Sin pdfsqueeze aún (agente en curso, rama libre-pdfsqueeze). Maven Central da 429: espejo de Google vía ~/.gradle/init.d/mirror.gradle (fuera del repo).
