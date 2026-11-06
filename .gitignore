@@ -14,3 +14,7 @@ build/
 keystore.properties
 *.jks
 *.keystore
+
+# pdfsqueeze: las .so las genera native/build-android.sh (no se versionan)
+app/src/main/jniLibs/**/libpdfsqueeze.so
+native/pdfsqueeze-ffi/target/

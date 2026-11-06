@@ -1,0 +1,31 @@
+# Puente JNI propio de ESCÁNER PRO MAX sobre pdfsqueeze-core (submódulo native/pdfsqueeze, MIT).
+# El núcleo NO se copia en este repo: se referencia por ruta dentro del submódulo.
+[package]
+name = "pdfsqueeze-jni"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+name = "pdfsqueeze"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pdfsqueeze-core = { path = "../pdfsqueeze/crates/core" }
+serde_json = "1"
+rayon = "1"
+memmap2 = "0.9"
+libc = "0.2"
+jni = { version = "0.21", default-features = false }
+
+# Proyecto independiente (no forma parte del workspace del submódulo).
+[workspace]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+# Sin panic = "abort": catch_unwind protege a la app de un pánico del núcleo.
+panic = "unwind"

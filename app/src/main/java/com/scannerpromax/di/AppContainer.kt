@@ -124,12 +124,12 @@ class AppContainer(context: Context) {
 
     val pdfExporter: PdfExporter by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         NativeLibs.ensurePdfBox(appContext)
-        PdfExporter(appContext)
+        PdfExporter(appContext, com.scannerpromax.pdf.NativeSqueezeEngine(appContext, deviceTier))
     }
 
     val pdfCompressor: PdfCompressor by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         NativeLibs.ensurePdfBox(appContext)
-        PdfCompressor(appContext)
+        PdfCompressor(appContext, deviceTier)
     }
 
     val imageExporter: ImageExporter by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { ImageExporter(appContext) }

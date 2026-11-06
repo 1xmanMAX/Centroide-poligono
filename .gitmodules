@@ -1,0 +1,3 @@
+[submodule "native/pdfsqueeze"]
+	path = native/pdfsqueeze
+	url = https://github.com/1xmanMAX/Thesis.git

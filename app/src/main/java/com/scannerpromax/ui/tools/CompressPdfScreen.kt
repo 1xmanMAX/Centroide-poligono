@@ -496,11 +496,12 @@ private fun LevelRow(level: CompressionLevel, selected: Boolean, onClick: () -> 
         CompressionLevel.LIGHT -> "Casi sin pérdida visible. Ideal para imprimir." to 0.6
         CompressionLevel.RECOMMENDED -> "El mejor equilibrio entre calidad y tamaño." to 0.4
         CompressionLevel.STRONG -> "Archivo muy ligero, texto aún legible." to 0.25
-        CompressionLevel.EXTREME -> "Blanco y negro, tamaño mínimo para enviar rápido." to 0.12
+        CompressionLevel.EXTREME -> "Tamaño mínimo para enviar rápido. Conserva el color y el texto." to 0.12
     }
+    val plan = remember(level) { com.scannerpromax.pdf.SqueezePlan.forLevel(level) }
     CheckRow(
         title = level.label + if (level == CompressionLevel.RECOMMENDED) " · recomendado" else "",
-        subtitle = description + "\n${level.dpi} ppp · calidad ${level.jpegQuality} %" +
+        subtitle = description + "\nhasta ${plan.maxDpi?.roundToInt() ?: level.dpi} ppp · similitud ≥ ${percentLabel(plan.minSsim)}" +
             if (originalBytes > 0) " · aprox. ${formatBytes((originalBytes * ratio).toLong())}" else "",
         selected = selected,
         onClick = onClick,
@@ -643,9 +644,14 @@ private fun ResultCard(
                     SizeBar("Después", result.compressedBytes, barRatio, ui.accent)
                     Spacer(Modifier.height(8.dp))
                     Text(pagesLabel(result.pageCount), style = MaterialTheme.typography.bodySmall, color = ui.secondaryLabel)
+                    result.fallbackReason?.let { reason ->
+                        Spacer(Modifier.height(8.dp))
+                        Text(reason, style = MaterialTheme.typography.bodySmall, color = ui.orange, textAlign = TextAlign.Center)
+                    }
                 }
             }
         }
+        result.engine?.let { e -> EngineReportGroup(e) }
         PrimaryCapsuleButton(
             text = "Guardar en Descargas",
             onClick = onSave,
@@ -659,6 +665,34 @@ private fun ResultCard(
         }
     }
 }
+
+/** Informe de pdfsqueeze: similitud visual, imágenes, verificación, tiempo e hilos. */
+@Composable
+private fun EngineReportGroup(e: com.scannerpromax.pdf.EngineReport) {
+    val ui = MaterialTheme.ui
+    val rows = buildList {
+        if (e.ssimMean != null && e.ssimMin != null) {
+            add("Similitud visual" to "media ${percentLabel(e.ssimMean)} · mínima ${percentLabel(e.ssimMin)}")
+        }
+        if (e.imagesTotal > 0) add("Imágenes optimizadas" to "${e.imagesOptimized} de ${e.imagesTotal}")
+        add("Verificación" to if (e.verified) "páginas, texto e imágenes correctos" else "no verificado")
+        add("Tiempo" to String.format(SpanishLocale, "%.1f s", e.elapsedMs / 1000.0) + if (e.passes > 1) " · ${e.passes} pasadas" else "")
+        add("Hilos" to "${e.threads}")
+    }
+    InsetGroup(header = "Informe del motor pdfsqueeze", separatorInset = SeparatorInsetPlain) {
+        rows.forEach { (k, v) ->
+            item {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(k, style = MaterialTheme.typography.bodyMedium, color = ui.label, modifier = Modifier.weight(1f))
+                    Text(v, style = MaterialTheme.typography.bodyMedium, color = ui.secondaryLabel, textAlign = TextAlign.End)
+                }
+            }
+        }
+    }
+}
+
+/** 0.9734 → "97,3 %". */
+private fun percentLabel(v: Double): String = String.format(SpanishLocale, "%.1f %%", v * 100)
 
 @Composable
 private fun SizeBar(label: String, bytes: Long, fraction: Float, color: Color) {

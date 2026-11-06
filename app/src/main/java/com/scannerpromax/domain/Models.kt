@@ -261,11 +261,15 @@ enum class ImageFormat(val label: String, val ext: String, val mime: String) {
     WEBP("WEBP", "webp", "image/webp"),
 }
 
+/**
+ * Nivel de compresión. dpi/jpegQuality los usa el compresor de respaldo; con pdfsqueeze cada nivel es una pasada con
+ * SSIM mínimo y dpi máximo (ver pdf/SqueezePlan). Ningún nivel convierte a B/N: el color se conserva.
+ */
 enum class CompressionLevel(val label: String, val dpi: Int, val jpegQuality: Int, val grayscale: Boolean) {
     LIGHT("Ligera (máxima calidad)", 200, 85, false),
     RECOMMENDED("Recomendada", 150, 72, false),
     STRONG("Fuerte", 110, 60, false),
-    EXTREME("Extrema (B/N)", 96, 50, true),
+    EXTREME("Extrema", 96, 50, false),
 }
 
 data class PdfOptions(
@@ -278,6 +282,11 @@ data class PdfOptions(
     val textMode: PdfTextMode? = null,
     /** Dónde van las páginas de texto visible en [PdfTextMode.BUSCABLE_CON_TEXTO]. */
     val textPlacement: TextPlacement = TextPlacement.AFTER_EACH_PAGE,
+    /**
+     * «Optimizar tamaño»: pasa pdfsqueeze sobre el PDF generado (misma resolución, SSIM ≥ 0,97, B/N a JBIG2 sin
+     * pérdida; con «Máxima (HD)» solo sin pérdida). La contraseña se aplica después. Sin el motor, no hace nada.
+     */
+    val optimizeSize: Boolean = false,
 ) {
     val effectiveTextMode: PdfTextMode
         get() = textMode ?: if (searchable) PdfTextMode.BUSCABLE else PdfTextMode.SOLO_IMAGEN

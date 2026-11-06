@@ -1,0 +1,6 @@
+# Páginas de 16 KB (Android 15+ / requisito de Google Play) en las ABIs de 64 bits.
+[target.aarch64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+[target.x86_64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]

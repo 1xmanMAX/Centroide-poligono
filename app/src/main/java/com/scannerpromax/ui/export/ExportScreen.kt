@@ -202,6 +202,8 @@ fun ExportScreen(
     var textMode by rememberSaveable { mutableStateOf(PdfTextMode.BUSCABLE) }
     var textPlacement by rememberSaveable { mutableStateOf(TextPlacement.AFTER_EACH_PAGE) }
     var usePassword by rememberSaveable { mutableStateOf(false) }
+    // «Optimizar tamaño» (pdfsqueeze tras generar el PDF): activado por defecto.
+    var optimizeSize by rememberSaveable { mutableStateOf(true) }
     var password by remember { mutableStateOf("") }
     var showPassword by remember { mutableStateOf(false) }
     var fileName by rememberSaveable { mutableStateOf("") }
@@ -277,7 +279,7 @@ fun ExportScreen(
         // al pulsar "Compartir" después de "Guardar". Las ediciones de cada página y el texto corregido sí invalidan.
         listOf(
             d.pages.joinToString { it.id + it.edits.hashCode() + "/" + it.processedFile + "/" + it.ocrEditedText.hashCode() },
-            pageSize, quality, textMode, textPlacement, usePassword, password.hashCode(), fileName,
+            pageSize, quality, textMode, textPlacement, usePassword, password.hashCode(), fileName, optimizeSize,
             // PDF reconstruido: si cambia cuántas páginas tienen maquetación de la IA, se rehace.
             if (textMode == PdfTextMode.RECONSTRUIDO) aiPages else 0,
         ).joinToString("|")
@@ -327,6 +329,7 @@ fun ExportScreen(
             password = password.takeIf { usePassword && it.isNotEmpty() },
             textMode = mode,
             textPlacement = textPlacement,
+            optimizeSize = optimizeSize && mode.hasImages,
         )
         container.pdfExporter.export(
             pages.indices.map { PdfPageInput(files[it], ocrs[it], binaryHint = binaryHintFor(pages[it].edits.filter), layout = layouts[it]) },
@@ -526,6 +529,8 @@ fun ExportScreen(
         onShare = { start(ExportAction.SHARE) },
         thumbnail = { p, i, m -> ExportThumb(container, docId, p, i, m) },
         onAiRebuild = { showAiRebuild = true },
+        optimizeSize = optimizeSize,
+        onOptimizeSize = { optimizeSize = it },
     ) {
         // ------------------------------------------------ progreso
         val pr = progress
@@ -638,6 +643,9 @@ internal fun ExportSheetContent(
     thumbnail: @Composable (Page, Int, Modifier) -> Unit,
     /** "Reconstruir con IA" (Word/PDF editable con IA en la nube); null = sin la fila. */
     onAiRebuild: (() -> Unit)? = null,
+    /** «Optimizar tamaño» (solo PDF con imágenes). */
+    optimizeSize: Boolean = true,
+    onOptimizeSize: (Boolean) -> Unit = {},
     overlays: @Composable BoxScope.() -> Unit = {},
 ) {
     val ui = MaterialTheme.ui
@@ -778,6 +786,17 @@ internal fun ExportSheetContent(
                         separatorInset = SeparatorInsetPlain,
                         footer = if (isPdf && usePassword) "Pedirá la contraseña al abrir el PDF (mínimo 4 caracteres)." else null,
                     ) {
+                        if (isPdf && textMode.hasImages) {
+                            item {
+                                ToggleRow(
+                                    "Optimizar tamaño",
+                                    optimizeSize,
+                                    onOptimizeSize,
+                                    subtitle = if (quality == ExportQuality.MAX) "Sin pérdida: misma imagen, archivo más ligero"
+                                    else "Misma resolución y calidad visual, archivo más ligero",
+                                )
+                            }
+                        }
                         if (isPdf) {
                             item { ToggleRow("Proteger con contraseña", usePassword, onUsePassword) }
                             if (usePassword) {

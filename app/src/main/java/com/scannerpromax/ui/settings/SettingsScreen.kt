@@ -60,6 +60,7 @@ import com.scannerpromax.ui.theme.SystemIndigo
 import com.scannerpromax.ui.theme.SystemOrange
 import com.scannerpromax.ui.theme.SystemPink
 import com.scannerpromax.ui.theme.SystemPurple
+import com.scannerpromax.ui.theme.SystemRed
 import com.scannerpromax.ui.theme.SystemTeal
 import com.scannerpromax.ui.theme.ui
 import kotlinx.coroutines.launch
@@ -396,6 +397,20 @@ internal fun SettingsContent(
                     item { InfoRow("Rendimiento", about.performance, icon = AppIcons.Speed, iconTint = SystemOrange, stacked = true) }
                     item { InfoRow("Procesador", about.processor, icon = AppIcons.Chip, iconTint = SystemGreen, stacked = true) }
                     item { InfoRow("Resolución de trabajo", about.workingResolution, icon = AppIcons.Resolution, iconTint = SystemPurple) }
+                }
+                InsetGroup(
+                    header = "Componentes de código abierto",
+                    footer = "Texto completo de la licencia en assets/licenses/pdfsqueeze-LICENSE.txt.",
+                ) {
+                    item {
+                        InfoRow(
+                            "pdfsqueeze (compresión de PDF)",
+                            "Licencia MIT · © 2026 Max Antony",
+                            icon = AppIcons.Compress,
+                            iconTint = SystemRed,
+                            stacked = true,
+                        )
+                    }
                 }
             }
         }

@@ -36,3 +36,12 @@
 # ONNX Runtime (maquetación de páginas): el código nativo busca por nombre las clases Java (OnnxTensor, OrtSession$Result,
 # OrtException...). Sin esto R8 las renombra y la carga del modelo falla en la release.
 -keep class ai.onnxruntime.** { *; }
+
+# pdfsqueeze (JNI): los símbolos nativos Java_dev_pdfsqueeze_PdfSqueeze_* se resuelven por nombre de clase y método.
+-keep class dev.pdfsqueeze.PdfSqueeze { *; }
+# Sobres JSON del motor (kotlinx.serialization).
+-keepclassmembers @kotlinx.serialization.Serializable class dev.pdfsqueeze.** {
+    *** Companion;
+    kotlinx.serialization.KSerializer serializer(...);
+}
+-keep,includedescriptorclasses class dev.pdfsqueeze.**$$serializer { *; }
