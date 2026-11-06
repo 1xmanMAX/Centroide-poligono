@@ -232,3 +232,6 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
 - Pendiente del usuario: subir la política a un hosting, rellenar Play Console (ver notas), prueba cerrada 12 testers/14 días si la
   cuenta es personal y nueva, probar la release en un móvil real (R8 + SDK de Anthropic sin probar en dispositivo).
 - 2026-11-03: integrar pdfsqueeze (repo privado 1xmanMAX/Thesis, MIT, Rust; clonado en /home/user/thesis, NO se modifica) como motor de PdfCompressor: .so arm64/armv7/x86_64 con cargo-ndk (NDK 27.3), hilos según DeviceTier, respaldo al compresor actual, tamaño objetivo. Agente en worktree; notas /tmp/claude-0/bench/notes_pdfsqueeze.md.
+- 2026-11-06: el contenedor se REINICIÓ: se perdió todo lo no subido (integración pdfsqueeze, AAB 1.1.0, keystore de
+  subida en scratchpad —el usuario ya la tiene—, SDK de Android). SDK reinstalado en /opt/android-sdk (NDK 27.3).
+  Nuevas ramas `libre` (desarrollo, APK) y `playstore` (Google Play); ver CLAUDE.md. Rehaciendo pdfsqueeze en `libre`.
