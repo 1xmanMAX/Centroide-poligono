@@ -28,6 +28,13 @@ val uploadSigningMissing: List<String> = buildList {
     uploadSigning["UPLOAD_STORE_FILE"]?.let { if (!file(it).isFile) add("UPLOAD_STORE_FILE (no existe: $it)") }
 }
 
+// Canal de distribución (gradle.properties → scanner.canal). ÚNICA diferencia de configuración entre ramas:
+//   libre     → rama `libre` (desarrollo, APK directo, sin límites de Google Play; id com.scannerpromax.libre)
+//   playstore → rama `playstore` (lo que se publica en Google Play; id com.scannerpromax)
+// Con ids distintos las dos apps se instalan a la vez en el mismo teléfono.
+val canal: String = (findProperty("scanner.canal") as String?)?.trim().orEmpty().ifEmpty { "playstore" }
+val esLibre: Boolean = canal == "libre"
+
 /** ¿Se están generando APKs (assemble*)? Entonces splits por ABI; si no (bundleRelease para Play), ndk.abiFilters. */
 val buildingApks: Boolean = gradle.startParameter.taskNames.any { it.substringAfterLast(":").startsWith("assemble") }
 
@@ -38,10 +45,14 @@ android {
 
     defaultConfig {
         applicationId = "com.scannerpromax"
+        if (esLibre) applicationIdSuffix = ".libre"
         minSdk = 24
         targetSdk = 36
         versionCode = 1
-        versionName = "1.0.0"
+        versionName = "1.0.0" + if (esLibre) "-libre" else ""
+        resValue("string", "app_name", if (esLibre) "ESCÁNER PRO MAX Libre" else "ESCÁNER PRO MAX")
+        buildConfigField("String", "CANAL", "\"$canal\"")
+        buildConfigField("boolean", "LIBRE", esLibre.toString())
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
         // Solo español (textos de la app) e inglés: quita cientos de traducciones de AndroidX/Material
@@ -97,7 +108,7 @@ android {
         isCoreLibraryDesugaringEnabled = true
     }
     kotlinOptions { jvmTarget = "17" }
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
     // Recursos Android en los tests JVM: los necesitan las capturas de pantalla con Robolectric (src/test/.../screenshots).
     testOptions { unitTests { isIncludeAndroidResources = true } }
     // Release = perfil de referencia (src/main/baseline-prof.txt) compilado a assets/dexopt/baseline.prof;
