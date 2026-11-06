@@ -157,8 +157,8 @@ class PdfCompressorFallbackTest {
 
     @Test
     fun reducesThreadsUnderMemoryPressure() = runBlocking {
-        // 12 MP × 28 B ≈ 336 MB por hilo; 1,6 GB libres → presupuesto 800 MB → 2 hilos.
-        val engine = FakeEngine(memory = 1_600L shl 20, maxPixels = 12_000_000)
+        // 12 MP × 44 B ≈ 528 MB por hilo; 2,4 GB libres → presupuesto 1,2 GB → 2 hilos.
+        val engine = FakeEngine(memory = 2_400L shl 20, maxPixels = 12_000_000)
         compressor(engine, FakeLegacy()).compressFile(source, CompressionLevel.STRONG, output)
         assertEquals(2, engine.calls.single().second)
     }

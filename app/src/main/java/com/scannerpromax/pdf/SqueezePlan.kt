@@ -16,6 +16,8 @@ data class SqueezeParams(
     val minSsim: Double,
     val maxDpi: Float?,
     val allowLossy: Boolean = true,
+    /** Paso de la búsqueda de calidad JPEG (null = el del preset, 4). Más grande = menos codificaciones. */
+    val jpegQualityStep: Int? = null,
 ) {
     /** Opciones para la librería nativa: el preset + nuestros ajustes. Zopfli desactivado (lento y caro en batería). */
     fun toJson(): String = buildString {
@@ -23,6 +25,7 @@ data class SqueezeParams(
         append(",\"allow_lossy\":").append(allowLossy)
         append(",\"min_ssim\":").append(String.format(java.util.Locale.ROOT, "%.3f", minSsim))
         append(",\"max_dpi\":").append(maxDpi?.let { String.format(java.util.Locale.ROOT, "%.1f", it) } ?: "null")
+        jpegQualityStep?.let { append(",\"jpeg_quality_step\":").append(it) }
         append(",\"zopfli_iterations\":0")
         append(",\"no_regression\":true,\"verify\":true,\"threads\":0}")
     }
@@ -58,7 +61,8 @@ object SqueezePlan {
             q < 0.75f -> "small"
             else -> "balanced"
         }
-        return SqueezeParams(profile, (ssim * 1000).roundToInt() / 1000.0, dpi)
+        // Hasta 5 pasadas: paso de calidad 8 (≈ 15 % más rápido por pasada, < 1 % más grande; banco pdfsqueeze).
+        return SqueezeParams(profile, (ssim * 1000).roundToInt() / 1000.0, dpi, jpegQualityStep = TARGET_QUALITY_STEP)
     }
 
     /**
@@ -123,7 +127,7 @@ object SqueezePlan {
 
     /** Pico estimado de memoria nativa para [threads] hilos con la imagen más grande de [maxImagePixels]. */
     fun estimatedPeakBytes(maxImagePixels: Long, threads: Int, fileBytes: Long): Long =
-        maxImagePixels * BYTES_PER_PIXEL * threads + fileBytes * 3
+        maxImagePixels * BYTES_PER_PIXEL * threads + fileBytes * 4
 
     /**
      * Reduce los hilos hasta que el pico estimado quepa en la mitad de la RAM disponible.
@@ -140,8 +144,12 @@ object SqueezePlan {
     }
 
     const val MAX_PASSES = 5
-    /** Bytes por píxel y por hilo (decodificado + candidatos + SSIM): medido ~24–30. */
-    const val BYTES_PER_PIXEL = 28L
+    const val TARGET_QUALITY_STEP = 8
+    /**
+     * Bytes por píxel y por hilo (decodificado + candidatos + SSIM + MRC). Medido en escritorio con escaneos de
+     * 8,7 MP: ~35 B/px por hilo adicional y ~45 B/px con un hilo (incluye la copia del documento); 44 = margen.
+     */
+    const val BYTES_PER_PIXEL = 44L
     private const val MIN_SSIM = 0.84f
     private const val MAX_SSIM = 0.97f
     private const val MIN_DPI = 72f

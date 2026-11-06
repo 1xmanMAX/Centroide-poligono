@@ -46,6 +46,8 @@ class SqueezePlanTest {
         assertTrue(j, j.contains("\"zopfli_iterations\":0"))
         assertTrue(j, j.contains("\"no_regression\":true"))
         assertTrue(SqueezePlan.forExport(ExportQuality.HIGH).toJson().contains("\"max_dpi\":null"))
+        assertFalse(j.contains("jpeg_quality_step"))
+        assertTrue(SqueezePlan.forQuality(0.5f).toJson().contains("\"jpeg_quality_step\":8"))
         // Sin coma decimal aunque el sistema esté en español.
         val prev = java.util.Locale.getDefault()
         try {
@@ -113,7 +115,7 @@ class SqueezePlanTest {
         assertEquals(2, SqueezePlan.threadsFor(DeviceTier(isLowRam = false, maxWorkingPixels = 12_600_000, cores = 4)))
         assertEquals(4, SqueezePlan.threadsFor(DeviceTier(isLowRam = false, maxWorkingPixels = 20_000_000, cores = 8)))
         assertEquals(3, SqueezePlan.threadsFor(DeviceTier(isLowRam = false, maxWorkingPixels = 16_000_000, cores = 6)))
-        // 12 MP × 28 B × 4 hilos ≈ 1,3 GB: con 2 GB libres (1 GB de presupuesto) bajan los hilos.
+        // 12 MP × 44 B × 4 hilos ≈ 2,1 GB: con 2 GB libres (1 GB de presupuesto) bajan los hilos.
         val px = 12_000_000L
         assertEquals(4, SqueezePlan.fitThreads(4, px, 1_000_000, 8L shl 30))
         val t = SqueezePlan.fitThreads(4, px, 1_000_000, 2L shl 30)

@@ -235,3 +235,12 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
 - 2026-11-06: el contenedor se REINICIÓ: se perdió todo lo no subido (integración pdfsqueeze, AAB 1.1.0, keystore de
   subida en scratchpad —el usuario ya la tiene—, SDK de Android). SDK reinstalado en /opt/android-sdk (NDK 27.3).
   Nuevas ramas `libre` (desarrollo, APK) y `playstore` (Google Play); ver CLAUDE.md. Rehaciendo pdfsqueeze en `libre`.
+- 2026-11-06: pdfsqueeze REHECHO en la rama `libre-pdfsqueeze` (desde `libre`; NO fusionada: la fusiona el usuario).
+  Sin copiar el núcleo: submódulo `native/pdfsqueeze` (github 1xmanMAX/Thesis @ 2db0a83) + puente JNI propio
+  `native/pdfsqueeze-ffi` (rutas+mmap, jobs con progreso/cancelación, pool propio nice 10, catch_unwind, LTO fat,
+  16 KB) + `native/build-android.sh` (preBuild lo lanza si faltan las .so; las .so están en .gitignore). Kotlin:
+  dev/pdfsqueeze/{PdfSqueeze,PdfSqueezeClient}, pdf/{PdfCompressor (motor + respaldo), LegacyPdfCompressor (el antiguo),
+  SqueezePlan, SqueezeEngine}; «Optimizar tamaño» en Exportar (por defecto sí; contraseña después); informe en Comprimir
+  PDF; nivel Extrema ya no pasa a B/N; licencia MIT en README, Ajustes › Acerca de y assets/licenses. Tests nuevos
+  SqueezePlanTest + PdfCompressorFallbackTest. Banco y riesgos: /tmp/claude-0/bench/notes_pdfsqueeze.md.
+  Clon nuevo con motor: inicializar el submódulo native/pdfsqueeze (repo privado) + Rust, cargo-ndk y NDK.
