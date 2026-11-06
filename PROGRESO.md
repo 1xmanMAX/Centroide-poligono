@@ -245,3 +245,4 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
   PDF; nivel Extrema ya no pasa a B/N; licencia MIT en README, Ajustes › Acerca de y assets/licenses. Tests nuevos
   SqueezePlanTest + PdfCompressorFallbackTest. Banco y riesgos: /tmp/claude-0/bench/notes_pdfsqueeze.md.
   Clon nuevo con motor: inicializar el submódulo native/pdfsqueeze (repo privado) + Rust, cargo-ndk y NDK.
+- 2026-11-06: pdfsqueeze FUSIONADO en libre (submódulo native/pdfsqueeze → 1xmanMAX/Thesis@2db0a83, puente propio native/pdfsqueeze-ffi). Libre 1.1.0 (versionCode 2): release firmada OK, libpdfsqueeze.so en el APK, R8 conserva dev.pdfsqueeze. Tests OK. Falta probar en móvil. playstore aún sin pdfsqueeze.
