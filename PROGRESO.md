@@ -246,3 +246,4 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
   SqueezePlanTest + PdfCompressorFallbackTest. Banco y riesgos: /tmp/claude-0/bench/notes_pdfsqueeze.md.
   Clon nuevo con motor: inicializar el submódulo native/pdfsqueeze (repo privado) + Rust, cargo-ndk y NDK.
 - 2026-11-06: pdfsqueeze FUSIONADO en libre (submódulo native/pdfsqueeze → 1xmanMAX/Thesis@2db0a83, puente propio native/pdfsqueeze-ffi). Libre 1.1.0 (versionCode 2): release firmada OK, libpdfsqueeze.so en el APK, R8 conserva dev.pdfsqueeze. Tests OK. Falta probar en móvil. playstore aún sin pdfsqueeze.
+- 2026-11-10: EN CURSO mejora DNI (agente, rama libre-dni con push WIP): detección por color de la tarjeta (máscara del azul, rellenar huecos internos, ajuste de 4 rectas), confirmar/corregir recorte tras cada cara, guardar fotos originales + quads para editar el recorte desde Revisión y recomponer la hoja. Notas: /tmp/claude-0/bench/notes_dni.md.
