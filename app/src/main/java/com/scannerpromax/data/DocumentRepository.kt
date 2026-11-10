@@ -532,19 +532,20 @@ class DocumentRepository(
             // ¿Solo cambia el giro? Entonces NO se reprocesa nada: el procesado y la miniatura actuales se giran sin pérdidas
             // y las cajas del OCR se transforman (ver [PageRotation]).
             val currentProcessed = File(dir, processedName(pageId, current.edits))
-            val rotOnly = withContext(Dispatchers.IO) { currentProcessed.exists() } &&
-                PageRotation.rotationOnly(current.edits, edits, withContext(Dispatchers.IO) { aspectOf(currentProcessed) })
+            val hasCurrent = withContext(Dispatchers.IO) { currentProcessed.exists() }
+            val rotOnly = hasCurrent && PageRotation.rotationOnly(current.edits, edits, withContext(Dispatchers.IO) { aspectOf(currentProcessed) })
 
             // Render final ya hecho en segundo plano por el editor para ESTAS ediciones ([renderDraft] o [rotateDraft]):
             // es exactamente el mismo resultado (mismo original, presupuesto y tubería), así que se reutiliza sin volver a procesar.
             val draftThumb = thumbName(pageId, edits)
-            val (processedName, thumbName) = if (File(dir, newProcessed).exists() && File(dir, draftThumb).exists()) {
-                newProcessed to draftThumb
-            } else if (rotOnly) {
-                withContext(Dispatchers.Default) { rotateFiles(docId, pageId, current.edits, edits) }
-            } else heavyWork {
-                withContext(Dispatchers.Default) {
-                    renderFromOriginal(docId, pageId, File(dir, current.originalFile), edits, current.width, current.height)
+            val draftReady = withContext(Dispatchers.IO) { File(dir, newProcessed).exists() && File(dir, draftThumb).exists() }
+            val (processedName, thumbName) = when (PageFiles.editPlan(draftReady, rotOnly)) {
+                PageFiles.EditPlan.REUSE -> newProcessed to draftThumb
+                PageFiles.EditPlan.ROTATE -> withContext(Dispatchers.Default) { rotateFiles(docId, pageId, current.edits, edits) }
+                PageFiles.EditPlan.RENDER -> heavyWork {
+                    withContext(Dispatchers.Default) {
+                        renderFromOriginal(docId, pageId, File(dir, current.originalFile), edits, current.width, current.height)
+                    }
                 }
             }
             // OCR girado (mismo texto, cajas transformadas): no se vuelve a leer la página

@@ -29,6 +29,26 @@ object PageFiles {
         a.quad == b.quad && a.rotation == b.rotation && PageRotation.geoRotation(a) == PageRotation.geoRotation(b) &&
             a.autoDeskew == b.autoDeskew && a.autoDewarp == b.autoDewarp && a.manualQuad == b.manualQuad && a.idCard == b.idCard
 
+    /** Qué hace DocumentRepository.updateEdits con unas ediciones nuevas. */
+    enum class EditPlan {
+        /** El resultado ya está en disco (render o giro hecho en segundo plano por el editor). */
+        REUSE,
+        /** Solo cambia el giro: se giran el procesado, la miniatura y el OCR actuales, sin reprocesar NADA. */
+        ROTATE,
+        /** Tubería completa desde el original. */
+        RENDER,
+    }
+
+    /**
+     * [draftReady] = procesado y miniatura de las ediciones nuevas ya existen; [rotationOnly] = las nuevas solo cambian el
+     * giro respecto de las actuales ([PageRotation.rotationOnly]) y el procesado actual existe.
+     */
+    fun editPlan(draftReady: Boolean, rotationOnly: Boolean): EditPlan = when {
+        draftReady -> EditPlan.REUSE
+        rotationOnly -> EditPlan.ROTATE
+        else -> EditPlan.RENDER
+    }
+
     /** Hash estable (entre ejecuciones) de las ediciones: va en el nombre de archivo, así cada versión tiene el suyo. */
     fun editsHash(edits: PageEdits): String =
         Integer.toHexString(hashJson.encodeToString(PageEdits.serializer(), edits).hashCode())

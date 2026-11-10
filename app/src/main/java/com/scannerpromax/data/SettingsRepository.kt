@@ -64,6 +64,7 @@ class SettingsRepository(private val context: Context) {
             prefs[Keys.USER_VOCABULARY] = updated.userVocabulary.joinToString("\n")
             prefs[Keys.SPELL_CHECK] = updated.spellCheck
             prefs[Keys.LENS_CORRECTION] = updated.lensCorrection
+            prefs[Keys.ID_CARD_SIZE] = updated.idCardSize.name
         }
     }
 
@@ -103,6 +104,7 @@ class SettingsRepository(private val context: Context) {
             userVocabulary = this[Keys.USER_VOCABULARY]?.split('\n')?.map { it.trim() }?.filter { it.isNotEmpty() } ?: d.userVocabulary,
             spellCheck = this[Keys.SPELL_CHECK] ?: d.spellCheck,
             lensCorrection = this[Keys.LENS_CORRECTION] ?: d.lensCorrection,
+            idCardSize = enumOr(this[Keys.ID_CARD_SIZE], d.idCardSize),
         )
     }
 
@@ -134,6 +136,7 @@ class SettingsRepository(private val context: Context) {
         val USER_VOCABULARY = stringPreferencesKey("user_vocabulary")
         val SPELL_CHECK = booleanPreferencesKey("spell_check")
         val LENS_CORRECTION = booleanPreferencesKey("lens_correction")
+        val ID_CARD_SIZE = stringPreferencesKey("id_card_size")
     }
 
     private companion object {
@@ -197,6 +200,8 @@ data class AppSettings(
      * con la corrección del propio ISP si la cámara la ofrece, su calibración o, si no, la estimada con el documento.
      */
     val lensCorrection: Boolean = true,
+    /** «Tamaño del DNI en la hoja»: escala de las caras al componer la hoja A4 (cámara, galería y Recortar DNI). */
+    val idCardSize: com.scannerpromax.imaging.IdCardSize = com.scannerpromax.imaging.IdCardSize.DEFAULT,
 ) {
     fun cloudConsent(id: com.scannerpromax.ai.cloud.CloudProviderId): Boolean = when (id) {
         com.scannerpromax.ai.cloud.CloudProviderId.DEEPSEEK -> cloudConsentDeepSeek

@@ -52,10 +52,12 @@ class JevIdeasTest {
 
     private fun hints(json: String) = JevCapture.parse(JevResponse.parse(json), fit)
 
-    @Test fun peticionCaptura_unaImagenYNuevePreguntas() {
+    @Test fun peticionCaptura_unaImagenYDiezPreguntas() {
         val img = JevImage(JevAsset("photo-abc", byteArrayOf(1, 2, 3)), fit)
         val req = JevCapture.request(img)
-        assertEquals(9, req.questions.size)
+        assertEquals(10, req.questions.size)
+        // la orientación (giro que endereza) va en la misma petición
+        assertEquals(4, (req.questions["orient"] as JevQuestion.Choice).options.size)
         assertEquals("jev-1.14.0", req.toJson()["model"].let { (it as JsonPrimitive).content })
         assertEquals("photo-abc", (req.toJson()["state"]!!.jsonObject["photo"] as JsonPrimitive).content)
         assertEquals(1, (req.toJson()["assets"] as JsonObject).size)
