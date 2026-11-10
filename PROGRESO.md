@@ -246,3 +246,14 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
   SqueezePlanTest + PdfCompressorFallbackTest. Banco y riesgos: /tmp/claude-0/bench/notes_pdfsqueeze.md.
   Clon nuevo con motor: inicializar el submódulo native/pdfsqueeze (repo privado) + Rust, cargo-ndk y NDK.
 - 2026-11-06: pdfsqueeze FUSIONADO en libre (submódulo native/pdfsqueeze → 1xmanMAX/Thesis@2db0a83, puente propio native/pdfsqueeze-ffi). Libre 1.1.0 (versionCode 2): release firmada OK, libpdfsqueeze.so en el APK, R8 conserva dev.pdfsqueeze. Tests OK. Falta probar en móvil. playstore aún sin pdfsqueeze.
+- 2026-11-10: DNI (rama `libre-dni`, desde `libre`; subida, SIN fusionar). Queja: bordes del DNI mal reconocidos y sin poder
+  corregir el recorte. Hecho: imaging/CardColorDetector (color de la tarjeta centro-vs-borde con prior azul/celeste y amarillo,
+  máscara Lab + tono + sombra, relleno de huecos, 4 rectas Huber con esquinas redondeadas, lado perdido por la banda MRZ
+  recuperado con la proporción ID-1, afinado sub-píxel, árbitro con el detector de documentos por apoyo de bordes,
+  orientación por MRZ). Cámara (modo DNI): tras cada cara se muestra la foto con las 4 esquinas arrastrables
+  (Repetir / Aceptar); la hoja se compone al aceptar el reverso (o «Solo anverso»). Las fotos ORIGINALES de las caras se
+  guardan con la página (original/<id>_idfront|idback.jpg) y sus recortes normalizados en PageEdits.idCard (null en páginas
+  antiguas: hash sin cambios). Editar › Recortar en una hoja de DNI abre «Recortar DNI» (Anverso/Reverso, Auto, Listo →
+  recompone la hoja; los recortes manuales se respetan). Galería también editable. Reescanear un DNI abre la cámara en modo DNI.
+  Bancos: sintético peruano 168 escenas éxito@0,95 68,5 → 91,7 %; MIDV-500 179 imágenes 62,0 → 70,4 %.
+  Notas: /tmp/claude-0/bench/notes_dni.md. Pendiente: probar en móvil (tiempos a 8 MP, pantalla de confirmación).
