@@ -26,6 +26,14 @@ object PageRotation {
 
     fun norm(deg: Int): Int = ((deg % 360) + 360) % 360 / 90 * 90
 
+    /**
+     * ¿Puede la orientación automática de PÁGINAS (cola de la IA) girar esta página? Solo si nunca se giró después de
+     * procesarla y NO es una hoja de DNI compuesta ([PageEdits.idCard]): cada cara ya se orientó por separado
+     * (imaging/CardOrientation) y en la hoja A4 las caras apaisadas engañan al voto de páginas (doc_ori giraba 270° la
+     * hoja con una cara vertical en el banco).
+     */
+    fun autoOrientAllowed(e: PageEdits): Boolean = e.rotation == 0 && e.geoRotation == null && e.idCard == null
+
     /** Giro con el que se calcula la geometría (y lo que va antes del giro final). */
     fun geoRotation(e: PageEdits): Int = norm(e.geoRotation ?: e.rotation)
 

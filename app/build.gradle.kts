@@ -261,6 +261,8 @@ tasks.withType<Test>().configureEach {
         "jevIdeas" to "jev.ideas",
         // OrientationBenchTest (banco de orientación): -PoriBench=DIR (imágenes DERECHAS en DIR/src) [-PoriModel=doc_ori.onnx]
         "oriBench" to "ori.bench", "oriModel" to "ori.model",
+        // CardOrientationBenchTest (orientación de las caras del DNI, sintético): -PcardOriBench=salida.md
+        "cardOriBench" to "card.ori.bench",
     ).forEach { (p, sp) ->
         (project.findProperty(p) as String?)?.let { systemProperty(sp, it) }
     }

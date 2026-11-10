@@ -351,7 +351,8 @@ class AiRecognitionQueue(
         var bmp = withContext(Dispatchers.IO) { BitmapIO.decode(processed.absolutePath, decodePx) }
         var rotation = 0
         try {
-            if (page.edits.rotation == 0 && page.edits.geoRotation == null) {
+            // (las hojas de DNI compuestas no: cada cara ya se orientó al recortarla)
+            if (PageRotation.autoOrientAllowed(page.edits)) {
                 onProgress(AiRecognizer.Progress(0.02f, "Comprobando la orientación"))
                 val cw = withContext(Dispatchers.Default) { repo.orientationOf(bmp)?.rotation } ?: 0
                 val ccw = (360 - cw) % 360
