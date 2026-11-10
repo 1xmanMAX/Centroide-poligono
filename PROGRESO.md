@@ -324,3 +324,4 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
   (-PcardOriBench=salida.md, sintético peruano 4 paletas × 2 caras × 5 fondos × 4 giros): antes 62,3 % -> 100 % (ajuste);
   VALIDACIÓN (otras semillas, mano, desenfoque) 55,5 % -> 96,1 %, ninguna cara derecha girada. Notas: /tmp/claude-0/bench/notes_dni2.md.
   Falta: probar en móvil (cámara de una cara, tiempos de doc_ori por cara, DNI reales).
+- 2026-11-10: FUSIONADO libre-dni2 (pantalla «Editar DNI» por cara, CardOrientation, hoja DNI excluida del giro automático). Libre 1.4.0 (versionCode 5), release firmada, 666 tests OK. Falta probar en móvil con DNI reales.

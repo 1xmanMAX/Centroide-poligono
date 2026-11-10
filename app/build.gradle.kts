@@ -48,8 +48,8 @@ android {
         if (esLibre) applicationIdSuffix = ".libre"
         minSdk = 24
         targetSdk = 36
-        versionCode = 4
-        versionName = "1.3.0" + if (esLibre) "-libre" else ""
+        versionCode = 5
+        versionName = "1.4.0" + if (esLibre) "-libre" else ""
         resValue("string", "app_name", if (esLibre) "ESCÁNER PRO MAX Libre" else "ESCÁNER PRO MAX")
         buildConfigField("String", "CANAL", "\"$canal\"")
         buildConfigField("boolean", "LIBRE", esLibre.toString())
