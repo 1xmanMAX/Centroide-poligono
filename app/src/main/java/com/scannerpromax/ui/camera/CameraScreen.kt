@@ -334,6 +334,8 @@ private fun CameraContent(
     val settings by settingsFlow.collectAsState(initial = AppSettings())
     val engine = remember { CameraEngine(context.applicationContext, container.pageProcessor.detector, container.deviceTier) }
     val processor = remember { CaptureProcessor(container) }
+    // posición del móvil al disparar (desempata la orientación de la cara del DNI)
+    val deviceUp = com.scannerpromax.ui.editor.rememberDeviceUp()
     // Ámbito de la pantalla (animaciones, captura). El procesamiento va en [captureScope].
     val workScope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
     // Las animaciones (Animatable) necesitan el reloj de cuadros de la composición: workScope no lo tiene.
@@ -527,11 +529,12 @@ private fun CameraContent(
             // corregir el recorte; la hoja se compone al aceptar el reverso (o «Solo anverso").
             ScanMode.ID_CARD -> {
                 val back = idFront != null
+                val upAtShot = deviceUp()
                 val token = ++reviewSeq
                 cardReview = CardReview(null, back, token)
                 captureScope.launch {
                     val draft = try {
-                        processor.detectCardSide(shotFile(), guide, withPreview = true)
+                        processor.detectCardSide(shotFile(), guide, withPreview = true, deviceUp = upAtShot)
                     } catch (c: CancellationException) {
                         throw c
                     } catch (t: Throwable) {
@@ -552,12 +555,12 @@ private fun CameraContent(
         }
     }
 
-    /** La cara en revisión se acepta con el recorte [quad] (normalizado); con el reverso se compone la hoja. */
-    fun acceptCard(quad: Quad, manual: Boolean) {
+    /** La cara en revisión se acepta con su recorte (normalizado), giro, espejo y mejora; con el reverso se compone la hoja. */
+    fun acceptCard(side: com.scannerpromax.domain.IdCardSide) {
         val r = cardReview ?: return
         val d = r.draft ?: return
         cardReview = null
-        val src = CardSource(d.file, quad, manual)
+        val src = CardSource(d.file, side)
         val front = idFront
         if (front == null) {
             idFront = src
@@ -994,9 +997,11 @@ private fun CameraContent(
         overlays = {
             cardReview?.let { r ->
                 IdCardConfirmOverlay(
+                    processor = processor,
                     draft = r.draft,
                     back = r.back,
-                    onAccept = { q, manual -> acceptCard(q, manual) },
+                    common = cardFilter(),
+                    onAccept = { side -> acceptCard(side) },
                     onRetake = { dropReview() },
                     modifier = Modifier.fillMaxSize(),
                 )

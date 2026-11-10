@@ -280,6 +280,27 @@ internal class CaptureProcessor(private val container: AppContainer) {
     }
 
     /**
+     * Vista RÁPIDA de cómo quedará una cara (para la confirmación y el editor del DNI): rectificado de [preview] (la
+     * vista reducida de la foto) con [quadPx] en sus píxeles, giro, espejo y mejora, con el lado largo [longSide].
+     */
+    suspend fun previewCardSide(preview: Bitmap, quadPx: Quad, side: IdCardSide, enhance: FilterType?, longSide: Int = 720): Bitmap =
+        withContext(Dispatchers.Default) {
+            val p = quadPx.points()
+            val arr = CardOrientation.clockwise(DoubleArray(8) { i -> (if (i % 2 == 0) p[i / 2].x else p[i / 2].y).toDouble() })
+            val rgba = Cv.toRgba(preview)
+            val bmp = try {
+                val out = CardColorDetector.warpCard(rgba, arr, longSide)
+                try {
+                    turnAndMirror(out, side.turn, side.mirror == true)
+                    Cv.toBitmap(out)
+                } finally { out.release() }
+            } finally { rgba.release() }
+            val f = side.effectiveFilter(enhance) ?: return@withContext bmp
+            val e = runCatching { ImageEnhancer.apply(bmp, f, Adjustments(), tier, true) }.getOrNull()
+            if (e != null && e !== bmp) { bmp.recycle(); e } else bmp
+        }
+
+    /**
      * Cara ya renderizada (recorte + giro + espejo + mejora) desde la CACHÉ de la página si la hay (misma foto de origen
      * y mismas ediciones de la cara: [PageFiles.idSideKey]); si no, se renderiza y se guarda. Así recomponer la hoja
      * tras editar UNA cara no vuelve a procesar la otra. Devuelve el bitmap y su clave.

@@ -250,6 +250,7 @@ fun AppNavHost(
                     docId = docId,
                     onBack = { entry.ifActive(nav) { nav.backTo(Routes.HOME) } },
                     onEditPage = { pageId -> entry.ifActive(nav) { nav.navigate(Routes.editor(docId, pageId)) } },
+                    onEditIdSide = { pageId, side -> entry.ifActive(nav) { nav.navigate(Routes.idCrop(docId, pageId, side)) } },
                     onAddPages = { mode -> entry.ifActive(nav) { nav.navigate(Routes.camera(mode, docId)) } },
                     onRetakePage = { pageId ->
                         // un DNI compuesto se vuelve a escanear como DNI (anverso + reverso), el resto como documento
@@ -276,7 +277,7 @@ fun AppNavHost(
                     docId = editorDocId,
                     pageId = entry.arguments?.getString("pageId").orEmpty(),
                     onBack = { entry.ifActive(nav) { nav.popBackStack() } },
-                    onEditIdCard = { pid -> entry.ifActive(nav) { nav.navigate(Routes.idCrop(editorDocId, pid)) } },
+                    onEditIdCard = { pid, side -> entry.ifActive(nav) { nav.navigate(Routes.idCrop(editorDocId, pid, side)) } },
                 )
             }
 
@@ -285,12 +286,14 @@ fun AppNavHost(
                 arguments = listOf(
                     navArgument("docId") { type = NavType.StringType },
                     navArgument("pageId") { type = NavType.StringType },
+                    navArgument("side") { type = NavType.IntType; defaultValue = 0 },
                 ),
             ) { entry ->
                 com.scannerpromax.ui.editor.IdCardCropScreen(
                     container = container,
                     docId = entry.arguments?.getString("docId").orEmpty(),
                     pageId = entry.arguments?.getString("pageId").orEmpty(),
+                    initialSide = entry.arguments?.getInt("side") ?: 0,
                     onBack = { entry.ifActive(nav) { nav.popBackStack() } },
                 )
             }
