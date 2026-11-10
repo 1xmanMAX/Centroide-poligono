@@ -504,8 +504,12 @@ internal class EditorSession(
             if (PageRotation.rotationOnly(c.key, e, aspect) && withContext(Dispatchers.IO) { c.value.exists() }) { base = c; break }
         }
         val b = base ?: return false
-        if (previewFinal && shown != null && shownEdits == b.key) {
-            val d = PageRotation.between(b.key, e)
+        // lo que se ve es un resultado final (el de partida o uno ya girado al instante): se gira ya
+        val shownAspect = shown?.takeIf { it.height > 0 }?.let { it.width.toFloat() / it.height } ?: 1f
+        if (previewFinal && shown != null && shownEdits != null && shownEdits != e &&
+            (shownEdits == b.key || PageRotation.rotationOnly(shownEdits, e, shownAspect))
+        ) {
+            val d = PageRotation.between(shownEdits, e)
             preview = withContext(Dispatchers.Default) { rotateBitmap(shown.asAndroidBitmap(), d) }.also { it.setHasMipMap(true) }.asImageBitmap()
             previewEdits = e
             previewFinal = true

@@ -270,3 +270,20 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
   coherente). Ajuste «Corregir distorsión de la lente» (Ajustes › Escaneo, por defecto sí). LensTest 12/12; banco en
   /tmp/claude-0/bench/notes_lente.md. Sin probar en dispositivo. No toca el flujo DNI (libre-dni).
 - 2026-11-10: FUSIONADOS libre-dni (CardColorDetector, recorte DNI editable) y libre-lente (corrección de lente) en libre. Libre 1.2.0 (versionCode 3), release firmada, tests OK. Falta probar en móvil (logcat CameraLens/LensFix).
+- 2026-11-10: GIRO + ORIENTACIÓN + TAMAÑO DNI (agente, rama `libre-giro` desde `libre`, subida; SIN fusionar). Quejas: "girar
+  reprocesa todo", "Jev debía ver si la página está derecha", "los DNI se ven pequeños". Hecho:
+  (1) Girar SIN reprocesar: `PageEdits.geoRotation` (null = como siempre, hash sin cambios) + imaging/PageRotation: la geometría y
+  el filtro se calculan con el giro de entonces y el resto se aplica AL FINAL con Core.rotate (render(B) == girar(render(A))).
+  updateEdits usa PageFiles.editPlan (REUSE/ROTATE/RENDER): un giro gira procesado + miniatura y TRANSFORMA el OCR (cajas,
+  ángulo, dimensiones), sin volver a leer; la maquetación de la IA se rehace. Editor: vista y miniaturas de filtros giradas al
+  instante + borrador del giro en segundo plano (rotateDraft). Caché de Jev por la geometría (no se invalida). Recortar,
+  enderezar o curvatura vuelven a calcular la geometría con el giro actual. JVM 12 MP: giro de píxeles 25 ms; archivo
+  JPEG completo 253 ms (antes ~2,7–3,6 s solo geometría+filtro en el escritorio; 5–10 s en móvil); PSNR 51 dB tras 4 giros JPEG.
+  (2) Orientación: imaging/OrientationVote (doc_ori × Jev si p ≥ 0,45; renglones seguros mandan salvo modelos ≥ 0,7; nunca 180
+  contra los renglones). doc_ori INCLUIDO en la app (assets/models/pp_lcnet_doc_ori.onnx, 6,8 MB, Apache-2.0): antes solo con
+  la descarga de 134 MB, sin ella solo renglones (63,6 %). Jev: pregunta `orient` en la petición de captura (sin medir: no hay
+  clave en el banco). Cola de la IA: ya no gira con doc_ori solo a p ≥ 0,4 y respeta el giro del usuario. Banco
+  OrientationBenchTest (-PoriBench): 175 páginas ×4 (FUNSD, DocLayNet, CORD, fotos DocCorner revisadas): anterior 98,1 %
+  aciertos / 1,3 % giros erróneos → nuevo 97,1 % / 0,6 %; por defecto (sin descarga) 63,6 % → 97,1 %. Notas notes_giro.md.
+  (3) «Tamaño del DNI en la hoja» (Ajustes › Escaneo): Real 100 %, Grande 140 % (defecto), Muy grande 175 %; siempre cabe en A4
+  (IdCardComposer.layout), cámara, galería y Recortar DNI. 632 tests OK, assembleDebug OK. Falta: probar en móvil.
