@@ -3,6 +3,7 @@ package com.scannerpromax.data
 import com.scannerpromax.domain.FilterType
 import com.scannerpromax.domain.Page
 import com.scannerpromax.domain.PageEdits
+import com.scannerpromax.imaging.PageRotation
 import kotlinx.serialization.json.Json
 import java.io.File
 
@@ -25,8 +26,8 @@ object PageFiles {
      * maquetación de una valen para la otra aunque cambien el filtro, los ajustes, los borrados o la cuadrícula.
      */
     fun sameGeometry(a: PageEdits, b: PageEdits): Boolean =
-        a.quad == b.quad && a.rotation == b.rotation && a.autoDeskew == b.autoDeskew && a.autoDewarp == b.autoDewarp &&
-            a.manualQuad == b.manualQuad && a.idCard == b.idCard
+        a.quad == b.quad && a.rotation == b.rotation && PageRotation.geoRotation(a) == PageRotation.geoRotation(b) &&
+            a.autoDeskew == b.autoDeskew && a.autoDewarp == b.autoDewarp && a.manualQuad == b.manualQuad && a.idCard == b.idCard
 
     /** Hash estable (entre ejecuciones) de las ediciones: va en el nombre de archivo, así cada versión tiene el suyo. */
     fun editsHash(edits: PageEdits): String =
@@ -42,11 +43,12 @@ object PageFiles {
     const val JEV_DIR = "jev"
 
     /**
-     * Caché de "Mejorar con Jev" de la página: depende SOLO de la geometría ([sameGeometry]), no del filtro ni de los
-     * ajustes: `jev/<página>_<hash de la geometría>.json`.
+     * Caché de "Mejorar con Jev" de la página: depende SOLO de la geometría, no del filtro, de los ajustes ni del giro
+     * final sin pérdidas (Jev ve la página en el marco de la geometría, [PageRotation.geoRotation]):
+     * `jev/<página>_<hash de la geometría>.json`.
      */
     fun jevCacheName(pageId: String, edits: PageEdits) =
-        "$JEV_DIR/${pageId}_${editsHash(PageEdits(quad = edits.quad, rotation = edits.rotation, autoDeskew = edits.autoDeskew, autoDewarp = edits.autoDewarp, manualQuad = edits.manualQuad, idCard = edits.idCard))}.json"
+        "$JEV_DIR/${pageId}_${editsHash(PageEdits(quad = edits.quad, rotation = PageRotation.geoRotation(edits), autoDeskew = edits.autoDeskew, autoDewarp = edits.autoDewarp, manualQuad = edits.manualQuad, idCard = edits.idCard))}.json"
 
     /**
      * Foto ORIGINAL de una cara del DNI compuesto ([PageEdits.idCard]): `original/<página>_idfront.jpg` / `_idback.jpg`.

@@ -142,6 +142,13 @@ data class PageEdits(
      * antiguo sin fotos de origen: el recorte se edita como siempre); al ser null no se serializa y el hash no cambia.
      */
     val idCard: IdCardEdits? = null,
+    /**
+     * Giro (horario) con el que se calculó la GEOMETRÍA (recorte, enderezado, hoja curvada) del procesado; el resto hasta
+     * [rotation] se aplica AL FINAL, sin pérdidas (giro de píxeles, ver imaging/PageRotation). Así girar la página no
+     * reprocesa nada: el procesado nuevo es el anterior girado y un render desde cero da exactamente lo mismo. null = el
+     * mismo que [rotation] (lo de siempre); al ser null no se serializa y el hash guardado no cambia.
+     */
+    val geoRotation: Int? = null,
 )
 
 /** Recorte de una cara del DNI: [quad] NORMALIZADO 0..1 sobre su foto original (con la orientación EXIF aplicada). */

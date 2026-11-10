@@ -36,8 +36,12 @@ internal object TextOrientation {
      * renglones van en vertical (null = eje dudoso); [up] = evidencia de sentido (−1..1, >0 = ascendentes arriba tras
      * poner los renglones en horizontal girando 90° horario si eran verticales); [lines] = renglones medidos.
      */
-    class Result(val rotation: Int, val vertical: Boolean?, val up: Double, val lines: Int, val sure: Boolean, val fh: Double, val fv: Double) {
-        override fun toString() = "rot=$rotation vertical=$vertical up=%.3f lines=$lines sure=$sure fh=%.2f fv=%.2f".format(java.util.Locale.ROOT, up, fh, fv)
+    class Result(
+        val rotation: Int, val vertical: Boolean?, val up: Double, val lines: Int, val sure: Boolean, val fh: Double, val fv: Double,
+        /** El eje salió de las tiras de renglón ([stripAxis]: los vecinos no decidían): evidencia más débil. */
+        val fromStrips: Boolean = false,
+    ) {
+        override fun toString() = "rot=$rotation vertical=$vertical up=%.3f lines=$lines sure=$sure fh=%.2f fv=%.2f strips=$fromStrips".format(java.util.Locale.ROOT, up, fh, fv)
     }
 
     private const val WORK_SIDE = 1400
@@ -130,17 +134,17 @@ internal object TextOrientation {
             val b = ascTest(fl, c, bag)
             if (best == null || a[2] + b[2] > best[2]) best = doubleArrayOf(a[0], b[0], a[2] + b[2])
         }
-        val bst = best ?: return@use Result(0, vertical, 0.0, 0, false, fh, fv)
+        val bst = best ?: return@use Result(0, vertical, 0.0, 0, false, fh, fv, fromStrips)
         val up = (bst[0] - bst[1]) / 2; val nl = bst[2].toInt()
         val consistent = bst[0] * -bst[1] > 0
         // Eje sacado de los renglones (los vecinos no decidían): página difícil, sentido con más evidencia y nunca 180°
         val minUp = if (fromStrips) STRIP_MIN_UP else MIN_UP
         if (vertical) {
             val sure = consistent && nl >= MIN_LINES && abs(up) >= minUp
-            Result(if (sure) (if (up > 0) 90 else 270) else 0, true, up, nl, sure, fh, fv)
+            Result(if (sure) (if (up > 0) 90 else 270) else 0, true, up, nl, sure, fh, fv, fromStrips)
         } else {
             val sure = !fromStrips && consistent && nl >= MIN_LINES_180 && up <= -MIN_UP_180
-            Result(if (sure) 180 else 0, false, up, nl, sure || (consistent && nl >= MIN_LINES && up >= MIN_UP), fh, fv)
+            Result(if (sure) 180 else 0, false, up, nl, sure || (consistent && nl >= MIN_LINES && up >= MIN_UP), fh, fv, fromStrips)
         }
     }
 

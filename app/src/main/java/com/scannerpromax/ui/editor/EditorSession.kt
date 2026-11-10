@@ -20,7 +20,9 @@ import com.scannerpromax.domain.Quad
 import com.scannerpromax.imaging.BitmapIO
 import com.scannerpromax.imaging.DeviceProfiler
 import com.scannerpromax.imaging.ImageEnhancer
+import com.scannerpromax.imaging.PageRotation
 import com.scannerpromax.imaging.PerspectiveCorrector
+import androidx.compose.ui.graphics.asAndroidBitmap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -278,7 +280,7 @@ internal class EditorSession(
         if (edits.autoDeskew == enabled) return false
         val hadStrokes = edits.eraseStrokes.isNotEmpty()
         redoStack.clear(); canRedo = false
-        update(edits.copy(autoDeskew = enabled, eraseStrokes = emptyList()))
+        update(edits.copy(autoDeskew = enabled, eraseStrokes = emptyList(), geoRotation = null))
         regenerateThumbs()
         return hadStrokes
     }
@@ -291,25 +293,40 @@ internal class EditorSession(
         if (edits.autoDewarp == enabled) return false
         val hadStrokes = edits.eraseStrokes.isNotEmpty()
         redoStack.clear(); canRedo = false
-        update(edits.copy(autoDewarp = enabled, eraseStrokes = emptyList()))
+        update(edits.copy(autoDewarp = enabled, eraseStrokes = emptyList(), geoRotation = null))
         regenerateThumbs()
         return hadStrokes
     }
 
-    /** Rota 90° y transforma los trazos de borrado para que sigan sobre la misma zona. */
+    /**
+     * Rota 90° SIN reprocesar: el giro va al final de la tubería ([PageRotation]); la geometría, el filtro y los borrados
+     * no cambian (los trazos se giran con la página). Lo que se ve, las miniaturas de filtros y el procesado se giran
+     * píxel a píxel (instantáneo); al guardar no se vuelve a renderizar.
+     */
     fun rotate(clockwise: Boolean) {
-        val aspect = currentAspect()
+        val aspect = previewAspect() ?: currentAspect()
         val rot = ((edits.rotation + if (clockwise) 90 else 270) % 360 + 360) % 360
-        val strokes = edits.eraseStrokes.map { s ->
-            EraseStroke(
-                points = s.points.map { p -> if (clockwise) Pt(1f - p.y, p.x) else Pt(p.y, 1f - p.x) },
-                radius = s.radius * aspect,
-                mode = s.mode,
-            )
-        }
         redoStack.clear(); canRedo = false
-        update(edits.copy(rotation = rot, eraseStrokes = strokes))
-        regenerateThumbs()
+        val before = edits
+        update(PageRotation.withRotation(edits, rot, aspect))
+        rotateFilterThumbs(before, edits)
+    }
+
+    /** Proporción de lo que se ve si es el resultado de las ediciones actuales (más exacta que la estimada). */
+    private fun previewAspect(): Float? {
+        val p = preview ?: return null
+        if (previewEdits != edits || p.height <= 0) return null
+        return p.width.toFloat() / p.height
+    }
+
+    /** Las miniaturas de filtros solo dependen de la geometría: al girar se giran (sin recalcularlas). */
+    private fun rotateFilterThumbs(before: PageEdits, after: PageEdits) {
+        val d = PageRotation.between(before, after)
+        if (d == 0) return
+        val complete = FilterType.visible.all { filterThumbs.containsKey(it) } && thumbsJob?.isActive != true
+        if (!complete) { regenerateThumbs(); return }
+        for ((f, t) in filterThumbs.toMap()) filterThumbs[f] = rotateBitmap(t.asAndroidBitmap(), d).asImageBitmap()
+        thumbsKey = thumbsKeyOf(after)
     }
 
     fun addStroke(stroke: EraseStroke) {
@@ -342,7 +359,9 @@ internal class EditorSession(
     /** Fija el quad desde coordenadas de trabajo. */
     fun setWorkingQuad(q: Quad?, refresh: Boolean = false, manual: Boolean = false) {
         val original = q?.let { scaleQuad(it, 1f / workScale) }
-        update(edits.copy(quad = original, manualQuad = if (manual && original != null) true else null), refresh)
+        // otro recorte = otra geometría: se calcula ya con el giro actual (el giro final sin pérdidas deja de hacer falta)
+        val geo = if (original == edits.quad) edits.geoRotation else null
+        update(edits.copy(quad = original, manualQuad = if (manual && original != null) true else null, geoRotation = geo), refresh)
     }
 
     /** Resultado de validar el recorte antes de guardarlo. */
@@ -389,6 +408,12 @@ internal class EditorSession(
             combine(editsFlow.filterNotNull(), sideFlow) { e, side -> e to side }.collectLatest { (e, side) ->
                 // Render final en curso de OTRAS ediciones: ya no sirve.
                 if (draftEdits != null && draftEdits != e) cancelDraft()
+                // a0) Solo cambió el GIRO respecto de un resultado final ya hecho: se gira lo que se ve (al instante) y el
+                //     procesado se gira en segundo plano; nada de vista previa ni de render.
+                if (finalFiles[e]?.exists() != true && showRotated(e)) {
+                    previewPending = false
+                    return@collectLatest
+                }
                 // a) Resultado final ya disponible (procesado guardado o borrador): se muestra TAL CUAL.
                 val final = finalFiles[e]?.takeIf { it.exists() }
                 if (final != null) {
@@ -464,6 +489,73 @@ internal class EditorSession(
     }
 
     /**
+     * Si [e] es un resultado final conocido girado ([PageRotation.rotationOnly]): muestra la vista actual girada (si es
+     * ese resultado) y lanza el giro del procesado ([com.scannerpromax.data.DocumentRepository.rotateDraft]). false = no
+     * aplica (hay que calcular la vista previa).
+     */
+    private suspend fun showRotated(e: PageEdits): Boolean {
+        val shownEdits = previewEdits
+        val shown = preview
+        val candidates = finalFiles.entries.filter { it.key != e }
+        var base: Map.Entry<PageEdits, File>? = null
+        for (c in candidates) {
+            val aspect = if (c.key == shownEdits && shown != null && shown.height > 0) shown.width.toFloat() / shown.height
+            else withContext(Dispatchers.IO) { BitmapIO.decodeBounds(c.value.absolutePath) }.let { (w, h) -> if (w > 0 && h > 0) w.toFloat() / h else 1f }
+            if (PageRotation.rotationOnly(c.key, e, aspect) && withContext(Dispatchers.IO) { c.value.exists() }) { base = c; break }
+        }
+        val b = base ?: return false
+        if (previewFinal && shown != null && shownEdits == b.key) {
+            val d = PageRotation.between(b.key, e)
+            preview = withContext(Dispatchers.Default) { rotateBitmap(shown.asAndroidBitmap(), d) }.also { it.setHasMipMap(true) }.asImageBitmap()
+            previewEdits = e
+            previewFinal = true
+        }
+        startRotateDraft(b.key, e)
+        return true
+    }
+
+    /** Giro del procesado de [from] como resultado de [to], en segundo plano (save() lo espera si hace falta). */
+    private fun startRotateDraft(from: PageEdits, to: PageEdits) {
+        if (disposed) return
+        if (draftEdits == to && draftJob?.isActive == true) return
+        cancelDraft()
+        draftEdits = to
+        draftJob = scope.launch {
+            finalizing = true
+            try {
+                val f = container.documents.rotateDraft(docId, pageId, from, to) ?: return@launch
+                finalFiles[to] = f
+                // la vista no era ese resultado (vista aproximada): se muestra ya el procesado girado
+                if (edits == to && !disposed && previewEdits != to) {
+                    val shown = withContext(Dispatchers.IO) { runCatching { decodeFinal(f, sideFlow.value) }.getOrNull() }
+                    if (shown != null && edits == to) {
+                        preview = shown.first.asImageBitmap()
+                        previewEdits = to
+                        previewFinal = true
+                        renderedSide = shown.second
+                    }
+                }
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                Log.w(TAG, "No se pudo girar el procesado", t)
+            } finally {
+                if (draftEdits == to) {
+                    finalizing = false
+                    draftEdits = null
+                }
+            }
+        }
+    }
+
+    /** [src] girado [deg] grados (horario) sin filtrar (copia exacta de los píxeles). */
+    private fun rotateBitmap(src: Bitmap, deg: Int): Bitmap {
+        if (deg % 360 == 0) return src
+        val m = android.graphics.Matrix().apply { postRotate(deg.toFloat()) }
+        return Bitmap.createBitmap(src, 0, 0, src.width, src.height, m, false)
+    }
+
+    /**
      * Render FINAL de [e] en segundo plano tras [DRAFT_IDLE_MS] sin cambios (trabajo propio, fuera de collectLatest
      * para no bloquear la siguiente vista previa). Al terminar sustituye a la vista previa aproximada si las ediciones
      * siguen siendo esas.
@@ -523,7 +615,7 @@ internal class EditorSession(
 
     /** Vista previa rápida: filtro sobre [fastGeo] (se rehace solo si cambia la geometría). Llamar bajo [work]. */
     private fun fastPreview(src: Bitmap, e: PageEdits): Bitmap {
-        val key = listOf(e.quad, e.rotation, e.autoDeskew, e.autoDewarp)
+        val key = listOf(e.quad, e.rotation, e.geoRotation, e.autoDeskew, e.autoDewarp)
         var geo = fastGeo
         if (geo == null || geo.isRecycled || fastGeoKey != key) {
             geo?.recycle()
@@ -542,7 +634,7 @@ internal class EditorSession(
     /** Miniaturas de cada filtro (~200 px) en segundo plano. Solo se rehacen si cambia la geometría. */
     fun regenerateThumbs() {
         val e = edits
-        val key = Triple(e.quad, e.rotation, source?.generationId)
+        val key = thumbsKeyOf(e)
         if (key == thumbsKey && FilterType.visible.all { filterThumbs.containsKey(it) }) return
         thumbsKey = key
         thumbsJob?.cancel()
@@ -588,6 +680,8 @@ internal class EditorSession(
             }
         }
     }
+
+    private fun thumbsKeyOf(e: PageEdits): Any = listOf(e.quad, e.rotation, e.geoRotation, source?.generationId)
 
     // ---------------------------------------------------------------------------------------------
     // Guardar / liberar

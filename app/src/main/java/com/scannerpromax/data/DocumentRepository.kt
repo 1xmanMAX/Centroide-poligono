@@ -26,6 +26,7 @@ import com.scannerpromax.imaging.DeviceTier
 import com.scannerpromax.imaging.Cv
 import com.scannerpromax.imaging.DuplicatePages
 import com.scannerpromax.imaging.PageProcessor
+import com.scannerpromax.imaging.PageRotation
 import com.scannerpromax.imaging.PerspectiveCorrector
 import com.scannerpromax.imaging.ProgressCallback
 import com.scannerpromax.ocr.OcrEngine
@@ -351,7 +352,8 @@ class DocumentRepository(
                         // Hoja girada 90° (renglones verticales) o del revés: se endereza SOLO si es muy fiable; el giro
                         // queda en las ediciones (el usuario lo cambia o deshace en el editor y la IA no vuelve a girar)
                         val rot = if (autoDetect && (m == ScanMode.DOCUMENT || m == ScanMode.RECEIPT) && base.aiHint != "photo") {
-                            runCatching { processor.autoOrientation(bmp, q0) }.getOrDefault(0)
+                            // voto: renglones + doc_ori (si está descargado) + Jev (si «Mejorar con Jev» respondió la orientación)
+                            runCatching { processor.autoOrientation(bmp, q0, JevCapture.orientation(hints)) }.getOrDefault(0)
                         } else 0
                         if (rot != 0) base.copy(rotation = rot) else base
                     }
@@ -527,28 +529,43 @@ class DocumentRepository(
                 return@withLock current
             }
 
-            // Render final ya hecho en segundo plano por el editor para ESTAS ediciones ([renderDraft]): es exactamente
-            // el mismo render (mismo original, presupuesto y tubería), así que se reutiliza sin volver a procesar.
+            // ¿Solo cambia el giro? Entonces NO se reprocesa nada: el procesado y la miniatura actuales se giran sin pérdidas
+            // y las cajas del OCR se transforman (ver [PageRotation]).
+            val currentProcessed = File(dir, processedName(pageId, current.edits))
+            val rotOnly = withContext(Dispatchers.IO) { currentProcessed.exists() } &&
+                PageRotation.rotationOnly(current.edits, edits, withContext(Dispatchers.IO) { aspectOf(currentProcessed) })
+
+            // Render final ya hecho en segundo plano por el editor para ESTAS ediciones ([renderDraft] o [rotateDraft]):
+            // es exactamente el mismo resultado (mismo original, presupuesto y tubería), así que se reutiliza sin volver a procesar.
             val draftThumb = thumbName(pageId, edits)
             val (processedName, thumbName) = if (File(dir, newProcessed).exists() && File(dir, draftThumb).exists()) {
                 newProcessed to draftThumb
+            } else if (rotOnly) {
+                withContext(Dispatchers.Default) { rotateFiles(docId, pageId, current.edits, edits) }
             } else heavyWork {
                 withContext(Dispatchers.Default) {
                     renderFromOriginal(docId, pageId, File(dir, current.originalFile), edits, current.width, current.height)
                 }
             }
+            // OCR girado (mismo texto, cajas transformadas): no se vuelve a leer la página
+            val rotatedOcr = if (rotOnly) current.ocrFile?.let { old ->
+                withContext(Dispatchers.IO) { rotateOcrFile(dir, old, ocrName(pageId, edits), PageRotation.between(current.edits, edits)) }
+            } else null
+            // La maquetación de la IA (renglones horizontales) no se gira: se rehace sobre la página girada
+            val hadLayout = rotOnly && withContext(Dispatchers.IO) { File(dir, PageFiles.layoutName(pageId, current.edits)).exists() }
 
             var result: Page = current
             mutatePages(docId) { pages ->
                 pages.map { p ->
                     if (p.id != pageId) p else {
                         cleanupStale(dir, p, keepProcessed = processedName, keepThumb = thumbName)
-                        // El OCR guardado deja de ser válido solo si la imagen cambió.
+                        // El OCR guardado deja de ser válido solo si la imagen cambió (con un giro, va girado).
                         val editsChanged = p.edits != edits
+                        val keptOcr = rotatedOcr?.takeIf { p.edits == current.edits && p.ocrFile == current.ocrFile }
                         if (editsChanged) {
-                            p.ocrFile?.let { File(dir, it).delete() }
+                            p.ocrFile?.takeIf { it != keptOcr }?.let { File(dir, it).delete() }
                             File(dir, PageFiles.layoutName(pageId, p.edits)).delete()
-                            ocrFailFile(docId, pageId).delete() // imagen nueva: se vuelve a intentar
+                            if (keptOcr == null) ocrFailFile(docId, pageId).delete() // imagen nueva: se vuelve a intentar
                         }
                         p.copy(
                             edits = edits,
@@ -558,18 +575,99 @@ class DocumentRepository(
                             // hay corrección se mantiene el texto anterior como aproximación para la búsqueda
                             // hasta que el nuevo OCR lo sustituya.
                             ocrText = p.ocrEditedText ?: p.ocrText,
-                            ocrFile = if (editsChanged) null else p.ocrFile,
+                            ocrFile = if (editsChanged) keptOcr else p.ocrFile,
                         ).also { result = it }
                     }
                 }
             }
+            if (rotatedOcr != null && result.ocrFile != rotatedOcr) withContext(Dispatchers.IO) { File(dir, rotatedOcr).delete() }
             if (result.ocrFile == null) {
                 enqueueOcr(docId, pageId)
+                aiHook?.onPageChanged(docId, pageId)
+            } else if (hadLayout) {
                 aiHook?.onPageChanged(docId, pageId)
             }
             result
         }
     }
+
+    /**
+     * Borrador de un GIRO: el procesado (y la miniatura) de [from] girados sin pérdidas como resultado de [to] (que solo
+     * cambia el giro, [PageRotation.rotationOnly]). Sin reprocesar: decodificar + transponer + codificar. El editor lo
+     * lanza al girar y [updateEdits] lo reutiliza al guardar. null si [from] no tiene procesado en disco.
+     */
+    suspend fun rotateDraft(docId: String, pageId: String, from: PageEdits, to: PageEdits): File? {
+        loaded.await()
+        val dir = docDir(docId)
+        val pName = processedName(pageId, to)
+        if (withContext(Dispatchers.IO) { File(dir, pName).exists() && File(dir, thumbName(pageId, to)).exists() }) return File(dir, pName)
+        if (!withContext(Dispatchers.IO) { File(dir, processedName(pageId, from)).exists() }) return null
+        return withContext(Dispatchers.Default) { File(dir, rotateFiles(docId, pageId, from, to).first) }
+    }
+
+    /** Voto de orientación ([com.scannerpromax.imaging.OrientationVote]) sobre una página ya procesada [bmp]; null si falla. */
+    fun orientationOf(bmp: Bitmap): com.scannerpromax.imaging.OrientationVote.Decision? = runCatching {
+        val m = Cv.toRgba(bmp)
+        try { processor.orientationDecision(m, null) } finally { m.release() }
+    }.getOrNull()
+
+    /** Ancho/alto de una imagen en disco (1 si no se puede leer). */
+    private fun aspectOf(f: File): Float {
+        val (w, h) = BitmapIO.decodeBounds(f.absolutePath)
+        return if (w > 0 && h > 0) w.toFloat() / h else 1f
+    }
+
+    /**
+     * Gira SIN PÉRDIDAS el procesado y la miniatura de [from] para [to] (mismo contenido, solo otro giro): transposición
+     * de píxeles con OpenCV, sin remuestrear ni volver a filtrar. El PNG de B/N queda exacto; el JPEG se vuelve a
+     * codificar con la misma calidad. Devuelve (procesado, miniatura) de [to].
+     */
+    private suspend fun rotateFiles(docId: String, pageId: String, from: PageEdits, to: PageEdits): Pair<String, String> {
+        val dir = docDir(docId)
+        val d = PageRotation.between(from, to)
+        val src = File(dir, processedName(pageId, from))
+        val pName = processedName(pageId, to)
+        val tName = thumbName(pageId, to)
+        val t0 = System.nanoTime()
+        currentCoroutineContext().ensureActive()
+        val rotated = rotateBitmapFile(src, d)
+        try {
+            withContext(Dispatchers.IO) {
+                checkAlive(docId)
+                File(dir, PROCESSED_DIR).mkdirs(); File(dir, THUMB_DIR).mkdirs()
+                // miniatura: la actual girada (es la reducción del mismo procesado) o, si falta, una nueva
+                val oldThumb = File(dir, thumbName(pageId, from))
+                val thumb = if (oldThumb.exists()) runCatching { rotateBitmapFile(oldThumb, d) }.getOrNull() else null
+                val t = thumb ?: BitmapIO.thumbnail(rotated, THUMB_SIDE)
+                try { saveJpegAtomic(t, File(dir, tName), THUMB_QUALITY) } finally { if (t !== rotated) t.recycle() }
+                if (isBinaryFilter(to.filter)) saveAtomic(rotated, File(dir, pName), Bitmap.CompressFormat.PNG, 100)
+                else saveJpegAtomic(rotated, File(dir, pName), PROCESSED_QUALITY)
+            }
+        } finally {
+            rotated.recycle()
+        }
+        Log.i(TAG, "Giro de $d° sin reprocesar en ${(System.nanoTime() - t0) / 1_000_000} ms")
+        return pName to tName
+    }
+
+    /** Imagen [f] girada [d] grados (horario) píxel a píxel. */
+    private fun rotateBitmapFile(f: File, d: Int): Bitmap {
+        val bmp = BitmapIO.decode(f.absolutePath, 0)
+        val m = try { Cv.toRgba(bmp) } finally { bmp.recycle() }
+        val r = try { PageRotation.rotateMat(m, d) } finally { m.release() }
+        try { return Cv.toBitmap(r) } finally { r.release() }
+    }
+
+    /** OCR [from] girado [d] grados guardado como [to]; devuelve [to] o null si no se pudo leer. */
+    private fun rotateOcrFile(dir: File, from: String, to: String, d: Int): String? = runCatching {
+        val src = File(dir, from)
+        if (!src.exists()) return null
+        val ocr = json.decodeFromString(OcrResult.serializer(), src.readText())
+        val f = File(dir, to)
+        f.parentFile?.mkdirs()
+        writeAtomic(f, json.encodeToString(OcrResult.serializer(), PageRotation.rotateOcr(ocr, d)), sync = false)
+        to
+    }.onFailure { Log.w(TAG, "No se pudo girar el OCR", it) }.getOrNull()
 
     /** Foto original de una cara del DNI compuesto (puede no existir: DNI antiguo). */
     fun idSourceFile(docId: String, pageId: String, back: Boolean): File = File(docDir(docId), PageFiles.idSourceName(pageId, back))
@@ -588,7 +686,7 @@ class DocumentRepository(
             val current = findPage(docId, pageId) ?: throw IOException("Página no encontrada")
             val dir = docDir(docId)
             val newOriginal = "$ORIGINAL_DIR/${pageId}_c${System.currentTimeMillis()}.jpg"
-            val edits = current.edits.copy(idCard = card, quad = null, manualQuad = null, eraseStrokes = emptyList())
+            val edits = current.edits.copy(idCard = card, quad = null, manualQuad = null, eraseStrokes = emptyList(), geoRotation = null)
             val pw = composed.width; val ph = composed.height
             val (processedName, thumbName) = heavyWork {
                 withContext(Dispatchers.Default) {

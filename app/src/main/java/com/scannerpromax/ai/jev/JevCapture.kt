@@ -21,7 +21,9 @@ import java.io.File
  *  - `type_a` / `type_b` (choice, mismas opciones en orden inverso): tipo de documento → modo y filtro (banco i1:
  *    acierto 26,6 % → 93,5 %; con ambas de acuerdo y p ≥ 0,7, 97 %);
  *  - `folder` (choice): carpeta sugerida (banco i8: 84 %);
- *  - `glare`, `cut`, `finger`, `shadow` (noul): problemas de captura para sugerir «Reescanear» (banco i3, umbrales altos).
+ *  - `glare`, `cut`, `finger`, `shadow` (noul): problemas de captura para sugerir «Reescanear» (banco i3, umbrales altos);
+ *  - `orient` (choice): hacia dónde mira la parte de ARRIBA del documento → una señal más del voto de orientación
+ *    ([com.scannerpromax.imaging.OrientationVote]); ≈ 30 tokens más. SIN MEDIR con la API (no había clave en el banco).
  * Los textos de las preguntas son los del banco (scratchpad jev_ideas/ideas/i1, i3, i8, i9): cambiarlos exige volver a medir.
  */
 object JevCapture {
@@ -85,9 +87,20 @@ object JevCapture {
         "shadow" to "Is there a strong shadow cast over part of the document in `photo`?",
     )
 
+    /**
+     * Orientación: hacia dónde queda la parte de ARRIBA del documento en la foto. Clave → giro HORARIO que lo endereza
+     * (el orden de [orientation]: 0, 90, 180, 270).
+     */
+    val ORIENT: Map<String, String> = linkedMapOf(
+        "upright" to "The document is upright: its text reads normally, left to right, with the top of the page at the top of the photo.",
+        "top_left" to "The document is turned sideways: the top of the page points to the LEFT edge of the photo (text runs bottom to top).",
+        "upside_down" to "The document is upside down: the top of the page is at the bottom of the photo.",
+        "top_right" to "The document is turned sideways: the top of the page points to the RIGHT edge of the photo (text runs top to bottom).",
+    )
+
     /** Petición combinada sobre la foto [img]. */
-    fun request(img: JevImage, type: Boolean = true, folder: Boolean = true, framing: Boolean = true, quality: Boolean = true): JevRequest {
-        require(type || folder || framing || quality)
+    fun request(img: JevImage, type: Boolean = true, folder: Boolean = true, framing: Boolean = true, quality: Boolean = true, orient: Boolean = true): JevRequest {
+        require(type || folder || framing || quality || orient)
         val q = LinkedHashMap<String, JevQuestion>()
         if (framing) {
             q["doc"] = JevQuestion.Noul("Is there a document, sheet of paper, receipt, card or book page in `photo`?")
@@ -101,6 +114,7 @@ object JevCapture {
         }
         if (folder) q["folder"] = JevQuestion.Choice("Which folder should the scanned document in `photo` be filed in?", FOLDERS)
         if (quality) QUALITY.forEach { (k, v) -> q[k] = JevQuestion.Noul(v) }
+        if (orient) q["orient"] = JevQuestion.Choice("Which way is the document in `photo` oriented? Look at the direction of its text.", ORIENT)
         return JevRequest(buildJsonObject { put("photo", JsonPrimitive(img.asset.ref)) }, q, listOf(img.asset))
     }
 
@@ -118,8 +132,17 @@ object JevCapture {
             folder = r["folder"]?.choice,
             folderP = r["folder"]?.let { f -> f.choice?.let { f.p(it) } } ?: 0.0,
             glare = r["glare"]?.noul, cut = r["cut"]?.noul, finger = r["finger"]?.noul, shadow = r["shadow"]?.noul,
+            orient = r["orient"]?.let { a -> ORIENT.keys.map { a.p(it) }.takeIf { it.sum() > 0.0 } },
             inputTokens = r.inputTokens, ms = r.ms,
         )
+    }
+
+    /**
+     * Probabilidades (0, 90, 180, 270) del giro HORARIO que endereza el documento según Jev, o null sin respuesta. Es la
+     * orientación en la FOTO: vale para la página rectificada porque el recorte conserva la orientación de la foto.
+     */
+    fun orientation(h: CaptureHints?): FloatArray? = h?.orient?.takeIf { it.size == 4 && it.sum() > 0.0 }?.let { o ->
+        FloatArray(4) { o[it].toFloat() }
     }
 
     /** Analiza [photo] (RGB/RGBA, cualquier tamaño). Lanza si falla la red o la API. */
@@ -300,6 +323,8 @@ data class CaptureHints(
     val cut: Double? = null,
     val finger: Double? = null,
     val shadow: Double? = null,
+    /** Orientación (probabilidades de [JevCapture.ORIENT], en su orden) o null (caché antigua o sin respuesta). */
+    val orient: List<Double>? = null,
     val inputTokens: Long = 0,
     val ms: Long = 0,
 ) {
@@ -313,6 +338,7 @@ data class CaptureHints(
         folder?.let { put("folder", it) }
         put("folderP", folderP)
         glare?.let { put("glare", it) }; cut?.let { put("cut", it) }; finger?.let { put("finger", it) }; shadow?.let { put("shadow", it) }
+        orient?.let { o -> put("orient", kotlinx.serialization.json.JsonArray(o.map { JsonPrimitive(it) })) }
         put("tokens", inputTokens); put("ms", ms)
     }.toString()
 
@@ -333,6 +359,7 @@ data class CaptureHints(
                 d("doc"), box, d("boxConf"), str("type"), d("typeP") ?: 0.0, d("typeP2") ?: 0.0,
                 (o["typeAgree"] as? JsonPrimitive)?.content?.toBooleanStrictOrNull() ?: false,
                 str("folder"), d("folderP") ?: 0.0, d("glare"), d("cut"), d("finger"), d("shadow"),
+                (o["orient"] as? kotlinx.serialization.json.JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.doubleOrNull }?.takeIf { it.size == 4 },
                 (o["tokens"] as? JsonPrimitive)?.longOrNull ?: 0, (o["ms"] as? JsonPrimitive)?.longOrNull ?: 0,
             )
         }.getOrNull()
