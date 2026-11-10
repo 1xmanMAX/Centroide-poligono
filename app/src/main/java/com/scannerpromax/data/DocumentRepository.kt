@@ -429,7 +429,15 @@ class DocumentRepository(
      * [edits] (quad incluido) está en coordenadas de [bitmap]. El original se guarda a tamaño completo; el render
      * se hace sobre una copia reducida a [DeviceTier.maxWorkingPixels] si hace falta. No recicla [bitmap].
      */
-    suspend fun addPageFromBitmap(docId: String, bitmap: Bitmap, edits: PageEdits = PageEdits()): Page {
+    suspend fun addPageFromBitmap(docId: String, bitmap: Bitmap, edits: PageEdits = PageEdits()): Page =
+        addPageFromBitmap(docId, bitmap, edits, null, null)
+
+    /**
+     * Como [addPageFromBitmap], con las fotos ORIGINALES de las caras del DNI ([idFront], [idBack]) que se guardan junto a la
+     * página ([PageFiles.idSourceName]) para poder corregir el recorte después ([recomposeIdCard]). Se MUEVEN si son
+     * temporales de la app (capturas) y se copian si no.
+     */
+    suspend fun addPageFromBitmap(docId: String, bitmap: Bitmap, edits: PageEdits, idFront: File?, idBack: File?): Page {
         loaded.await()
         get(docId) ?: throw IOException("Documento no encontrado")
         checkAlive(docId)
@@ -447,6 +455,8 @@ class DocumentRepository(
                         File(dir, ORIGINAL_DIR).mkdirs()
                         // Original GENERADO (DNI compuesto...): JPEG 100, la única codificación antes del procesado.
                         BitmapIO.saveJpeg(bitmap, File(dir, originalName).absolutePath, ORIGINAL_QUALITY)
+                        idFront?.let { moveOrCopy(it, File(dir, PageFiles.idSourceName(pageId, back = false))) }
+                        idBack?.let { moveOrCopy(it, File(dir, PageFiles.idSourceName(pageId, back = true))) }
                     }
                     val px = pw.toLong() * ph
                     val src = if (tier.maxWorkingPixels > 0 && px > tier.maxWorkingPixels) {
@@ -541,6 +551,64 @@ class DocumentRepository(
                 enqueueOcr(docId, pageId)
                 aiHook?.onPageChanged(docId, pageId)
             }
+            result
+        }
+    }
+
+    /** Foto original de una cara del DNI compuesto (puede no existir: DNI antiguo). */
+    fun idSourceFile(docId: String, pageId: String, back: Boolean): File = File(docDir(docId), PageFiles.idSourceName(pageId, back))
+
+    /**
+     * Corrige el recorte de un DNI compuesto: [composed] es la hoja nueva (las caras recortadas otra vez desde sus fotos
+     * originales con [card]); pasa a ser el ORIGINAL de la página (archivo nuevo: un render en curso del anterior no lee
+     * una mezcla) y la página se re-renderiza con sus ediciones + [card]. El recorte de la hoja y los borrados manuales
+     * se quitan (eran de la hoja anterior). No recicla [composed].
+     */
+    suspend fun recomposeIdCard(docId: String, pageId: String, composed: Bitmap, card: com.scannerpromax.domain.IdCardEdits): Page {
+        loaded.await()
+        val key = "$docId/$pageId"
+        editGenerations.getOrPut(key) { AtomicLong() }.incrementAndGet()
+        return pageLock(key).withLock {
+            val current = findPage(docId, pageId) ?: throw IOException("Página no encontrada")
+            val dir = docDir(docId)
+            val newOriginal = "$ORIGINAL_DIR/${pageId}_c${System.currentTimeMillis()}.jpg"
+            val edits = current.edits.copy(idCard = card, quad = null, manualQuad = null, eraseStrokes = emptyList())
+            val pw = composed.width; val ph = composed.height
+            val (processedName, thumbName) = heavyWork {
+                withContext(Dispatchers.Default) {
+                    try {
+                        withContext(Dispatchers.IO) { BitmapIO.saveJpeg(composed, File(dir, newOriginal).absolutePath, ORIGINAL_QUALITY) }
+                        renderFromOriginal(docId, pageId, File(dir, newOriginal), edits, pw, ph)
+                    } catch (t: Throwable) {
+                        withContext(NonCancellable + Dispatchers.IO) { File(dir, newOriginal).delete() }
+                        throw t
+                    }
+                }
+            }
+            var result: Page = current
+            mutatePages(docId) { pages ->
+                pages.map { p ->
+                    if (p.id != pageId) p else {
+                        cleanupStale(dir, p, keepProcessed = processedName, keepThumb = thumbName)
+                        p.ocrFile?.let { File(dir, it).delete() }
+                        File(dir, PageFiles.layoutName(pageId, p.edits)).delete()
+                        ocrFailFile(docId, pageId).delete()
+                        if (p.originalFile != newOriginal) File(dir, p.originalFile).delete()
+                        p.copy(
+                            originalFile = newOriginal,
+                            width = pw,
+                            height = ph,
+                            edits = edits,
+                            processedFile = processedName,
+                            thumbFile = thumbName,
+                            ocrText = p.ocrEditedText ?: p.ocrText,
+                            ocrFile = null,
+                        ).also { result = it }
+                    }
+                }
+            }
+            enqueueOcr(docId, pageId)
+            aiHook?.onPageChanged(docId, pageId)
             result
         }
     }
@@ -825,6 +893,8 @@ class DocumentRepository(
                 }
                 // La maquetación sigue a la página (mismo hash de ediciones).
                 cp(PageFiles.layoutName(p.id, p.edits))
+                // fotos originales de las caras del DNI (corregir el recorte en el documento de destino)
+                cp(PageFiles.idSourceName(p.id, back = false)); cp(PageFiles.idSourceName(p.id, back = true))
                 p.copy(
                     id = newId,
                     originalFile = cp(p.originalFile) ?: p.originalFile,

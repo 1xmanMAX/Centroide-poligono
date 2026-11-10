@@ -1,8 +1,6 @@
 package com.scannerpromax.ui.camera
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Color
 import android.graphics.RectF
 import android.net.Uri
 import android.util.Log
@@ -10,12 +8,16 @@ import com.scannerpromax.data.AppSettings
 import com.scannerpromax.di.AppContainer
 import com.scannerpromax.domain.Adjustments
 import com.scannerpromax.domain.FilterType
+import com.scannerpromax.domain.IdCardEdits
+import com.scannerpromax.domain.IdCardSide
 import com.scannerpromax.domain.PageEdits
 import com.scannerpromax.domain.Pt
 import com.scannerpromax.domain.Quad
 import com.scannerpromax.domain.ScanMode
 import com.scannerpromax.imaging.BitmapIO
 import com.scannerpromax.imaging.BookSplitter
+import com.scannerpromax.imaging.CardColorDetector
+import com.scannerpromax.imaging.Cv
 import com.scannerpromax.imaging.HeavyWork
 import com.scannerpromax.imaging.IdCardComposer
 import com.scannerpromax.imaging.ImageEnhancer
@@ -28,7 +30,6 @@ import java.io.File
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.roundToInt
 
 /**
  * Procesa las capturas según el modo (libro -> 2 páginas, DNI -> anverso+reverso en una hoja).
@@ -36,6 +37,14 @@ import kotlin.math.roundToInt
  * disparar la memoria en gama baja ni quitarle CPU a la vista previa. Nunca se llama al repositorio con el
  * permiso tomado (el repositorio tiene su propio limitador y podría adoptar la misma puerta).
  */
+/** Cara del DNI aceptada y aún sin componer: su foto (temporal) y el recorte NORMALIZADO 0..1. */
+internal class CardSource(val file: File, val quad: Quad, val manual: Boolean) {
+    fun toSide() = IdCardSide(quad, manual.takeIf { it })
+}
+
+/** Detección de una cara del DNI: foto, recorte normalizado, confianza y vista reducida opcional para el editor. */
+internal class CardDraft(val file: File, val quad: Quad, val confidence: Float, val preview: Bitmap?)
+
 internal class CaptureProcessor(private val container: AppContainer) {
 
     private val tier get() = container.deviceTier
@@ -135,18 +144,71 @@ internal class CaptureProcessor(private val container: AppContainer) {
     }
 
     /**
-     * Recorta un lado del DNI/tarjeta. Si no se detecta la tarjeta usa [guide] (rectángulo guía normalizado
-     * 0..1 sobre la imagen). Devuelve un bitmap compacto (lado largo <= 1600 px; la hoja final es a 300 dpi).
+     * Detecta la tarjeta en la foto [file] de una cara del DNI SIN recortarla todavía (la foto se conserva: el usuario
+     * confirma o corrige las esquinas, y la hoja se puede recomponer después). Orden: color de la tarjeta
+     * ([CardColorDetector]), detector de documentos, marco guía [guide] (normalizado 0..1), foto completa.
+     * [withPreview] = devolver además una vista reducida para el editor de esquinas (la recicla quien llama).
      */
-    suspend fun cropCardSide(file: File, guide: RectF?): Bitmap = cropCardSide(file, guide, null)
+    suspend fun detectCardSide(file: File, guide: RectF?, withPreview: Boolean): CardDraft =
+        HeavyWork.run {
+            val maxPx = min(tier.maxWorkingPixels, 8_000_000)
+            val src = BitmapIO.decode(file.absolutePath, maxPx)
+            try {
+                val (q, conf) = detectCardQuad(src, guide)
+                val preview = if (withPreview) {
+                    val t = BitmapIO.thumbnail(src, CARD_PREVIEW_SIDE)
+                    if (t === src) src.copy(Bitmap.Config.ARGB_8888, false) else t
+                } else null
+                CardDraft(file, normalize(q, src.width, src.height), conf, preview)
+            } finally {
+                src.recycle()
+            }
+        }
+
+    /** Quad de la tarjeta en píxeles de [src] y su confianza (0 = marco guía o foto completa). */
+    private fun detectCardQuad(src: Bitmap, guide: RectF?): Pair<Quad, Float> {
+        val g = guide?.let { doubleArrayOf(it.left.toDouble(), it.top.toDouble(), it.right.toDouble(), it.bottom.toDouble()) }
+        val color = try {
+            val rgb = Cv.toRgb(src)
+            try { CardColorDetector.detect(rgb, g) } finally { rgb.release() }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Fallo al detectar la tarjeta por color", t)
+            null
+        }
+        if (color != null && color.confidence >= CARD_COLOR_MIN_CONF) return color.toQuad() to color.confidence
+        detectQuad(src, minConfidence = 0.4f, minAreaFraction = 0.04f)?.let { return it to 0.5f }
+        // color poco seguro: aun así suele ser mejor que el marco
+        if (color != null && color.confidence >= 0.3f) return color.toQuad() to color.confidence
+        val r = guide ?: RectF(0f, 0f, 1f, 1f)
+        val w = src.width.toFloat(); val h = src.height.toFloat()
+        val l = r.left.coerceIn(0f, 1f) * w; val t = r.top.coerceIn(0f, 1f) * h
+        val rr = r.right.coerceIn(0f, 1f) * w; val b = r.bottom.coerceIn(0f, 1f) * h
+        return Quad(Pt(l, t), Pt(rr, t), Pt(rr, b), Pt(l, b)) to 0f
+    }
 
     /**
-     * Como [cropCardSide], y además mejora la cara con [enhance] (un filtro que conserve el color, p. ej.
-     * VIVID) ANTES de componer la hoja: así el fondo de la tarjeta y la foto no se aplanan hacia blanco.
-     * La cara se rellena con blanco hasta la proporción ID-1 para que la composición no recorte bordes.
+     * Recorta una cara del DNI de su foto [file] con [quad] (normalizado) a la proporción EXACTA ID-1 (lado largo
+     * [CARD_MAX_SIDE]; la hoja final es a 300 dpi) y la mejora con [enhance] (un filtro que conserve el color, p. ej.
+     * VIVID) ANTES de componer la hoja: así el fondo de la tarjeta y la foto no se aplanan hacia blanco. No borra [file].
      */
-    suspend fun cropCardSide(file: File, guide: RectF?, enhance: FilterType?): Bitmap = withContext(Dispatchers.Default) {
-        val side = cropCardSideRaw(file, guide)
+    suspend fun renderCardSide(file: File, quad: Quad, enhance: FilterType?): Bitmap = withContext(Dispatchers.Default) {
+        val side = HeavyWork.run {
+            val maxPx = min(tier.maxWorkingPixels, 8_000_000)
+            val src = BitmapIO.decode(file.absolutePath, maxPx)
+            try {
+                val p = denormalize(quad, src.width, src.height).points()
+                val arr = DoubleArray(8) { i -> (if (i % 2 == 0) p[i / 2].x else p[i / 2].y).toDouble() }
+                val rgba = Cv.toRgba(src)
+                try {
+                    val out = CardColorDetector.warpCard(rgba, arr, CARD_MAX_SIDE)
+                    try { Cv.toBitmap(out) } finally { out.release() }
+                } finally {
+                    rgba.release()
+                }
+            } finally {
+                src.recycle()
+            }
+        }
         var out = side
         if (enhance != null && enhance != FilterType.ORIGINAL) {
             try {
@@ -157,9 +219,69 @@ internal class CaptureProcessor(private val container: AppContainer) {
                 Log.w(TAG, "No se pudo mejorar la cara de la tarjeta", t)
             }
         }
-        val padded = padToCardRatio(out)
-        if (padded !== out) out.recycle()
-        padded
+        out
+    }
+
+    /**
+     * Compone el DNI (anverso [front] + reverso opcional [back]) en una hoja A4 y la añade como página, guardando las
+     * fotos ORIGINALES de las caras y sus recortes ([PageEdits.idCard]) para poder corregirlos después en Revisión.
+     * Las fotos temporales pasan al documento (o se borran si algo falla).
+     */
+    suspend fun addIdCard(docId: String, front: CardSource, back: CardSource?, enhance: FilterType?, edits: PageEdits) {
+        var f: Bitmap? = null
+        var b: Bitmap? = null
+        try {
+            val fb = renderCardSide(front.file, front.quad, enhance).also { f = it }
+            b = back?.let { renderCardSide(it.file, it.quad, enhance) }
+            // Componer con el permiso; entregar al repositorio sin él (no anidar puertas de trabajo pesado).
+            val page = HeavyWork.run { IdCardComposer.compose(fb, b) }
+            try {
+                val card = IdCardEdits(front.toSide(), back?.toSide(), enhance)
+                container.documents.addPageFromBitmap(docId, page, edits.copy(idCard = card), front.file, back?.file)
+            } finally {
+                page.recycle()
+            }
+        } finally {
+            f?.recycle(); b?.recycle()
+            withContext(NonCancellable + Dispatchers.IO) { front.file.delete(); back?.file?.delete() }
+        }
+    }
+
+    /**
+     * Corrige el recorte de un DNI ya guardado: recorta otra vez cada cara desde su foto original con [card] y
+     * recompone la hoja ([com.scannerpromax.data.DocumentRepository.recomposeIdCard]).
+     */
+    suspend fun recomposeIdCard(docId: String, pageId: String, card: IdCardEdits) {
+        val docs = container.documents
+        var f: Bitmap? = null
+        var b: Bitmap? = null
+        try {
+            val fb = renderCardSide(docs.idSourceFile(docId, pageId, back = false), card.front.quad, card.enhance).also { f = it }
+            b = card.back?.let { renderCardSide(docs.idSourceFile(docId, pageId, back = true), it.quad, card.enhance) }
+            val page = HeavyWork.run { IdCardComposer.compose(fb, b) }
+            try {
+                docs.recomposeIdCard(docId, pageId, page, card)
+            } finally {
+                page.recycle()
+            }
+        } finally {
+            f?.recycle(); b?.recycle()
+        }
+    }
+
+    /** Galería: [uris] (1 o 2 imágenes: anverso y reverso) como DNI editable, con detección automática de cada cara. */
+    suspend fun importIdCard(docId: String, uris: List<Uri>, enhance: FilterType?, edits: PageEdits) {
+        val files = ArrayList<File>()
+        try {
+            val sources = uris.take(2).map { uri ->
+                val file = copyToCaptureFile(uri).also { files += it }
+                val d = detectCardSide(file, null, withPreview = false)
+                CardSource(file, d.quad, manual = false)
+            }
+            addIdCard(docId, sources[0], sources.getOrNull(1), enhance, edits)
+        } finally {
+            withContext(NonCancellable + Dispatchers.IO) { files.forEach { it.delete() } }
+        }
     }
 
     /** Copia un Uri (galería) a un archivo de captura temporal para procesarlo como una foto de la cámara. */
@@ -173,75 +295,6 @@ internal class CaptureProcessor(private val container: AppContainer) {
             f.delete()
             throw t
         }
-    }
-
-    private suspend fun cropCardSideRaw(file: File, guide: RectF?): Bitmap =
-        HeavyWork.run {
-            val maxPx = min(tier.maxWorkingPixels, 8_000_000)
-            val src = BitmapIO.decode(file.absolutePath, maxPx)
-            try {
-                val quad = detectQuad(src, minConfidence = 0.4f, minAreaFraction = 0.04f)
-                val cropped: Bitmap = when {
-                    quad != null -> PerspectiveCorrector.warp(src, quad)
-                    guide != null -> cropRect(src, guide)
-                    else -> src.copy(Bitmap.Config.ARGB_8888, false)
-                }
-                if (max(cropped.width, cropped.height) > CARD_MAX_SIDE) {
-                    val small = BitmapIO.thumbnail(cropped, CARD_MAX_SIDE)
-                    if (small !== cropped) cropped.recycle()
-                    small
-                } else cropped
-            } finally {
-                src.recycle()
-                withContext(NonCancellable + Dispatchers.IO) { file.delete() }
-            }
-        }
-
-    /** Compone anverso (+ reverso opcional) en una hoja A4 y la añade como página. No recicla las entradas. */
-    suspend fun addIdCard(docId: String, front: Bitmap, back: Bitmap?, edits: PageEdits) {
-        // Componer con el permiso; entregar al repositorio sin él (no anidar puertas de trabajo pesado).
-        val page = HeavyWork.run { IdCardComposer.compose(front, back) }
-        try {
-            container.documents.addPageFromBitmap(docId, page, edits)
-        } finally {
-            page.recycle()
-        }
-    }
-
-    /** Rellena con blanco hasta la proporción ISO ID-1 si se desvía más de un 2 % (evita recortes al componer). */
-    private fun padToCardRatio(b: Bitmap): Bitmap {
-        val long = max(b.width, b.height).toFloat()
-        val short = min(b.width, b.height).toFloat()
-        if (short <= 0f) return b
-        val ratio = long / short
-        if (abs(ratio - ID_CARD_RATIO) / ID_CARD_RATIO < 0.02f) return b
-        val landscape = b.width >= b.height
-        val (newLong, newShort) = if (ratio < ID_CARD_RATIO) Pair(short * ID_CARD_RATIO, short) else Pair(long, long / ID_CARD_RATIO)
-        val w = (if (landscape) newLong else newShort).roundToInt().coerceAtLeast(b.width)
-        val h = (if (landscape) newShort else newLong).roundToInt().coerceAtLeast(b.height)
-        return try {
-            val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-            Canvas(out).apply {
-                drawColor(Color.WHITE)
-                drawBitmap(b, (w - b.width) / 2f, (h - b.height) / 2f, null)
-            }
-            out
-        } catch (_: OutOfMemoryError) {
-            b
-        }
-    }
-
-    private fun cropRect(src: Bitmap, n: RectF): Bitmap {
-        val l = (n.left.coerceIn(0f, 1f) * src.width).roundToInt()
-        val t = (n.top.coerceIn(0f, 1f) * src.height).roundToInt()
-        val r = (n.right.coerceIn(0f, 1f) * src.width).roundToInt()
-        val b = (n.bottom.coerceIn(0f, 1f) * src.height).roundToInt()
-        val w = (r - l).coerceAtLeast(1)
-        val h = (b - t).coerceAtLeast(1)
-        if (l + w > src.width || t + h > src.height) return src.copy(Bitmap.Config.ARGB_8888, false)
-        val out = Bitmap.createBitmap(src, l, t, w, h)
-        // createBitmap puede devolver el mismo objeto si el recorte es completo: siempre devolver uno nuevo
-        return if (out === src) src.copy(Bitmap.Config.ARGB_8888, false) else out
     }
 
     /** Quad en coordenadas de [bmp] o null si no hay detección fiable / es casi la imagen completa. */
@@ -306,18 +359,7 @@ internal class CaptureProcessor(private val container: AppContainer) {
                 guard(1) { addBook(docId, copyToCaptureFile(uri), composedEdits(mode, settings)) }
             }
             ScanMode.ID_CARD -> uris.chunked(2).forEach { pair ->
-                guard(pair.size) {
-                    var f: Bitmap? = null
-                    var b: Bitmap? = null
-                    try {
-                        val filter = cardFilter(settings)
-                        f = cropCardSide(copyToCaptureFile(pair[0]), null, filter)
-                        b = pair.getOrNull(1)?.let { cropCardSide(copyToCaptureFile(it), null, filter) }
-                        addIdCard(docId, f, b, composedEdits(mode, settings))
-                    } finally {
-                        f?.recycle(); b?.recycle()
-                    }
-                }
+                guard(pair.size) { importIdCard(docId, pair, cardFilter(settings), composedEdits(mode, settings)) }
             }
             else -> uris.forEach { uri ->
                 guard(1) { container.documents.addPagesFromUris(docId, listOf(uri), mode = mode) }
@@ -341,6 +383,15 @@ internal class CaptureProcessor(private val container: AppContainer) {
     companion object {
         private const val TAG = "CaptureProcessor"
         private const val CARD_MAX_SIDE = 1600
+        /** Vista del editor de esquinas tras la captura (lado largo). */
+        private const val CARD_PREVIEW_SIDE = 1600
+        /** Confianza mínima del detector por color para fiarse de él sin mirar el detector de documentos. */
+        const val CARD_COLOR_MIN_CONF = 0.5f
+
+        fun normalize(q: Quad, w: Int, h: Int): Quad =
+            Quad.of(q.points().map { Pt((it.x / w).coerceIn(0f, 1f), (it.y / h).coerceIn(0f, 1f)) })
+
+        fun denormalize(q: Quad, w: Int, h: Int): Quad = Quad.of(q.points().map { Pt(it.x * w, it.y * h) })
 
         /** Ediciones de las páginas que compone la cámara (libro y DNI); respeta el filtro de Ajustes. */
         fun composedEdits(mode: ScanMode, settings: AppSettings): PageEdits = when (mode) {

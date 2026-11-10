@@ -26,7 +26,7 @@ object PageFiles {
      */
     fun sameGeometry(a: PageEdits, b: PageEdits): Boolean =
         a.quad == b.quad && a.rotation == b.rotation && a.autoDeskew == b.autoDeskew && a.autoDewarp == b.autoDewarp &&
-            a.manualQuad == b.manualQuad
+            a.manualQuad == b.manualQuad && a.idCard == b.idCard
 
     /** Hash estable (entre ejecuciones) de las ediciones: va en el nombre de archivo, así cada versión tiene el suyo. */
     fun editsHash(edits: PageEdits): String =
@@ -46,7 +46,13 @@ object PageFiles {
      * ajustes: `jev/<página>_<hash de la geometría>.json`.
      */
     fun jevCacheName(pageId: String, edits: PageEdits) =
-        "$JEV_DIR/${pageId}_${editsHash(PageEdits(quad = edits.quad, rotation = edits.rotation, autoDeskew = edits.autoDeskew, autoDewarp = edits.autoDewarp, manualQuad = edits.manualQuad))}.json"
+        "$JEV_DIR/${pageId}_${editsHash(PageEdits(quad = edits.quad, rotation = edits.rotation, autoDeskew = edits.autoDeskew, autoDewarp = edits.autoDewarp, manualQuad = edits.manualQuad, idCard = edits.idCard))}.json"
+
+    /**
+     * Foto ORIGINAL de una cara del DNI compuesto ([PageEdits.idCard]): `original/<página>_idfront.jpg` / `_idback.jpg`.
+     * Empieza por el id de la página: se borra y se copia con ella (borrado y fusión de documentos).
+     */
+    fun idSourceName(pageId: String, back: Boolean) = "original/${pageId}_${if (back) "idback" else "idfront"}.jpg"
 
     /** Respuestas de "Mejorar con Jev" sobre la FOTO capturada (tipo, carpeta, encuadre, calidad): no dependen de las ediciones. */
     fun jevCaptureName(pageId: String) = "$JEV_DIR/${pageId}_capture.json"

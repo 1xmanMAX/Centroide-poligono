@@ -46,6 +46,14 @@ class CardColorDetectorTest {
         assertTrue("IoU ${"%.3f".format(iou)}", iou > 0.95)
     }
 
+    @Test fun rectificadoConProporcionId1() {
+        val sc = SyntheticCards.scene(Palette.AZUL, back = false, b = Background.MADERA, seed = 5)
+        val r = detectNew(sc)!!
+        val out = CardColorDetector.warpCard(sc.rgb, r.quad, 1600)
+        assertTrue("tamaño ${out.cols()}x${out.rows()}", out.cols() == 1600 && kotlin.math.abs(out.rows() - 1009) <= 1)
+        out.release()
+    }
+
     /** Banco sintético completo: tabla antes (detector genérico) / después (color + respaldo). */
     @Test fun bancoSinteticoDni() {
         val det = DocumentDetector(tier)

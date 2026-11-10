@@ -150,6 +150,24 @@ object CardColorDetector {
         }
     }
 
+    /**
+     * Rectifica la tarjeta [q] (TL, TR, BR, BL en píxeles de [src]) a la proporción EXACTA ID-1, con el lado largo de
+     * [longSide] px; apaisada o vertical según cómo esté la tarjeta en la foto. Devuelve un Mat nuevo del tipo de [src].
+     */
+    fun warpCard(src: Mat, q: DoubleArray, longSide: Int): Mat {
+        val landscape = side(q, 0) + side(q, 2) >= side(q, 1) + side(q, 3)
+        val shortSide = (longSide / ID1_RATIO).roundToInt()
+        val w = if (landscape) longSide else shortSide
+        val h = if (landscape) shortSide else longSide
+        val from = MatOfPoint2f(*Array(4) { Point(q[it * 2], q[it * 2 + 1]) })
+        val to = MatOfPoint2f(Point(0.0, 0.0), Point(w.toDouble(), 0.0), Point(w.toDouble(), h.toDouble()), Point(0.0, h.toDouble()))
+        val m = Imgproc.getPerspectiveTransform(from, to)
+        val out = Mat()
+        Imgproc.warpPerspective(src, out, m, Size(w.toDouble(), h.toDouble()), Imgproc.INTER_CUBIC, Core.BORDER_REPLICATE)
+        from.release(); to.release(); m.release()
+        return out
+    }
+
     // ------------------------------------------------------------------ color
 
     private fun toLab(rgb8: Mat, out: Mat) {

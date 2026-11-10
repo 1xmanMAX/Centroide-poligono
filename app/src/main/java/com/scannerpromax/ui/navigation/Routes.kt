@@ -8,6 +8,7 @@ object Routes {
     const val CAMERA = "camera?docId={docId}&mode={mode}&replace={replace}"
     const val REVIEW = "review/{docId}"
     const val EDITOR = "editor/{docId}/{pageId}"
+    const val ID_CROP = "idcrop/{docId}/{pageId}"
     const val EXPORT = "export/{docId}?pages={pages}"
     const val COMPRESS = "compress"
     const val SETTINGS = "settings"
@@ -20,6 +21,7 @@ object Routes {
         "camera?docId=${docId ?: ""}&mode=${mode.name}&replace=${replacePageId ?: ""}"
     fun review(docId: String) = "review/$docId"
     fun editor(docId: String, pageId: String) = "editor/$docId/$pageId"
+    fun idCrop(docId: String, pageId: String) = "idcrop/$docId/$pageId"
     /**
      * [pageIds] = solo esas páginas (modo selección del Documento); null = todas. El valor se codifica otra vez
      * porque Navigation decodifica los argumentos una vez antes de entregarlos.

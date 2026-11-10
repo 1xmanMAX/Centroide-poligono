@@ -154,6 +154,8 @@ fun EditorScreen(
     docId: String,
     pageId: String,
     onBack: () -> Unit,
+    /** DNI con fotos de origen ([com.scannerpromax.domain.PageEdits.idCard]): «Recortar» abre el editor de las 2 caras. */
+    onEditIdCard: ((String) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -231,6 +233,16 @@ fun EditorScreen(
 
     fun selectTool(t: EditorTool) {
         if (t == tool) return
+        // DNI compuesto: el recorte se corrige sobre las fotos originales de cada cara (y se recompone la hoja)
+        if (t == EditorTool.CROP && onEditIdCard != null && !session.loading && session.edits.idCard != null) {
+            val id = session.pageId
+            if (session.saving) return
+            scope.launch {
+                if (!ensureQuadValid()) return@launch
+                if (!session.hasChanges || session.save()) onEditIdCard(id) else toast("No se pudo guardar la página")
+            }
+            return
+        }
         if (tool == EditorTool.CROP) {
             if (!ensureQuadValid()) return
             dropStrokesIfCropChanged(notify = true)

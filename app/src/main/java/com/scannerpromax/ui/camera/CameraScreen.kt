@@ -7,7 +7,6 @@ import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
 import android.graphics.RectF
 import android.net.Uri
 import android.os.SystemClock
@@ -169,6 +168,8 @@ import com.scannerpromax.di.AppContainer
 import com.scannerpromax.domain.Document
 import com.scannerpromax.domain.FilterType
 import com.scannerpromax.domain.PageEdits
+import com.scannerpromax.domain.Quad
+import com.scannerpromax.ui.editor.IdCardConfirmOverlay
 import com.scannerpromax.domain.ScanMode
 import com.scannerpromax.imaging.Cv
 import com.scannerpromax.imaging.HeavyWork
@@ -181,11 +182,10 @@ import com.scannerpromax.ui.components.MoreMenuItem
 import com.scannerpromax.ui.components.ProgressHud
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.flowOf
@@ -302,6 +302,9 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
  * Modo poca luz / anti-reflejos (ráfaga + fusión multi-cuadro). AUTO: se activa solo cuando el análisis en vivo
  * detecta oscuridad o reflejos.
  */
+/** Cara del DNI en revisión: [draft] null mientras se detecta; [token] descarta detecciones de una foto ya repetida. */
+private class CardReview(val draft: CardDraft?, val back: Boolean, val token: Int)
+
 private enum class LowLightSetting(val label: String, val menuLabel: String) {
     AUTO("Poca luz / anti-reflejos: automático", "Poca luz: automático"),
     ON("Poca luz / anti-reflejos: activado", "Poca luz: activado"),
@@ -356,7 +359,11 @@ private fun CameraContent(
     var finishing by remember { mutableStateOf(false) }
     var showDiscard by remember { mutableStateOf(false) }
     var capturedThisSession by rememberSaveable { mutableIntStateOf(0) }
-    var idFront by remember { mutableStateOf<Deferred<Result<Bitmap>>?>(null) }
+    /** DNI: anverso ya aceptado (foto + recorte) esperando el reverso. */
+    var idFront by remember { mutableStateOf<CardSource?>(null) }
+    /** DNI: cara recién capturada esperando que el usuario confirme o corrija el recorte (draft null = detectando). */
+    var cardReview by remember { mutableStateOf<CardReview?>(null) }
+    var reviewSeq by remember { mutableIntStateOf(0) }
     var viewSize by remember { mutableStateOf(IntSize.Zero) }
     var stableProgress by remember { mutableFloatStateOf(0f) }
     /** «Encuadre IA»: acuerdo red/clásico de la última detección (null = sin red) → color del contorno. */
@@ -393,10 +400,17 @@ private fun CameraContent(
 
     fun toast(msg: String) = Toast.makeText(appContext, msg, Toast.LENGTH_SHORT).show()
 
-    /** Recicla el bitmap de un anverso pendiente que ya no se va a usar. */
-    fun recycleFront(d: Deferred<Result<Bitmap>>?) {
-        d ?: return
-        captureScope.launch { runCatching { d.await().getOrNull()?.recycle() } }
+    /** Borra la foto de un anverso pendiente que ya no se va a usar. */
+    fun dropFront(f: CardSource?) {
+        f ?: return
+        captureScope.launch(Dispatchers.IO) { runCatching { f.file.delete() } }
+    }
+
+    /** Descarta la cara en revisión (su foto se borra; la vista reducida la libera el recolector). */
+    fun dropReview() {
+        val d = cardReview?.draft
+        cardReview = null
+        if (d != null) captureScope.launch(Dispatchers.IO) { runCatching { d.file.delete() } }
     }
 
     DisposableEffect(engine) {
@@ -413,8 +427,9 @@ private fun CameraContent(
             engine.release()
             workScope.cancel()
             // Los trabajos de procesamiento NO se cancelan: terminan en segundo plano y guardan sus páginas.
-            recycleFront(idFront)
+            dropFront(idFront)
             idFront = null
+            dropReview()
         }
     }
     // Sensores de movimiento solo con la pantalla visible (nada en segundo plano).
@@ -424,8 +439,10 @@ private fun CameraContent(
     LaunchedEffect(flash) { engine.setFlash(flash) }
     // Con capturas mejorándose en segundo plano, el análisis en vivo cede CPU (la UI sigue fluida en gama baja).
     LaunchedEffect(pendingJobs) { engine.backgroundBusy = pendingJobs > 0 }
-    LaunchedEffect(mode) {
-        engine.detectionEnabled = mode != ScanMode.PHOTO
+    // (sin detección en vivo mientras se revisa el recorte de una cara del DNI: la CPU es para esa pantalla)
+    val reviewing = cardReview != null
+    LaunchedEffect(mode, reviewing) {
+        engine.detectionEnabled = mode != ScanMode.PHOTO && !reviewing
         stableProgress = 0f
     }
 
@@ -502,21 +519,27 @@ private fun CameraContent(
         suspend fun shotFile(): File = processor.mergeBurst(shots, removeGlare = true)
         when (m) {
             ScanMode.BOOK -> launchJob { processor.addBook(ensureDoc(m), shotFile(), extraEdits(m)) }
+            // DNI: se detecta la tarjeta (por su color) y se muestra al momento con sus esquinas para confirmar o
+            // corregir el recorte; la hoja se compone al aceptar el reverso (o «Solo anverso").
             ScanMode.ID_CARD -> {
-                val front = idFront
-                val filter = cardFilter()
-                if (front == null) {
-                    idFront = captureScope.async { runCatching { processor.cropCardSide(shotFile(), guide, filter) } }
-                } else {
-                    idFront = null
-                    launchJob {
-                        val f = front.await().getOrThrow()
-                        var b: Bitmap? = null
-                        try {
-                            b = processor.cropCardSide(shotFile(), guide, filter)
-                            processor.addIdCard(ensureDoc(m), f, b, extraEdits(m))
-                        } finally {
-                            f.recycle(); b?.recycle()
+                val back = idFront != null
+                val token = ++reviewSeq
+                cardReview = CardReview(null, back, token)
+                captureScope.launch {
+                    val draft = try {
+                        processor.detectCardSide(shotFile(), guide, withPreview = true)
+                    } catch (c: CancellationException) {
+                        throw c
+                    } catch (t: Throwable) {
+                        null
+                    }
+                    if (draft != null && cardReview?.token == token) {
+                        cardReview = CardReview(draft, back, token)
+                    } else {
+                        if (draft != null) withContext(NonCancellable + Dispatchers.IO) { draft.file.delete() }
+                        if (cardReview?.token == token) {
+                            cardReview = null
+                            toast("No se pudo procesar la foto")
                         }
                     }
                 }
@@ -525,8 +548,25 @@ private fun CameraContent(
         }
     }
 
+    /** La cara en revisión se acepta con el recorte [quad] (normalizado); con el reverso se compone la hoja. */
+    fun acceptCard(quad: Quad, manual: Boolean) {
+        val r = cardReview ?: return
+        val d = r.draft ?: return
+        cardReview = null
+        val src = CardSource(d.file, quad, manual)
+        val front = idFront
+        if (front == null) {
+            idFront = src
+        } else {
+            idFront = null
+            val m = ScanMode.ID_CARD
+            val filter = cardFilter()
+            launchJob { processor.addIdCard(ensureDoc(m), front, src, filter, extraEdits(m)) }
+        }
+    }
+
     fun captureNow(auto: Boolean = false) {
-        if (capturing || finishing || !ready) return
+        if (capturing || finishing || !ready || cardReview != null) return
         capturing = true
         val m = mode
         val guide = if (m == ScanMode.ID_CARD) guideNormalized() else null
@@ -581,14 +621,8 @@ private fun CameraContent(
     fun skipBack() {
         val front = idFront ?: return
         idFront = null
-        launchJob {
-            val f = front.await().getOrThrow()
-            try {
-                processor.addIdCard(ensureDoc(ScanMode.ID_CARD), f, null, extraEdits(ScanMode.ID_CARD))
-            } finally {
-                f.recycle()
-            }
-        }
+        val filter = cardFilter()
+        launchJob { processor.addIdCard(ensureDoc(ScanMode.ID_CARD), front, null, filter, extraEdits(ScanMode.ID_CARD)) }
     }
 
     /** Cambia de modo. Si hay un anverso de DNI pendiente, se guarda como una sola cara (no se pierde). */
@@ -625,8 +659,9 @@ private fun CameraContent(
         val id = currentDocId
         val pending = jobs.toList()
         pending.forEach { it.cancel() }
-        recycleFront(idFront)
+        dropFront(idFront)
         idFront = null
+        dropReview()
         if (id != null && createdHere) {
             // Borrar cuando terminen de cancelarse los trabajos (fuera del ciclo de vida de la pantalla).
             CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
@@ -661,18 +696,9 @@ private fun CameraContent(
             ScanMode.ID_CARD -> {
                 if (idFront != null) skipBack()
                 val filter = cardFilter()
+                // (sin confirmación: cada hoja queda editable en Revisión › Editar › Recortar)
                 uris.chunked(2).forEach { pair ->
-                    launchJob {
-                        var f: Bitmap? = null
-                        var b: Bitmap? = null
-                        try {
-                            f = processor.cropCardSide(processor.copyToCaptureFile(pair[0]), null, filter)
-                            b = pair.getOrNull(1)?.let { processor.cropCardSide(processor.copyToCaptureFile(it), null, filter) }
-                            processor.addIdCard(ensureDoc(m), f, b, extraEdits(m))
-                        } finally {
-                            f?.recycle(); b?.recycle()
-                        }
-                    }
+                    launchJob { processor.importIdCard(ensureDoc(m), pair, filter, extraEdits(m)) }
                 }
             }
             else -> launchJob { container.documents.addPagesFromUris(ensureDoc(m), uris, mode = m) }
@@ -730,14 +756,14 @@ private fun CameraContent(
     BackHandler { requestClose() }
 
     // Una sola captura: en cuanto hay una foto (y no falta el reverso del DNI) se termina y se pasa a la revisión.
-    LaunchedEffect(singleShot, capturedThisSession, idFront) {
-        if (singleShot && capturedThisSession > 0 && idFront == null) finish()
+    LaunchedEffect(singleShot, capturedThisSession, idFront, reviewing) {
+        if (singleShot && capturedThisSession > 0 && idFront == null && !reviewing) finish()
     }
 
     // ---------------------------------------------------------------- autocaptura
     val autoCapture by rememberUpdatedState(settings.autoCapture)
     val modeState by rememberUpdatedState(mode)
-    val busy by rememberUpdatedState(capturing || finishing || !ready)
+    val busy by rememberUpdatedState(capturing || finishing || !ready || reviewing)
     val blurryState by rememberUpdatedState(quality.blurry)
     val framesNeeded = if (container.deviceTier.isLowRam || container.deviceTier.cores <= 4) 8 else 14
     LaunchedEffect(engine) {
@@ -962,6 +988,15 @@ private fun CameraContent(
             )
         },
         overlays = {
+            cardReview?.let { r ->
+                IdCardConfirmOverlay(
+                    draft = r.draft,
+                    back = r.back,
+                    onAccept = { q, manual -> acceptCard(q, manual) },
+                    onRetake = { dropReview() },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
             if (cameraError != null) {
                 CameraErrorCard(cameraError ?: "", Modifier.align(Alignment.Center))
             }
