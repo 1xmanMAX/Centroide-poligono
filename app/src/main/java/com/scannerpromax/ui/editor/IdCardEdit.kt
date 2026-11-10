@@ -528,7 +528,7 @@ internal fun IdCardCropScreen(container: AppContainer, docId: String, pageId: St
 /** Vista de la hoja A4 con las caras (como IdCardComposer.layout); tocar una llama a [onTap] con su índice. */
 @Composable
 private fun SheetPreview(processor: CaptureProcessor, slots: List<SideSlot?>, common: FilterType?, size: IdCardSize, onTap: (Int) -> Unit) {
-    BoxWithConstraints(Modifier.fillMaxHeight().aspectRatio(IdCardComposer.PAGE_W.toFloat() / IdCardComposer.PAGE_H)) {
+    BoxWithConstraints(Modifier.aspectRatio(IdCardComposer.PAGE_W.toFloat() / IdCardComposer.PAGE_H, matchHeightConstraintsFirst = true)) {
         val k = maxWidth / IdCardComposer.PAGE_W.toFloat()
         val present = slots.withIndex().filter { it.value != null }
         val dims = present.map { (_, s) ->
