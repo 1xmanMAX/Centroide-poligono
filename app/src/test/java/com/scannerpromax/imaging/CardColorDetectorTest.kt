@@ -22,7 +22,7 @@ class CardColorDetectorTest {
     private fun detectNew(sc: SyntheticCards.Scene) = CardColorDetector.detect(sc.rgb, sc.guide)
 
     @Test fun reversoConMrzSobreMesaBlanca_cubreLaTarjetaEntera() {
-        val sc = SyntheticCards.scene(Palette.AZUL, back = true, b = Background.MESA_BLANCA, seed = 7)
+        val sc = SyntheticCards.scene(Palette.DNIE, back = true, b = Background.MESA_BLANCA, seed = 7)
         val r = detectNew(sc)
         assertNotNull("sin detección", r)
         val iou = SyntheticCards.iou(r!!.quad, sc.gt, sc.rgb.cols(), sc.rgb.rows())
@@ -54,23 +54,52 @@ class CardColorDetectorTest {
         out.release()
     }
 
+    @Test fun reversoDelRevesSeEnderezaPorLaMrz() {
+        // reverso girado ~180° (MRZ arriba en la foto)
+        val sc = SyntheticCards.scene(Palette.DNIE, back = true, b = Background.OSCURO, seed = 21, deg = 176.0)
+        val r = detectNew(sc)!!
+        val before = CardColorDetector.warpCard(sc.rgb, r.quad, 1000)
+        val eBefore = CardColorDetector.mrzEdge(before); before.release()
+        val o = CardColorDetector.orientByMrz(sc.rgb, r.quad)
+        val after = CardColorDetector.warpCard(sc.rgb, o, 1000)
+        val eAfter = CardColorDetector.mrzEdge(after); after.release()
+        assertTrue("MRZ antes en el canto $eBefore, después en $eAfter", eAfter == 2)
+        // el anverso no tiene MRZ: no se toca
+        val fr = SyntheticCards.scene(Palette.DNIE, back = false, b = Background.OSCURO, seed = 22)
+        val rf = detectNew(fr)!!
+        assertTrue(CardColorDetector.orientByMrz(fr.rgb, rf.quad) === rf.quad)
+    }
+
     /** Banco sintético completo: tabla antes (detector genérico) / después (color + respaldo). */
     @Test fun bancoSinteticoDni() {
         val det = DocumentDetector(tier)
         class Row(val name: String, val iouOld: Double, val errOld: Double, val iouNew: Double, val errNew: Double, val iouColor: Double, val ms: Long, val conf: Float)
         val rows = ArrayList<Row>()
+        var mrzBackOk = 0; var mrzBack = 0; var mrzFrontFalse = 0; var mrzFront = 0
         var seed = 100L
-        for (p in Palette.values()) for (back in listOf(false, true)) for (b in Background.values()) for (variant in 0..1) {
+        for (p in Palette.values()) for (back in listOf(false, true)) for (b in Background.values()) for (variant in 0..2) {
             seed++
-            val sc = SyntheticCards.scene(p, back, b, seed, shadow = variant == 1, glare = variant == 1)
+            val sc = SyntheticCards.scene(p, back, b, seed, shadow = variant == 1, glare = variant == 1, hand = variant == 2, blur = variant == 2)
             val w = sc.rgb.cols(); val h = sc.rgb.rows()
             val guideQ = SyntheticCards.guideQuad(sc.guide, w, h)
             // antes: detector genérico (confianza >= 0,4), si no el marco guía
-            val old = SyntheticScenes.detect(det, sc.rgb)?.takeIf { it.confidence >= 0.4f }?.let { SyntheticScenes.quadArray(it) } ?: guideQ
+            val oldDet = SyntheticScenes.detect(det, sc.rgb)?.takeIf { it.confidence >= 0.4f }?.let { SyntheticScenes.quadArray(it) }
+            val old = oldDet ?: guideQ
             val t0 = System.nanoTime()
             val col = detectNew(sc)
             val ms = (System.nanoTime() - t0) / 1_000_000
-            val nw = col?.takeIf { it.confidence >= CARD_MIN_CONF }?.quad ?: old
+            val nw = CardColorDetector.choose(sc.rgb, col, oldDet) ?: guideQ
+            // orientación por la MRZ (reverso: debe quedar abajo; anverso: no se toca)
+            if (col != null && SyntheticCards.iou(col.quad, sc.gt, w, h) > 0.9) {
+                val o = CardColorDetector.orientByMrz(sc.rgb, col.quad)
+                val hasMrz = if (back) p == Palette.DNIE || p == Palette.DNIE3 else p == Palette.AZUL || p == Palette.AMARILLO
+                if (hasMrz) {
+                    mrzBack++
+                    val wm = CardColorDetector.warpCard(sc.rgb, o, 1000)
+                    if (CardColorDetector.mrzEdge(wm) == 2) mrzBackOk++
+                    wm.release()
+                } else { mrzFront++; if (o !== col.quad) mrzFrontFalse++ }
+            }
             rows += Row(
                 sc.name,
                 SyntheticCards.iou(old, sc.gt, w, h), SyntheticCards.cornerError(old, sc.gt),
@@ -91,6 +120,8 @@ class CardColorDetectorTest {
         sb.appendLine("|---|---|---|---|---|---|")
         sb.appendLine("| antes (detector genérico + marco) | ${stats({ it.iouOld }, { it.errOld })} |")
         sb.appendLine("| después (color + respaldo) | ${stats({ it.iouNew }, { it.errNew })} |")
+        sb.appendLine()
+        sb.appendLine("MRZ (caras con MRZ y la tarjeta bien detectada): abajo tras orientar $mrzBackOk/$mrzBack; caras sin MRZ giradas por error $mrzFrontFalse/$mrzFront.")
         sb.appendLine()
         sb.appendLine("Escenas: ${rows.size} (1600x1200). Tiempo color: mediana ${rows.map { it.ms }.sorted()[rows.size / 2]} ms, máx ${rows.maxOf { it.ms }} ms (JVM).")
         sb.appendLine()

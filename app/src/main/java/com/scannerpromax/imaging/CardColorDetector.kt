@@ -151,6 +151,64 @@ object CardColorDetector {
     }
 
     /**
+     * Apoyo de bordes de un cuadrilátero [q] (píxeles de [rgb]): fracción de puntos de sus 4 lados (sin las esquinas)
+     * sobre un canto real de la foto (gradiente de gris normal al lado), 0..1; 0,7 × media + 0,3 × el lado más débil.
+     * Sirve de árbitro entre el detector por color y el de documentos.
+     */
+    fun edgeSupport(rgb: Mat, q: DoubleArray): Double = MatBag().use { bag ->
+        val small = bag.mat(); val s = Cv.downscale(rgb, small, WORK_SIDE)
+        val gray = bag.mat(); Imgproc.cvtColor(small, gray, Imgproc.COLOR_RGB2GRAY)
+        Imgproc.GaussianBlur(gray, gray, Size(3.0, 3.0), 0.0)
+        val w = gray.cols(); val h = gray.rows()
+        val gx = bag.mat(); val gy = bag.mat()
+        Imgproc.Sobel(gray, gx, CvType.CV_32F, 1, 0, 3); Imgproc.Sobel(gray, gy, CvType.CV_32F, 0, 1, 3)
+        val ga = FloatArray(w * h); gx.get(0, 0, ga); val gb = FloatArray(w * h); gy.get(0, 0, gb)
+        val p = DoubleArray(8) { q[it] * s }
+        val fr = DoubleArray(4)
+        for (i in 0 until 4) {
+            val ax = p[i * 2]; val ay = p[i * 2 + 1]; val bx = p[((i + 1) % 4) * 2]; val by = p[((i + 1) % 4) * 2 + 1]
+            val len = max(1e-6, hypot(bx - ax, by - ay)); val nx = -(by - ay) / len; val ny = (bx - ax) / len
+            var ok = 0; var n = 0
+            for (j in 0 until 40) {
+                val t = 0.08 + 0.84 * j / 39.0
+                val px = ax + (bx - ax) * t; val py = ay + (by - ay) * t
+                var best = 0.0; var inside = false
+                for (d in -3..3) {
+                    val x = (px + nx * d).roundToInt(); val y = (py + ny * d).roundToInt()
+                    if (x !in 0 until w || y !in 0 until h) continue
+                    inside = true
+                    val k = y * w + x
+                    best = max(best, abs(ga[k] * nx + gb[k] * ny))
+                }
+                if (!inside) continue   // fuera de la foto: no cuenta
+                n++
+                if (best > 40.0) ok++
+            }
+            fr[i] = if (n == 0) 0.0 else ok.toDouble() / n
+        }
+        0.7 * fr.average() + 0.3 * fr.min()
+    }
+
+    /**
+     * Elige el recorte de la tarjeta entre el detector por color [color] y el de documentos [edges] (o null): el de más
+     * apoyo de bordes ([edgeSupport]) y proporción ID-1; el de color, más preciso en el canto, gana los empates (más
+     * cuanto mayor su confianza). null si ninguno vale.
+     */
+    fun choose(rgb: Mat, color: Result?, edges: DoubleArray?, minColorConf: Float = 0.5f): DoubleArray? {
+        val c = color?.takeIf { it.confidence >= 0.3f }
+        if (c == null) return edges
+        if (edges == null) return c.quad
+        val sc = edgeSupport(rgb, c.quad) - ratioPenalty(c.quad, rgb.cols(), rgb.rows()) + if (c.confidence >= minColorConf) 0.08 + 0.3 * (c.confidence - minColorConf) / (1f - minColorConf) else 0.0
+        val se = edgeSupport(rgb, edges) - ratioPenalty(edges, rgb.cols(), rgb.rows())
+        dbg("elegir", "color=%.2f (conf %.2f) bordes=%.2f".format(sc, c.confidence, se))
+        return if (sc >= se) c.quad else edges
+    }
+
+    /** Penalización por no parecer ID-1 (más del 12 % de desvío de la proporción): la tarjeta lo es. */
+    private fun ratioPenalty(q: DoubleArray, w: Int, h: Int): Double =
+        0.6 * max(0.0, abs(ratioOf(q, w, h) / ID1_RATIO - 1.0) - 0.12)
+
+    /**
      * Rectifica la tarjeta [q] (TL, TR, BR, BL en píxeles de [src]) a la proporción EXACTA ID-1, con el lado largo de
      * [longSide] px; apaisada o vertical según cómo esté la tarjeta en la foto. Devuelve un Mat nuevo del tipo de [src].
      */
@@ -166,6 +224,75 @@ object CardColorDetector {
         Imgproc.warpPerspective(src, out, m, Size(w.toDouble(), h.toDouble()), Imgproc.INTER_CUBIC, Core.BORDER_REPLICATE)
         from.release(); to.release(); m.release()
         return out
+    }
+
+    /**
+     * Orientación por la MRZ (reverso del DNI peruano: zona TD1 de 3 renglones de 30 caracteres «I<PER…» junto a un
+     * canto LARGO): si la tarjeta [q] (en [rgb]) tiene la MRZ arriba (del revés) o en un lateral, devuelve las mismas
+     * esquinas reordenadas para que el rectificado la deje abajo y apaisada. Sin MRZ clara devuelve [q] tal cual.
+     */
+    fun orientByMrz(rgb: Mat, q: DoubleArray): DoubleArray {
+        val e = runCatching {
+            val warped = warpCard(rgb, q, 1000)
+            try { mrzEdge(warped) } finally { warped.release() }
+        }.getOrDefault(-1)
+        if (e < 0 || e == 2) return q
+        val k = (e - 2 + 4) % 4
+        return DoubleArray(8) { i -> q[((i / 2 + k) % 4) * 2 + i % 2] }
+    }
+
+    /**
+     * Canto (0 arriba, 1 derecha, 2 abajo, 3 izquierda) junto al que está la MRZ en la tarjeta rectificada [card]
+     * (RGB o RGBA), o -1. Sólo cantos largos; MRZ = 2-4 renglones de texto oscuro que ocupan casi todo el canto.
+     */
+    internal fun mrzEdge(card: Mat): Int {
+        val gray = Mat()
+        Imgproc.cvtColor(card, gray, if (card.channels() == 4) Imgproc.COLOR_RGBA2GRAY else Imgproc.COLOR_RGB2GRAY)
+        val bin = Mat()
+        Imgproc.adaptiveThreshold(gray, bin, 255.0, Imgproc.ADAPTIVE_THRESH_MEAN_C, Imgproc.THRESH_BINARY_INV, 25, 15.0)
+        // tinta NEGRA (la MRZ se imprime en negro; la trama de seguridad es más clara)
+        val ink = Mat(); Imgproc.threshold(gray, ink, 110.0, 255.0, Imgproc.THRESH_BINARY_INV)
+        Core.bitwise_and(bin, ink, bin)
+        ink.release(); gray.release()
+        val w = bin.cols(); val h = bin.rows()
+        val px = ByteArray(w * h); bin.get(0, 0, px); bin.release()
+        val landscape = w >= h
+        val edges = if (landscape) intArrayOf(0, 2) else intArrayOf(1, 3)
+        val short = min(w, h); val long = max(w, h)
+        val band = (short * 0.4).toInt()
+        val cell = max(8, long / 60)
+        val found = ArrayList<Int>()
+        for (e in edges) {
+            // filas paralelas al canto, desde el canto hacia dentro
+            var runs = 0; var inRun = false; var runLen = 0
+            val minRun = max(3, (short * 0.02).toInt())
+            for (d in 0 until band) {
+                val cells = (long * 0.92 / cell).toInt()
+                var covered = 0
+                for (c in 0 until cells) {
+                    val a0 = (long * 0.04).toInt() + c * cell
+                    var any = false
+                    for (a in a0 until min(a0 + cell, long)) {
+                        val (x, y) = when (e) {
+                            0 -> a to d
+                            2 -> a to (h - 1 - d)
+                            1 -> (w - 1 - d) to a
+                            else -> d to a
+                        }
+                        if (px[y * w + x].toInt() != 0) { any = true; break }
+                    }
+                    if (any) covered++
+                }
+                val on = covered > cells * 0.55
+                if (on) { runLen++; inRun = true } else {
+                    if (inRun && runLen >= minRun) runs++
+                    inRun = false; runLen = 0
+                }
+            }
+            if (inRun && runLen >= minRun) runs++
+            if (runs in 2..4) found.add(e)
+        }
+        return if (found.size == 1) found[0] else -1
     }
 
     // ------------------------------------------------------------------ color

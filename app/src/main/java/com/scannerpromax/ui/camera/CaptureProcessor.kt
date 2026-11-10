@@ -168,17 +168,34 @@ internal class CaptureProcessor(private val container: AppContainer) {
     /** Quad de la tarjeta en píxeles de [src] y su confianza (0 = marco guía o foto completa). */
     private fun detectCardQuad(src: Bitmap, guide: RectF?): Pair<Quad, Float> {
         val g = guide?.let { doubleArrayOf(it.left.toDouble(), it.top.toDouble(), it.right.toDouble(), it.bottom.toDouble()) }
-        val color = try {
-            val rgb = Cv.toRgb(src)
-            try { CardColorDetector.detect(rgb, g) } finally { rgb.release() }
-        } catch (t: Throwable) {
-            Log.w(TAG, "Fallo al detectar la tarjeta por color", t)
-            null
+        val rgb = try { Cv.toRgb(src) } catch (t: Throwable) { null }
+        try {
+            val color = try {
+                rgb?.let { CardColorDetector.detect(it, g) }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Fallo al detectar la tarjeta por color", t)
+                null
+            }
+            // Reverso con MRZ del revés o de lado: se reordenan las esquinas para que quede abajo y apaisada
+            fun oriented(q: Quad): Quad {
+                rgb ?: return q
+                val p = q.points()
+                val arr = DoubleArray(8) { i -> (if (i % 2 == 0) p[i / 2].x else p[i / 2].y).toDouble() }
+                val o = CardColorDetector.orientByMrz(rgb, arr)
+                return if (o === arr) q else Quad(Pt(o[0].toFloat(), o[1].toFloat()), Pt(o[2].toFloat(), o[3].toFloat()), Pt(o[4].toFloat(), o[5].toFloat()), Pt(o[6].toFloat(), o[7].toFloat()))
+            }
+            val edges = detectQuad(src, minConfidence = 0.4f, minAreaFraction = 0.04f)
+            val edgesArr = edges?.points()?.let { p -> DoubleArray(8) { i -> (if (i % 2 == 0) p[i / 2].x else p[i / 2].y).toDouble() } }
+            // árbitro: el recorte con más apoyo de bordes (el de color gana los empates)
+            val chosen = if (rgb != null) CardColorDetector.choose(rgb, color, edgesArr, CARD_COLOR_MIN_CONF) else edgesArr
+            if (chosen != null) {
+                val conf = if (color != null && chosen === color.quad) color.confidence else 0.5f
+                val q = Quad(Pt(chosen[0].toFloat(), chosen[1].toFloat()), Pt(chosen[2].toFloat(), chosen[3].toFloat()), Pt(chosen[4].toFloat(), chosen[5].toFloat()), Pt(chosen[6].toFloat(), chosen[7].toFloat()))
+                return oriented(q) to conf
+            }
+        } finally {
+            rgb?.release()
         }
-        if (color != null && color.confidence >= CARD_COLOR_MIN_CONF) return color.toQuad() to color.confidence
-        detectQuad(src, minConfidence = 0.4f, minAreaFraction = 0.04f)?.let { return it to 0.5f }
-        // color poco seguro: aun así suele ser mejor que el marco
-        if (color != null && color.confidence >= 0.3f) return color.toQuad() to color.confidence
         val r = guide ?: RectF(0f, 0f, 1f, 1f)
         val w = src.width.toFloat(); val h = src.height.toFloat()
         val l = r.left.coerceIn(0f, 1f) * w; val t = r.top.coerceIn(0f, 1f) * h
