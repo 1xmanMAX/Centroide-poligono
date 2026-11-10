@@ -247,3 +247,13 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
   Clon nuevo con motor: inicializar el submódulo native/pdfsqueeze (repo privado) + Rust, cargo-ndk y NDK.
 - 2026-11-06: pdfsqueeze FUSIONADO en libre (submódulo native/pdfsqueeze → 1xmanMAX/Thesis@2db0a83, puente propio native/pdfsqueeze-ffi). Libre 1.1.0 (versionCode 2): release firmada OK, libpdfsqueeze.so en el APK, R8 conserva dev.pdfsqueeze. Tests OK. Falta probar en móvil. playstore aún sin pdfsqueeze.
 - 2026-11-10: EN CURSO mejora DNI (agente, rama libre-dni con push WIP): detección por color de la tarjeta (máscara del azul, rellenar huecos internos, ajuste de 4 rectas), confirmar/corregir recorte tras cada cara, guardar fotos originales + quads para editar el recorte desde Revisión y recomponer la hoja. Notas: /tmp/claude-0/bench/notes_dni.md.
+- 2026-11-10: HECHA corrección de la LENTE (petición: "letras de los bordes distorsionadas por la cámara"), rama
+  `libre-lente` (push; NO fusionada en libre). Capas: (1) ISP: DISTORTION_CORRECTION_MODE HQ en la foto y FAST/HQ en
+  vista previa/análisis si la cámara lo anuncia (API 28+), resultado de cada foto recogido (ui/camera/CameraLens.kt);
+  (2) software con LENS_DISTORTION/intrínseca/recorte de zoom si el ISP no corrige, verificado con las rectas de la foto
+  (imaging/LensModel, LensCorrection, LensFix; remap por franjas con rejilla en caché); (3) autocalibrado plumb-line con
+  el documento (LensSelfCal, modelo de división, aceptación conservadora; solo Documento/Recibo/Pizarra; galería
+  incluida); (4) aberración cromática lateral por software + realce radial suave de bordes (solo filtros de texto, cuando
+  Deblur no corre). La corrección queda grabada en el ORIGINAL con marca EXIF «ESCANER-LENTE v1» (reprocesar es
+  coherente). Ajuste «Corregir distorsión de la lente» (Ajustes › Escaneo, por defecto sí). LensTest 12/12; banco en
+  /tmp/claude-0/bench/notes_lente.md. Sin probar en dispositivo. No toca el flujo DNI (libre-dni).

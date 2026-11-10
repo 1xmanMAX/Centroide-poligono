@@ -89,18 +89,22 @@ internal object LensSelfCal {
         val outer = use.count { c -> val m = mid(c); hypot(m[0] - cx, m[1] - cy) / norm > 0.45 }
         if (outer < 2) return Fit(0.0, 0.0, 0.0, use.size, false, "sin curvas en los bordes")
         val wts = DoubleArray(use.size) { chordLen(use[it]) / minSide }
+        // Curvas que cuentan (tras la primera pasada, fuera las que no son rectas con ningún k: texto suelto, sombras)
+        val active = BooleanArray(use.size) { true }
         fun costOf(k: Double, per: DoubleArray? = null): Double {
             var s = 0.0
             for ((i, c) in use.withIndex()) {
+                if (!active[i] && per == null) continue
                 val r = residual(c, k, cx, cy, norm)
                 per?.set(i, r)
                 s += wts[i] * r * r
             }
             return s
         }
-        val c0 = costOf(0.0)
-        if (c0 <= 1e-9) return Fit(0.0, c0, c0, use.size, false, "ya rectas")
-        var bestK = 0.0; var best = c0
+        val c0All = costOf(0.0)
+        if (c0All <= 1e-9) return Fit(0.0, c0All, c0All, use.size, false, "ya rectas")
+        var c0Active = c0All
+        var bestK = 0.0; var best = c0All
         val steps = 120
         val ks = DoubleArray(steps + 1) { -K_MAX + 2 * K_MAX * it / steps }
         val cs = DoubleArray(ks.size) { costOf(ks[it]) }
@@ -117,14 +121,35 @@ internal object LensSelfCal {
                 if (ck < best) { best = ck; bestK = kk }
             }
         }
+        // Segunda pasada: sólo las curvas que el modelo explica (residuo <= 2.5 x mediana) y búsqueda fina (sección áurea)
+        if (bi in 1 until ks.lastIndex) {
+            val pr = DoubleArray(use.size); costOf(bestK, pr)
+            val med = pr.sorted()[pr.size / 2]
+            for (i in use.indices) active[i] = pr[i] <= max(0.8, 2.5 * med)
+            if (active.count { it } >= 4) {
+                var lo = bestK - 0.012; var hi = bestK + 0.012
+                val g = (sqrt(5.0) - 1) / 2
+                var x1 = hi - g * (hi - lo); var x2 = lo + g * (hi - lo)
+                var f1 = costOf(x1); var f2 = costOf(x2)
+                repeat(28) {
+                    if (f1 < f2) { hi = x2; x2 = x1; f2 = f1; x1 = hi - g * (hi - lo); f1 = costOf(x1) }
+                    else { lo = x1; x1 = x2; f1 = f2; x2 = lo + g * (hi - lo); f2 = costOf(x2) }
+                }
+                bestK = (lo + hi) / 2
+            } else active.fill(true)
+            best = costOf(bestK)
+            c0Active = costOf(0.0)
+        }
         val per0 = DoubleArray(use.size); val per1 = DoubleArray(use.size)
         costOf(0.0, per0); costOf(bestK, per1)
         val r0 = per0.average(); val r1 = per1.average()
+        val c0 = c0Active
         if (bi == 0 || bi == ks.lastIndex) return Fit(bestK, c0, best, use.size, false, "k en el límite", r0, r1)
         if (best > c0 * (1 - MIN_GAIN)) return Fit(bestK, c0, best, use.size, false, "poca mejora", r0, r1)
         // Coherencia radial por lados: curvas horizontales arriba/abajo del centro, verticales a izquierda/derecha
         val side0 = DoubleArray(4); val side1 = DoubleArray(4); val cnt = IntArray(4)
         for ((i, c) in use.withIndex()) {
+            if (!active[i]) continue
             val m = mid(c)
             val dx = c[c.size - 2] - c[0]; val dy = c[c.size - 1] - c[1]
             val horiz = abs(dx) >= abs(dy)
