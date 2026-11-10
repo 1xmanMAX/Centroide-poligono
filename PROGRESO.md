@@ -270,3 +270,4 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
   coherente). Ajuste «Corregir distorsión de la lente» (Ajustes › Escaneo, por defecto sí). LensTest 12/12; banco en
   /tmp/claude-0/bench/notes_lente.md. Sin probar en dispositivo. No toca el flujo DNI (libre-dni).
 - 2026-11-10: FUSIONADOS libre-dni (CardColorDetector, recorte DNI editable) y libre-lente (corrección de lente) en libre. Libre 1.2.0 (versionCode 3), release firmada, tests OK. Falta probar en móvil (logcat CameraLens/LensFix).
+- 2026-11-10: EN CURSO (agentes, push WIP): libre-giro (girar sin reprocesar, orientación automática con Jev/doc_ori/OCR, DNI más grande en la hoja: Real/Grande 140 %/Muy grande) y libre-album (nueva función Álbum: hoja de fondo vacía/imagen/página PDF, recuadros redimensionables proporcionalmente y girables, escanear cada «sticker» y pegarlo, exportar PDF). Al terminar: fusionar ambos en libre, APK 1.3.0.
