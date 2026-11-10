@@ -63,6 +63,7 @@ class SettingsRepository(private val context: Context) {
             prefs[Keys.ATTACH_REVIEW] = updated.attachReview
             prefs[Keys.USER_VOCABULARY] = updated.userVocabulary.joinToString("\n")
             prefs[Keys.SPELL_CHECK] = updated.spellCheck
+            prefs[Keys.LENS_CORRECTION] = updated.lensCorrection
         }
     }
 
@@ -101,6 +102,7 @@ class SettingsRepository(private val context: Context) {
             attachReview = this[Keys.ATTACH_REVIEW] ?: d.attachReview,
             userVocabulary = this[Keys.USER_VOCABULARY]?.split('\n')?.map { it.trim() }?.filter { it.isNotEmpty() } ?: d.userVocabulary,
             spellCheck = this[Keys.SPELL_CHECK] ?: d.spellCheck,
+            lensCorrection = this[Keys.LENS_CORRECTION] ?: d.lensCorrection,
         )
     }
 
@@ -131,6 +133,7 @@ class SettingsRepository(private val context: Context) {
         val ATTACH_REVIEW = booleanPreferencesKey("attach_review")
         val USER_VOCABULARY = stringPreferencesKey("user_vocabulary")
         val SPELL_CHECK = booleanPreferencesKey("spell_check")
+        val LENS_CORRECTION = booleanPreferencesKey("lens_correction")
     }
 
     private companion object {
@@ -189,6 +192,11 @@ data class AppSettings(
     val userVocabulary: List<String> = emptyList(),
     /** Corregir palabras mal leídas con el diccionario español (solo correcciones claras). */
     val spellCheck: Boolean = true,
+    /**
+     * «Corregir distorsión de la lente»: distorsión geométrica (barril/cojín) y franjas de color de los bordes de la foto,
+     * con la corrección del propio ISP si la cámara la ofrece, su calibración o, si no, la estimada con el documento.
+     */
+    val lensCorrection: Boolean = true,
 ) {
     fun cloudConsent(id: com.scannerpromax.ai.cloud.CloudProviderId): Boolean = when (id) {
         com.scannerpromax.ai.cloud.CloudProviderId.DEEPSEEK -> cloudConsentDeepSeek

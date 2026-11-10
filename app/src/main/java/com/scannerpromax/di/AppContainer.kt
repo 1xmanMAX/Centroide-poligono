@@ -32,6 +32,10 @@ class AppContainer(context: Context) {
         // Registra el contexto para que la super-resolución (FSRCNN en assets) pueda cargarse al primer uso.
         ImageEnhancer.init(appContext)
         PageProcessor(deviceTier).also { p ->
+            // «Corregir distorsión de la lente»: también el realce suave de los bordes de la foto en el render
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default).launch {
+                settings.settings.collect { s -> p.lensEdgeSharpen = s.lensCorrection }
+            }
             // Orientación automática de páginas nuevas: si está descargada la "Maquetación de páginas", el modelo
             // doc_ori apoya a la orientación por renglones (sin el modelo, sólo renglones; nunca se descarga aquí)
             p.orientationModel = { bmp -> orientationEngine.takeIf { it.isReady() }?.orientationProbs(bmp) }
@@ -114,6 +118,10 @@ class AppContainer(context: Context) {
             it.aiHook = aiQueue
             it.onOcrUnavailable = { indraProvisioner.ensure() }
             it.jev = jev
+        }.also { repo ->
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default).launch {
+                settings.settings.collect { s -> repo.lensCorrection = s.lensCorrection }
+            }
         }
     }
 

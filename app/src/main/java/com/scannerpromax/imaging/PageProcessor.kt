@@ -200,6 +200,7 @@ class PageProcessor(val tier: DeviceTier) {
                 val warped = cropMat(src, null, tier.maxWorkingPixels, maxSide)
                 src.release(); rgba = null
                 return orient(warped, edits.copy(autoDeskew = false, autoDewarp = false), null, cacheable = false)
+                    .also { if (maxSide == 0) edgeSharpen(it, null, it.cols(), it.rows(), edits) }
             }
             // 1) Homografía (o escala) a la resolución de trabajo
             val hm: DoubleArray; var ow: Int; var oh: Int; val interp: Int
@@ -237,7 +238,8 @@ class PageProcessor(val tier: DeviceTier) {
                 } finally {
                     out.release()
                 }
-                if (quad != null && maxSide == 0) restoreSharpness(rgb, inv3(mTot))
+                if (quad != null && maxSide == 0) restoreSharpness(rgb, inv3(mTot), w, h, edits)
+                else if (maxSide == 0) edgeSharpen(rgb, inv3(mTot), w, h, edits)
                 // Con el modelo por los cantos la salida ya es la hoja (sin cuñas de fondo): la limpieza de cuñas sólo
                 // podría tomar por fondo una franja de la propia hoja (margen de otro tono, tapa de un cuaderno)
                 if (quad != null && !model.beyond) cleanWedges(rgb, edits)
@@ -271,7 +273,8 @@ class PageProcessor(val tier: DeviceTier) {
             val rgb = Mat()
             Imgproc.cvtColor(out, rgb, Imgproc.COLOR_RGBA2RGB)
             out.release()
-            if (quad != null && maxSide == 0) restoreSharpness(rgb, inv3(mTot))
+            if (quad != null && maxSide == 0) restoreSharpness(rgb, inv3(mTot), w, h, edits)
+            else if (maxSide == 0) edgeSharpen(rgb, inv3(mTot), w, h, edits)
             // Esquinas que el enderezado deja fuera del documento -> color del papel (no la mesa del fondo)
             if (rd != null) fillOutsideRotated(rgb, rd, preW, preH)
             if (quad != null) cleanWedges(rgb, edits)
@@ -286,8 +289,9 @@ class PageProcessor(val tier: DeviceTier) {
      * deconvolución por zonas sin halos). Sólo en el render a resolución completa con recorte (la vista previa no lo
      * necesita) y fuera de la gama baja (tiempo). [hinv] = salida -> foto. Un fallo no impide el render.
      */
-    private fun restoreSharpness(rgb: Mat, hinv: DoubleArray) {
-        if (tier.isLowRam) return
+    private fun restoreSharpness(rgb: Mat, hinv: DoubleArray, photoW: Int, photoH: Int, edits: PageEdits) {
+        // Gama baja: sin la deconvolución por zonas; sólo el realce radial ligero de los bordes de la foto
+        if (tier.isLowRam) { edgeSharpen(rgb, hinv, photoW, photoH, edits); return }
         val pre = PrintedPage.reduceForAnalysis(rgb)
         // Primero la estela/imagen doble (núcleo no paramétrico, relativo a la zona más nítida); Deblur no repite lo ya
         // corregido
@@ -300,6 +304,22 @@ class PageProcessor(val tier: DeviceTier) {
         } finally {
             if (keep) setClassify(pre) else pre.release()
         }
+    }
+
+    /**
+     * «Corregir distorsión de la lente»: la lente de un móvil emborrona más los bordes y las esquinas de la foto. Cuando
+     * la deconvolución por zonas ([Deblur], que ya mide ese desenfoque y lo corrige) no corre —foto sin recorte, gama
+     * baja— se aplica un realce SUAVE que crece hacia los bordes de la foto ([LensCorrection.radialSharpen]). Sólo con
+     * los filtros de texto (en color original/vívido y en fotos no se toca) y en el render a resolución completa.
+     */
+    @Volatile var lensEdgeSharpen: Boolean = true
+
+    private fun edgeSharpen(rgb: Mat, toPhoto: DoubleArray?, photoW: Int, photoH: Int, edits: PageEdits) {
+        if (!lensEdgeSharpen || rgb.channels() != 3) return
+        val f = edits.filter
+        if (f == FilterType.ORIGINAL || f == FilterType.VIVID || f == FilterType.AUTO || (edits.photoMode ?: 0) != 0) return
+        runCatching { LensCorrection.radialSharpen(rgb, toPhoto, photoW, photoH) }
+            .onFailure { if (Cv.isOutOfMemory(it)) throw it }
     }
 
     /** Foto [rgba] reducida (INTER_AREA) para que el documento ([quad] o la imagen) mida ≈ [side] de lado largo (nuevo Mat). */

@@ -259,3 +259,13 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
   recompone la hoja; los recortes manuales se respetan). Galería también editable. Reescanear un DNI abre la cámara en modo DNI.
   Bancos: sintético peruano 168 escenas éxito@0,95 68,5 → 91,7 %; MIDV-500 179 imágenes 62,0 → 70,4 %.
   Notas: /tmp/claude-0/bench/notes_dni.md. Pendiente: probar en móvil (tiempos a 8 MP, pantalla de confirmación).
+- 2026-11-10: HECHA corrección de la LENTE (petición: "letras de los bordes distorsionadas por la cámara"), rama
+  `libre-lente` (push; NO fusionada en libre). Capas: (1) ISP: DISTORTION_CORRECTION_MODE HQ en la foto y FAST/HQ en
+  vista previa/análisis si la cámara lo anuncia (API 28+), resultado de cada foto recogido (ui/camera/CameraLens.kt);
+  (2) software con LENS_DISTORTION/intrínseca/recorte de zoom si el ISP no corrige, verificado con las rectas de la foto
+  (imaging/LensModel, LensCorrection, LensFix; remap por franjas con rejilla en caché); (3) autocalibrado plumb-line con
+  el documento (LensSelfCal, modelo de división, aceptación conservadora; solo Documento/Recibo/Pizarra; galería
+  incluida); (4) aberración cromática lateral por software + realce radial suave de bordes (solo filtros de texto, cuando
+  Deblur no corre). La corrección queda grabada en el ORIGINAL con marca EXIF «ESCANER-LENTE v1» (reprocesar es
+  coherente). Ajuste «Corregir distorsión de la lente» (Ajustes › Escaneo, por defecto sí). LensTest 12/12; banco en
+  /tmp/claude-0/bench/notes_lente.md. Sin probar en dispositivo. No toca el flujo DNI (libre-dni).

@@ -88,6 +88,9 @@ class DocumentRepository(
 
     /** "Mejorar con Jev" (Ajustes › IA en la nube); null o apagado = comportamiento de siempre. */
     @Volatile var jev: com.scannerpromax.ai.jev.JevEnhancer? = null
+
+    /** «Corregir distorsión de la lente» (Ajustes) en las imágenes importadas: autocalibrado con el documento. */
+    @Volatile var lensCorrection: Boolean = true
     private val root: File = File(context.filesDir, DOCUMENTS_DIR)
     private val captureDir: File = File(context.cacheDir, "captures")
     private val importDir: File = File(context.cacheDir, "imports")
@@ -408,6 +411,19 @@ class DocumentRepository(
                 }
             } ?: continue
             try {
+                // Lente (sin calibración: la galería no la trae): autocalibrado con las rectas del documento, sólo en hojas
+                // planas; antes de detectar el documento. Nada apreciable -> el archivo no se toca.
+                val m = mode ?: get(docId)?.mode
+                if (lensCorrection && (m == ScanMode.DOCUMENT || m == ScanMode.RECEIPT || m == ScanMode.WHITEBOARD)) {
+                    heavyWork {
+                        withContext(Dispatchers.Default) {
+                            com.scannerpromax.imaging.LensFix.processFile(
+                                tmp, null,
+                                com.scannerpromax.imaging.LensFix.Options(maxPixels = (tier.maxWorkingPixels.toLong() * 4 / 3).coerceIn(4_000_000L, 20_000_000L).toInt()),
+                            )
+                        }
+                    }
+                }
                 pages += addPageFromFile(docId, tmp, autoDetect = true, mode = mode)
             } catch (t: kotlinx.coroutines.CancellationException) {
                 throw t

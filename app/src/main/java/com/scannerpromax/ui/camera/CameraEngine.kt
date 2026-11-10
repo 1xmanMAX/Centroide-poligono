@@ -298,6 +298,17 @@ internal class CameraEngine(
     }
 
     private var camera: Camera? = null
+
+    /** Lente: corrección de distorsión del ISP y calibración de cada foto (para la corrección por software). */
+    private val lens = CameraLens()
+
+    /** «Corregir distorsión de la lente» (Ajustes): se lee al enlazar la cámara. */
+    @Volatile var lensCorrection: Boolean = true
+
+    /** Calibración de la lente de la ÚLTIMA foto capturada (null = la cámara no informa). */
+    @Volatile var lastLens: com.scannerpromax.imaging.SensorLens? = null
+        private set
+
     private var preview: Preview? = null
     private var imageCapture: ImageCapture? = null
     private var analysis: ImageAnalysis? = null
@@ -448,13 +459,16 @@ internal class CameraEngine(
         unbindOwn(p)
         camera = null; preview = null; imageCapture = null; analysis = null
         val ratio = AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY
-        val pv = Preview.Builder()
-            .setResolutionSelector(ResolutionSelector.Builder().setAspectRatioStrategy(ratio).build())
-            .build()
-            .also { it.setSurfaceProvider(previewView.surfaceProvider) }
         val mode = if (qualityModeHangs) ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY else ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
         val ic = buildCapture(mode, previewView.display?.rotation, if (a.extension == null) baseInfo else null)
-        val ia = if (a.withAnalysis) buildAnalysis() else null
+        // Si la foto lleva la corrección de distorsión del ISP, la vista previa y el análisis también (misma geometría)
+        val streamInfo = baseInfo?.takeIf { a.extension == null && lens.requestedIspDistortion }
+        val pv = Preview.Builder()
+            .setResolutionSelector(ResolutionSelector.Builder().setAspectRatioStrategy(ratio).build())
+            .also { b -> streamInfo?.let { applyStreamLens(b, it) } }
+            .build()
+            .also { it.setSurfaceProvider(previewView.surfaceProvider) }
+        val ia = if (a.withAnalysis) buildAnalysis(streamInfo) else null
         val selector = try {
             if (a.extension != null) extensions?.getExtensionEnabledCameraSelector(base, a.extension) ?: return null else base
         } catch (t: Throwable) {
@@ -521,7 +535,7 @@ internal class CameraEngine(
         // Sin extensión: pedir explícitamente el procesado de ALTA CALIDAD del ISP (reducción de ruido, nitidez de
         // bordes, aberración cromática, píxeles calientes) si la cámara lo anuncia. La plantilla STILL_CAPTURE suele
         // traerlo ya, pero algunos HAL usan FAST por defecto; con texto pequeño la diferencia se nota.
-        if (hqInfo != null) applyHighQualityRequest(builder, hqInfo)
+        if (hqInfo != null) applyHighQualityRequest(builder, hqInfo) else lens.noStillRequest()
         return builder.build()
     }
 
@@ -547,12 +561,21 @@ internal class CameraEngine(
             if (!lowEnd && has(CameraCharacteristics.TONEMAP_AVAILABLE_TONE_MAP_MODES, CameraMetadata.TONEMAP_MODE_HIGH_QUALITY)) {
                 ext.setCaptureRequestOption(CaptureRequest.TONEMAP_MODE, CameraMetadata.TONEMAP_MODE_HIGH_QUALITY)
             }
+            // Distorsión geométrica (barril/cojín) corregida por el ISP (API 28+, si la anuncia) + resultado de cada foto
+            // (modos aplicados y calibración) para la corrección por software cuando el ISP no corrige.
+            lens.applyStill(ext, c2, lensCorrection)
         } catch (t: Throwable) {
             Log.w(TAG, "No se pudieron pedir las opciones de alta calidad", t)
         }
     }
 
-    private fun buildAnalysis(): ImageAnalysis {
+    @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
+    private fun <T> applyStreamLens(builder: androidx.camera.core.ExtendableBuilder<T>, info: CameraInfo) {
+        runCatching { lens.applyStream(Camera2Interop.Extender(builder), Camera2CameraInfo.from(info), lensCorrection) }
+            .onFailure { Log.w(TAG, "Sin corrección de distorsión en la vista previa", it) }
+    }
+
+    private fun buildAnalysis(streamInfo: CameraInfo? = null): ImageAnalysis {
         val analysisSelector = ResolutionSelector.Builder()
             .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
             .setResolutionStrategy(
@@ -563,6 +586,7 @@ internal class CameraEngine(
             .setResolutionSelector(analysisSelector)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+            .also { b -> streamInfo?.let { applyStreamLens(b, it) } }
             .build()
         val qualityEvery = if (lowEnd) 4 else 2
         glareStreak = 0
@@ -766,6 +790,21 @@ internal class CameraEngine(
      * defectuoso), se vuelve a enlazar sin extensión / en MINIMIZE_LATENCY (misma resolución y JPEG 100) y se repite.
      */
     suspend fun capture(file: File, previewView: PreviewView?): File {
+        val since = lens.markCaptureStart()
+        val f = captureRaw(file, previewView)
+        lastLens = lensFor(since)
+        return f
+    }
+
+    /** Calibración de la foto tomada desde [since] (resultado Camera2 o características). */
+    @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
+    private fun lensFor(since: Long): com.scannerpromax.imaging.SensorLens? = runCatching {
+        val info = camera?.cameraInfo ?: return null
+        val zoom = info.zoomState.value?.zoomRatio ?: 1f
+        lens.sensorLens(Camera2CameraInfo.from(info), since, zoom, activeExtension != null)
+    }.getOrNull()
+
+    private suspend fun captureRaw(file: File, previewView: PreviewView?): File {
         val ic = imageCapture ?: throw IllegalStateException("La cámara aún no está lista")
         val guarded = activeExtension != null || ic.captureMode == ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
         if (!guarded) return takePicture(ic, file, previewView)

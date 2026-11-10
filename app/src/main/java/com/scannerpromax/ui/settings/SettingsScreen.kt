@@ -151,7 +151,8 @@ internal fun SettingsContent(
                     header = "Escaneo",
                     footer = "La captura automática dispara sola con el documento estable y enfocado. Quitar rayas sueltas " +
                         "limpia dobleces, bolígrafo y bordes en las páginas nuevas. Encuadre IA usa una red neuronal (en el " +
-                        "teléfono, sin conexión) para confirmar o corregir el recorte automático. La cámara del teléfono abre la app de " +
+                        "teléfono, sin conexión) para confirmar o corregir el recorte automático. Corregir distorsión de la lente endereza " +
+                        "las letras y líneas curvadas cerca de los bordes de la foto y quita las franjas de color. La cámara del teléfono abre la app de " +
                         "cámara del sistema (máxima resolución, HDR y nitidez del fabricante) y procesa la foto al volver.",
                 ) {
                     item {
@@ -179,6 +180,15 @@ internal fun SettingsContent(
                             iconTint = SystemGreen,
                             checked = settings.neuralFraming,
                             onCheckedChange = { v -> onUpdate { it.copy(neuralFraming = v) } },
+                        )
+                    }
+                    item {
+                        ToggleRow(
+                            "Corregir distorsión de la lente",
+                            icon = AppIcons.Camera,
+                            iconTint = SystemBlue,
+                            checked = settings.lensCorrection,
+                            onCheckedChange = { v -> onUpdate { it.copy(lensCorrection = v) } },
                         )
                     }
                     item {
