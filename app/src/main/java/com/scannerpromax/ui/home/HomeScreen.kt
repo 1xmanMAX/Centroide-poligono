@@ -102,6 +102,7 @@ fun HomeScreen(
     onImportImages: (List<Uri>) -> Unit,
     onCompressPdf: () -> Unit,
     onSettings: () -> Unit,
+    onAlbums: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -224,6 +225,7 @@ fun HomeScreen(
             onCompressPdf = onCompressPdf,
             onSettings = onSettings,
             snackbar = snackbar,
+            onAlbums = onAlbums,
         )
         ProgressHud(
             visible = busyMessage != null,
@@ -284,6 +286,7 @@ internal fun HomeContent(
     folders: List<Pair<String, String>> = emptyList(),
     folder: String? = null,
     onFolderChange: (String?) -> Unit = {},
+    onAlbums: () -> Unit = {},
 ) {
     val ui = MaterialTheme.ui
     val perf = LocalPerf.current
@@ -293,7 +296,7 @@ internal fun HomeContent(
     val totalPages = remember(documents) { documents.sumOf { it.pages.size } }
     val searching = query.isNotBlank()
 
-    val menuGroups = homeMenuGroups(gridMode, onToggleGrid, onPickImages, onCompressPdf, onSettings)
+    val menuGroups = homeMenuGroups(gridMode, onToggleGrid, onPickImages, onCompressPdf, onSettings, onAlbums)
 
     Box(
         Modifier
@@ -459,6 +462,7 @@ internal fun homeMenuGroups(
     onPickImages: () -> Unit,
     onCompressPdf: () -> Unit,
     onSettings: () -> Unit,
+    onAlbums: () -> Unit = {},
 ): List<List<MoreMenuItem>> = listOf(
     listOf(
         if (gridMode) MoreMenuItem("Ver como lista", AppIcons.List, onClick = onToggleGrid)
@@ -467,6 +471,7 @@ internal fun homeMenuGroups(
     listOf(
         MoreMenuItem("Importar fotos", AppIcons.ImportPhotos, onClick = onPickImages),
         MoreMenuItem("Comprimir PDF", AppIcons.Compress, onClick = onCompressPdf),
+        MoreMenuItem("Álbum / Diseño libre", AppIcons.Grid, onClick = onAlbums),
     ),
     listOf(MoreMenuItem("Ajustes", AppIcons.Settings, onClick = onSettings)),
 )

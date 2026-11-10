@@ -288,3 +288,16 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
   aciertos / 1,3 % giros erróneos → nuevo 97,1 % / 0,6 %; por defecto (sin descarga) 63,6 % → 97,1 %. Notas notes_giro.md.
   (3) «Tamaño del DNI en la hoja» (Ajustes › Escaneo): Real 100 %, Grande 140 % (defecto), Muy grande 175 %; siempre cabe en A4
   (IdCardComposer.layout), cámara, galería y Recortar DNI. 632 tests OK, assembleDebug OK. Falta: probar en móvil.
+- 2026-11-10: HECHO «Álbum / Diseño libre» (rama `libre-album`, desde `libre`; subida, SIN fusionar). Petición: hoja (en
+  blanco, imagen, página de PDF o página escaneada) donde se dibujan recuadros y cada escaneo se «pega» en su recuadro
+  como un cromo. Inicio › ••• › «Álbum / Diseño libre» → lista de álbumes → «Nuevo álbum». Editor: arrastrar = recuadro
+  nuevo, tocar = seleccionar, arrastrar = mover, esquinas = tamaño proporcional (o «Libre»), dos dedos = zoom, imán con
+  guías a bordes/centro de la hoja y a otros recuadros, Girar 90°/ángulo fino, Medidas en mm + medidas habituales (DNI
+  ID-1, foto pasaporte/carnet, cromo, 10×15, 13×18, A6), Duplicar, Eliminar, deshacer/rehacer. Hojas: añadir, girar 90°
+  (con sus recuadros), cambiar fondo, mover, borrar. Pegar: Escanear (cámara con guía de la proporción del recuadro y
+  contorno en vivo) o Galería → detección (CardColorDetector + detector de documentos vía CaptureProcessor.detectCardSide)
+  → esquinas arrastrables (CropTool) + mejora (Color mejorado/Original/Documento/B/N) → «Pegar»; Recortar de nuevo,
+  Rellenar/Encajar, Girar foto, Quitar foto. Exportar: PDF (fondo PDF como Form XObject vectorial vía LayerUtility; JPEG
+  sin recomprimir), JPG 300 ppp (compartir/galería) y «Crear documento en la app». Código: album/* (modelos, geometría,
+  almacén filesDir/albums, importación, render, PDF, StickerMaker) y ui/album/*; tocados AppContainer, HomeScreen (menú),
+  Routes/AppNavHost. 23 tests nuevos. Notas: /tmp/claude-0/bench/notes_album.md. Sin probar en móvil.

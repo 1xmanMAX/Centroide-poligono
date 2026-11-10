@@ -38,6 +38,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.scannerpromax.di.AppContainer
 import com.scannerpromax.domain.ScanMode
+import com.scannerpromax.ui.album.albumGraph
 import com.scannerpromax.ui.camera.CameraScreen
 import com.scannerpromax.ui.components.ProgressHud
 import com.scannerpromax.ui.editor.EditorScreen
@@ -192,8 +193,11 @@ fun AppNavHost(
                         }
                     },
                     onSettings = { entry.ifActive(nav) { nav.navigate(Routes.SETTINGS) { launchSingleTop = true } } },
+                    onAlbums = { entry.ifActive(nav) { nav.navigate(Routes.ALBUMS) { launchSingleTop = true } } },
                 )
             }
+
+            albumGraph(container, nav)
 
             composable(
                 Routes.CAMERA,
