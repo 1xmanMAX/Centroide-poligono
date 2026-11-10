@@ -269,3 +269,4 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
   Deblur no corre). La corrección queda grabada en el ORIGINAL con marca EXIF «ESCANER-LENTE v1» (reprocesar es
   coherente). Ajuste «Corregir distorsión de la lente» (Ajustes › Escaneo, por defecto sí). LensTest 12/12; banco en
   /tmp/claude-0/bench/notes_lente.md. Sin probar en dispositivo. No toca el flujo DNI (libre-dni).
+- 2026-11-10: FUSIONADOS libre-dni (CardColorDetector, recorte DNI editable) y libre-lente (corrección de lente) en libre. Libre 1.2.0 (versionCode 3), release firmada, tests OK. Falta probar en móvil (logcat CameraLens/LensFix).
