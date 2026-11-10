@@ -14,6 +14,10 @@ object Routes {
     const val SETTINGS = "settings"
     const val AI_MODELS = "settings/ai-models"
     const val CLOUD_AI = "settings/cloud-ai"
+    const val ALBUMS = "albums"
+    const val ALBUM = "album/{albumId}"
+    const val ALBUM_CAMERA = "album/{albumId}/camera/{pageId}/{slotId}"
+    const val ALBUM_CROP = "album/{albumId}/crop/{pageId}/{slotId}?src={src}"
 
     /** [docId] null = documento nuevo. */
     /** [replacePageId] = volver a escanear esa página: una sola captura que ocupa su lugar. */
@@ -29,4 +33,10 @@ object Routes {
     fun export(docId: String, pageIds: Collection<String>? = null) =
         com.scannerpromax.export.ExportSelection.encode(pageIds)
             ?.let { "export/$docId?pages=" + java.net.URLEncoder.encode(it, "UTF-8") } ?: "export/$docId"
+
+    fun album(albumId: String) = "album/$albumId"
+    fun albumCamera(albumId: String, pageId: String, slotId: String) = "album/$albumId/camera/$pageId/$slotId"
+    /** [src] = imagen nueva (relativa al álbum) que recortar; null = recortar otra vez el cromo pegado. */
+    fun albumCrop(albumId: String, pageId: String, slotId: String, src: String? = null) =
+        "album/$albumId/crop/$pageId/$slotId" + (src?.let { "?src=" + java.net.URLEncoder.encode(it, "UTF-8") } ?: "")
 }
