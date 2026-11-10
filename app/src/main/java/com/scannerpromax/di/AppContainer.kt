@@ -181,6 +181,22 @@ class AppContainer(context: Context) {
         com.scannerpromax.ai.docgen.DocGenRunner(appContext, documents, cloudKeys, cloudUsage, imageExporter)
     }
 
+    /** «Álbum / Diseño libre»: hojas con recuadros donde se pegan escaneos (ver com.scannerpromax.album). */
+    val albums: com.scannerpromax.album.AlbumStore by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        com.scannerpromax.album.AlbumStore(java.io.File(appContext.filesDir, "albums"))
+    }
+    val albumImport: com.scannerpromax.album.AlbumImport by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        com.scannerpromax.album.AlbumImport(appContext, albums) { NativeLibs.ensurePdfBox(appContext) }
+    }
+    val stickerMaker: com.scannerpromax.album.StickerMaker by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        NativeLibs.ensureOpenCv()
+        com.scannerpromax.imaging.ImageEnhancer.init(appContext)
+        com.scannerpromax.album.StickerMaker(albums, deviceTier)
+    }
+    val albumExporter: com.scannerpromax.album.AlbumExporter by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        com.scannerpromax.album.AlbumExporter(appContext, albums, albumImport, deviceTier) { NativeLibs.ensurePdfBox(appContext) }
+    }
+
     /** El procesador solo si ya existe (para liberar cachés sin crearlo por accidente). */
     fun pageProcessorIfCreated(): PageProcessor? = if (pageProcessorLazy.isInitialized()) pageProcessor else null
 }
