@@ -8,7 +8,6 @@ import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.ParcelFileDescriptor
 import com.scannerpromax.imaging.BitmapIO
-import com.tom_roush.pdfbox.pdmodel.PDDocument
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -85,22 +84,7 @@ class AlbumImport(private val context: Context, private val store: AlbumStore, p
     suspend fun pdfBackground(albumId: String, pdf: File, index: Int, label: String?): SheetBackground = withContext(Dispatchers.IO) {
         ensurePdfBox()
         val (f, name) = store.newFile(albumId, "bg", "pdf", "pdf")
-        var dw: Double
-        var dh: Double
-        PDDocument.load(pdf).use { src ->
-            if (index !in 0 until src.numberOfPages) throw IOException("La página no existe")
-            PDDocument().use { one ->
-                val page = src.getPage(index)
-                val imported = one.importPage(page)
-                // importPage comparte los recursos: se guardan en el documento nuevo al serializar
-                imported.rotation = page.rotation
-                imported.cropBox = page.cropBox
-                imported.mediaBox = page.mediaBox
-                dw = AlbumPdfWriter.displayedW(page.cropBox, page.rotation)
-                dh = AlbumPdfWriter.displayedH(page.cropBox, page.rotation)
-                one.save(f)
-            }
-        }
+        val (dw, dh) = AlbumPdfWriter.extractPage(pdf, index, f)
         val (pf, pname) = store.newFile(albumId, "bg", "pdf_p", "jpg")
         val prev = pdfThumbnail(f, 0, PREVIEW_SIDE)
         try { BitmapIO.saveJpeg(prev, pf.absolutePath, 88) } finally { prev.recycle() }

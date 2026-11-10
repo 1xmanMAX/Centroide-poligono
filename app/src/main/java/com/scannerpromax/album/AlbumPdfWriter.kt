@@ -103,6 +103,27 @@ object AlbumPdfWriter {
         }
     }
 
+    /**
+     * Copia la página [index] (0..n-1) de [src] a un PDF propio de UNA página [out] (recursos incluidos, con su
+     * /Rotate y su CropBox). Devuelve su tamaño como se ve (pt, ya girada).
+     */
+    fun extractPage(src: File, index: Int, out: File): Pair<Double, Double> =
+        PDDocument.load(src).use { doc ->
+            if (index !in 0 until doc.numberOfPages) throw IOException("La página no existe")
+            PDDocument().use { one ->
+                val page = doc.getPage(index)
+                val imported = one.importPage(page)
+                imported.rotation = page.rotation
+                imported.cropBox = page.cropBox
+                imported.mediaBox = page.mediaBox
+                // sin anotaciones (enlaces, widgets): el Form XObject no las dibuja y arrastrarían el PDF original
+                imported.cosObject.removeItem(COSName.ANNOTS)
+                imported.cosObject.removeItem(COSName.getPDFName("B"))
+                one.save(out)
+                displayedW(page.cropBox, page.rotation) to displayedH(page.cropBox, page.rotation)
+            }
+        }
+
     /** Cuadrado unidad de la imagen en PDF (origen abajo a la izquierda) -> píxeles con la y hacia abajo. */
     private fun unitToPixels(w: Double, h: Double) = Affine(a = w, d = -h, f = h)
 
