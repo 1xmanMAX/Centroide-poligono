@@ -54,6 +54,9 @@ object CardOrientation {
     const val W_LINES = 0.8
     const val W_MODEL = 1.5
 
+    /** Registro de depuración (tests). */
+    @Volatile internal var debug: ((String) -> Unit)? = null
+
     /** Lado largo de trabajo de la cara. */
     private const val WORK = 900
 
@@ -133,7 +136,24 @@ object CardOrientation {
         val ycc = Mat(); Imgproc.cvtColor(land, ycc, Imgproc.COLOR_RGB2YCrCb)
         val mask = Mat()
         Core.inRange(ycc, Scalar(45.0, 136.0, 80.0), Scalar(240.0, 175.0, 128.0), mask)
+        val yccPx = ByteArray(w * h * 3); ycc.get(0, 0, yccPx)
         ycc.release()
+        /** ¿Fondo de FOTO alrededor de la caja (casi sin color, como el fondo claro de las fotos de RENIEC; la sombra lo oscurece)? */
+        fun photoBackdrop(x0: Int, y0: Int, x1: Int, y1: Int): Boolean {
+            val mx = (x1 - x0) / 4; val my = (y1 - y0) / 6
+            val ax = max(0, x0 - mx); val bx = min(w - 1, x1 + mx); val ay = max(0, y0 - my); val by = min(h - 1, y1 + my)
+            var n = 0; var sy = 0.0; var sc = 0.0
+            for (y in ay..by step 2) for (x in ax..bx step 2) {
+                if (x in x0..x1 && y in y0..y1) continue
+                val o = (y * w + x) * 3
+                sy += yccPx[o].toInt() and 0xFF
+                sc += abs((yccPx[o + 1].toInt() and 0xFF) - 128) + abs((yccPx[o + 2].toInt() and 0xFF) - 128)
+                n++
+            }
+            if (n == 0) return false
+            debug?.invoke("  fondo: Y=%.0f croma=%.0f".format(Locale.ROOT, sy / n, sc / n))
+            return sy / n > 80 && sc / n < 28
+        }
         val k = max(3, w / 150)
         Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_OPEN, Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(k.toDouble(), k.toDouble())))
         val labels = Mat(); val stats = Mat(); val cent = Mat()
@@ -148,7 +168,17 @@ object CardOrientation {
                 val bw = stats.get(i, Imgproc.CC_STAT_WIDTH)[0]; val bh = stats.get(i, Imgproc.CC_STAT_HEIGHT)[0]
                 // compacta (una cara, no una franja de color de la tarjeta) y no enorme
                 if (bw > w * 0.35 || bh > h * 0.85 || a < 0.35 * bw * bh || a > area * 0.2) continue
+                // la cara de la foto está DENTRO de la tarjeta; los dedos que la sujetan tocan el canto (piel también)
+                val bx = stats.get(i, Imgproc.CC_STAT_LEFT)[0]; val by = stats.get(i, Imgproc.CC_STAT_TOP)[0]
+                if (bx < w * 0.025 || by < h * 0.04 || bx + bw > w * 0.975 || by + bh > h * 0.96) continue
+                // forma de cara: elipse (relleno ~0,79, no un rectángulo como el chip dorado) más alta que ancha (no una
+                // franja de texto rojo); en la cara apaisada la altura de la foto va en el eje corto
+                val fill = a / (bw * bh)
+                if (fill < 0.55 || fill > 0.9 || bh < 1.15 * bw) continue
+                // y alrededor, el fondo claro de la foto (una huella sobre la tarjeta amarilla, desenfocada, también es «piel»)
+                if (!photoBackdrop(bx.toInt(), by.toInt(), (bx + bw).toInt(), (by + bh).toInt())) continue
                 val cx = cent.get(i, 0)[0] / w
+                debug?.invoke("piel: área=%.3f caja=%.2fx%.2f en (%.2f,%.2f) relleno=%.2f".format(Locale.ROOT, a / area, bw / w, bh / h, bx / w, by / h, a / (bw * bh)))
                 when {
                     cx < 0.4 -> left += a
                     cx > 0.6 -> right += a

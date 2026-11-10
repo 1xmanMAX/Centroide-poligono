@@ -84,14 +84,16 @@ class CardOrientationBenchTest {
         return out
     }
 
-    private fun run(full: Boolean, withModel: Boolean): List<Case> {
+    /** [held] = conjunto de VALIDACIÓN (otras semillas, mano y desenfoque; no se usó para ajustar los umbrales). */
+    private fun run(full: Boolean, withModel: Boolean, held: Boolean = false): List<Case> {
         val rnd = Random(11)
         val out = ArrayList<Case>()
-        var seed = 500L
+        var seed = if (held) 7000L else 500L
         for ((p, back, br) in scenes(full)) {
             val (b, r) = br
             val deg = r + (rnd.nextDouble() * 24 - 12)
-            val sc = SyntheticCards.scene(p, back, b, seed++, deg = deg, shadow = seed % 3 == 0L, glare = seed % 5 == 0L)
+            val sc = if (held) SyntheticCards.scene(p, back, b, seed++, deg = deg, shadow = seed % 2 == 0L, glare = seed % 3 == 0L, hand = seed % 4 == 0L, blur = seed % 3 == 1L)
+            else SyntheticCards.scene(p, back, b, seed++, deg = deg, shadow = seed % 3 == 0L, glare = seed % 5 == 0L)
             try {
                 val det = CardColorDetector.detect(sc.rgb, null) ?: continue
                 if (SyntheticCards.iou(det.quad, sc.gt, sc.rgb.cols(), sc.rgb.rows()) < 0.85) continue
@@ -171,6 +173,9 @@ class CardOrientationBenchTest {
         sb.appendLine("|---|---|---|---|---|")
         fun row(label: String, c: List<Case>) = sb.appendLine("| $label | ${c.size} | ${pct(c.count { it.before }, c.size)} | ${pct(c.count { it.after }, c.size)} | ${pct(c.count { it.afterNoModel }, c.size)} |")
         row("todas", cases)
+        val held = run(full = true, withModel = model != null, held = true)
+        row("VALIDACIÓN (otras semillas, mano, desenfoque)", held)
+        for (r in intArrayOf(0, 90, 180, 270)) row("validación giro $r°", held.filter { it.rot == r })
         for (r in intArrayOf(0, 90, 180, 270)) row("giro $r°", cases.filter { it.rot == r })
         for (p in Palette.entries) for (back in listOf(false, true)) row("${p.name.lowercase()} ${if (back) "reverso" else "anverso"}", cases.filter { it.palette == p && it.back == back })
         // señales por separado sobre la cara bien recortada con la VERDAD de cada escena (derecha y del revés)
@@ -220,7 +225,7 @@ class CardOrientationBenchTest {
         sb.appendLine()
         sb.appendLine("## Fallos (después)")
         sb.appendLine()
-        for (c in cases.filter { !it.after }) sb.appendLine("- ${c.name}: ${c.why}")
+        for (c in (cases + held).filter { !it.after }) sb.appendLine("- ${c.name}: ${c.why}")
         sb.appendLine()
         sb.appendLine("## doc_ori por cara (p de que TENGA 0° / 180°)")
         sb.appendLine()
