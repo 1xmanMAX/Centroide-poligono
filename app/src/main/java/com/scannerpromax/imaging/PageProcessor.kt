@@ -18,7 +18,8 @@ import kotlin.math.sqrt
 
 /**
  * Tubería completa de una página: original -> recorte/perspectiva -> rotación -> enderezado de hoja curvada
- * ([GridDewarp]) o, si no aplica, deskew -> filtro -> limpieza (líneas/ruido) -> borrado manual.
+ * ([GridDewarp]) o, si no aplica, deskew -> filtro -> limpieza (líneas/ruido) -> borrado manual -> giro FINAL sin
+ * pérdidas ([PageEdits.geoRotation], [PageRotation]: girar una página ya procesada no la reprocesa).
  *
  * Internamente todo trabaja sobre Mats (una sola conversión Bitmap->Mat al inicio y Mat->Bitmap al final)
  * y libera cada intermedio en cuanto deja de usarse.
@@ -48,20 +49,35 @@ class PageProcessor(val tier: DeviceTier) {
         jev: ((Mat) -> com.scannerpromax.ai.jev.JevRenderHints?)? = null,
     ): Bitmap {
         progress?.invoke(0f)
-        val geo = geometryFull(original, edits, maxSide = 0)
+        // Giro de 90° pedido DESPUÉS de procesar ([PageEdits.geoRotation]): todo se calcula en el marco de la geometría y
+        // el resultado se gira al final sin pérdidas (girar la página = girar el procesado, ver [PageRotation])
+        val d = PageRotation.delta(edits)
+        val geo = geometryFull(original, PageRotation.geoOnly(edits), maxSide = 0)
         // (el callback de progreso puede lanzar para cancelar un render en segundo plano: nada queda sin liberar)
         try { progress?.invoke(0.3f) } catch (e: Throwable) { geo.release(); throw e }
+        // las cajas de la maquetación son del procesado FINAL: al marco de la geometría
+        val layoutGeo = PageRotation.boxesToGeo(layoutImages, d)
+        val tablesGeo = PageRotation.boxesToGeo(tableHints, d)
         val hints = jev?.let { f -> runCatching { f(geo) }.getOrNull() }
-        val photos = hints?.let { h -> com.scannerpromax.ai.jev.JevPage.mergePhotos(layoutImages, h.photos) + h.inks.map { floatArrayOf(it[0], it[1], it[2], it[3], NaturalColor.INK_FLAG) } + h.verdicts } ?: layoutImages
-        val tables = hints?.let { tableHints + it.tables } ?: tableHints
-        val out = finish(geo, edits, ImageEnhancer.Options.of(tier, fast = false).copy(layoutImages = photos, tableHints = tables), progress)
+        val photos = hints?.let { h -> com.scannerpromax.ai.jev.JevPage.mergePhotos(layoutGeo, h.photos) + h.inks.map { floatArrayOf(it[0], it[1], it[2], it[3], NaturalColor.INK_FLAG) } + h.verdicts } ?: layoutGeo
+        val tables = hints?.let { tablesGeo + it.tables } ?: tablesGeo
+        val fe = finishEdits(edits, d, geo)
+        var out = finish(geo, fe, ImageEnhancer.Options.of(tier, fast = false).copy(layoutImages = photos, tableHints = tables), progress)
         try {
+            if (d != 0) { val r = PageRotation.rotateMat(out, d); out.release(); out = r }
             val bmp = Cv.toBitmap(out)
             progress?.invoke(1f)
             return bmp
         } finally {
             out.release()
         }
+    }
+
+    /** Ediciones para [finish] en el marco de la geometría [geo] (trazos de borrado girados de vuelta si hay giro final [d]). */
+    private fun finishEdits(edits: PageEdits, d: Int, geo: Mat): PageEdits {
+        if (d == 0) return PageRotation.geoOnly(edits)
+        val (fw, fh) = if (d == 180) geo.cols() to geo.rows() else geo.rows() to geo.cols()
+        return PageRotation.geoEdits(edits, fw, fh)
     }
 
     /**
@@ -71,10 +87,13 @@ class PageProcessor(val tier: DeviceTier) {
      * que calcula el render).
      */
     fun preview(original: Bitmap, edits: PageEdits, maxSide: Int = 1200): Bitmap {
-        val geo = geometryPreview(original, edits, maxSide)
+        val d = PageRotation.delta(edits)
+        val geo = geometryPreview(original, PageRotation.geoOnly(edits), maxSide)
         if (classifyRef.get() == null) runCatching { setClassify(PrintedPage.reduceForAnalysis(geo)) }
-        val out = finish(geo, edits, ImageEnhancer.Options.of(tier, fast = false).copy(preview = true), null)
+        val fe = finishEdits(edits, d, geo)
+        var out = finish(geo, fe, ImageEnhancer.Options.of(tier, fast = false).copy(preview = true), null)
         try {
+            if (d != 0) { val r = PageRotation.rotateMat(out, d); out.release(); out = r }
             return Cv.toBitmap(out)
         } finally {
             out.release()
@@ -83,7 +102,10 @@ class PageProcessor(val tier: DeviceTier) {
 
     /** Imagen recortada+rotada SIN filtro (base donde el usuario dibuja los trazos de borrado). */
     fun geometryOnly(original: Bitmap, edits: PageEdits, maxSide: Int = 0): Bitmap {
-        val geo = if (maxSide > 0) geometryPreview(original, edits, maxSide) else geometryFull(original, edits, 0)
+        val ge = PageRotation.geoOnly(edits)
+        var geo = if (maxSide > 0) geometryPreview(original, ge, maxSide) else geometryFull(original, ge, 0)
+        val d = PageRotation.delta(edits)
+        if (d != 0) { val r = PageRotation.rotateMat(geo, d); geo.release(); geo = r }
         val bmp = Cv.toBitmap(geo)
         geo.release()
         return bmp
@@ -113,34 +135,37 @@ class PageProcessor(val tier: DeviceTier) {
 
     /**
      * Giro HORARIO (0/90/180/270) que endereza la página de [original] recortada por [quad] (coordenadas de [original];
-     * null = imagen completa). 0 si no es muy fiable ([TextOrientation.decide]). No toca las cachés del procesador.
+     * null = imagen completa). 0 si no es muy fiable. VOTO ([OrientationVote]) de los renglones, del modelo doc_ori (si
+     * está descargado) y de Jev ([jevFix]: probabilidades del giro que endereza, solo con «Mejorar con Jev»). No toca las
+     * cachés del procesador.
      */
-    fun autoOrientation(original: Bitmap, quad: Quad?): Int {
+    fun autoOrientation(original: Bitmap, quad: Quad?, jevFix: FloatArray? = null): Int {
         val rgba = Cv.toRgba(original)
-        try { return autoOrientationMat(rgba, quad) } finally { rgba.release() }
+        try { return autoOrientationMat(rgba, quad, jevFix) } finally { rgba.release() }
     }
 
     /** [autoOrientation] sobre un Mat RGBA o RGB (no se libera). */
-    fun autoOrientationMat(src: Mat, quad: Quad?): Int = runCatching {
+    fun autoOrientationMat(src: Mat, quad: Quad?, jevFix: FloatArray? = null): Int =
+        runCatching { orientationDecision(src, quad, jevFix).rotation }.getOrDefault(0)
+
+    /** Decisión completa (con probabilidades y motivo) de [autoOrientationMat]. */
+    fun orientationDecision(src: Mat, quad: Quad?, jevFix: FloatArray? = null): OrientationVote.Decision {
         val w = src.cols(); val h = src.rows()
         val q = quad?.takeIf { !PerspectiveCorrector.isFullFrame(it, w, h) }
         val page = if (q != null) PerspectiveCorrector.warpMat(src, q, 0, ORIENT_SIDE) else Mat().also { Cv.downscale(src, it, ORIENT_SIDE) }
         try {
             val gray = Cv.gray(page)
-            try {
-                val r = TextOrientation.estimate(gray)
-                // El modelo sólo se consulta cuando puede cambiar la decisión: renglones verticales o propuesta de 180°
-                val model = orientationModel
-                val probs = if (model != null && (r.vertical == true || r.rotation == 180 || !r.sure)) {
-                    runCatching {
-                        val bmp = Cv.toBitmap(page)
-                        try { model(bmp) } finally { bmp.recycle() }
-                    }.getOrNull()
-                } else null
-                TextOrientation.decide(r, probs)
-            } finally { gray.release() }
+            val r = try { runCatching { TextOrientation.estimate(gray) }.getOrNull() } finally { gray.release() }
+            // el modelo vota siempre que esté descargado (≈ 100 ms; antes sólo se consultaba en algunos casos)
+            val probs = orientationModel?.let { model ->
+                runCatching {
+                    val bmp = Cv.toBitmap(page)
+                    try { model(bmp) } finally { bmp.recycle() }
+                }.getOrNull()
+            }
+            return OrientationVote.decide(r, probs, jevFix).also { android.util.Log.i("Orientacion", it.toString()) }
         } finally { page.release() }
-    }.getOrDefault(0)
+    }
 
     // =====================================================================================
     // Geometría

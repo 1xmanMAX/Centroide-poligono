@@ -19,7 +19,15 @@ import kotlin.math.roundToInt
  * primer uso y se liberan con [close] (la cola los suelta al terminar). Si el modelo no está, todo devuelve null y la
  * tubería sigue como antes.
  */
-class LayoutEngine(private val models: ModelManager, private val threads: Int = 4) : Closeable {
+class LayoutEngine(
+    private val models: ModelManager,
+    private val threads: Int = 4,
+    /**
+     * doc_ori INCLUIDO en la app (assets/models/pp_lcnet_doc_ori.onnx, 6,8 MB): la orientación automática funciona sin la
+     * descarga de la maquetación. null = solo el descargado.
+     */
+    private val bundledOrientation: (() -> ByteArray)? = null,
+) : Closeable {
 
     private var layout: PpLayoutOrt? = null
     private var orientation: Net? = null
@@ -40,9 +48,10 @@ class LayoutEngine(private val models: ModelManager, private val threads: Int = 
      */
     @Synchronized
     fun orientationProbs(page: Bitmap): FloatArray? {
-        val f = models.storage.readyFile(ModelCatalog.PAGE_LAYOUT, ModelCatalog.ORIENTATION_FILE) ?: return null
+        val f = models.storage.readyFile(ModelCatalog.PAGE_LAYOUT, ModelCatalog.ORIENTATION_FILE)
+        if (f == null && bundledOrientation == null && orientation == null) return null
         return try {
-            val net = orientation ?: Dnn.readNetFromONNX(f.absolutePath).also {
+            val net = orientation ?: (if (f != null) Dnn.readNetFromONNX(f.absolutePath) else Dnn.readNetFromONNX(org.opencv.core.MatOfByte(*bundledOrientation!!()))).also {
                 it.setPreferableBackend(Dnn.DNN_BACKEND_OPENCV); it.setPreferableTarget(Dnn.DNN_TARGET_CPU)
                 orientation = it
             }

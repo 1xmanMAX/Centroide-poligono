@@ -66,7 +66,7 @@ import com.scannerpromax.ui.theme.ui
 import kotlinx.coroutines.launch
 
 /** Qué selector (hoja inferior) está abierto. */
-private enum class Picker { FILTER, PAGE_SIZE, QUALITY, PDF_TEXT }
+private enum class Picker { FILTER, PAGE_SIZE, QUALITY, PDF_TEXT, ID_CARD_SIZE }
 
 /** Subpantallas de Ajustes (navegación interna, sin rutas nuevas). */
 internal enum class SettingsPage { MAIN, EXPORT, APPEARANCE, INTEGRATION, ABOUT }
@@ -149,7 +149,7 @@ internal fun SettingsContent(
             SettingsPage.MAIN -> SettingsPageScaffold(title = "Ajustes", backLabel = "Documentos", onBack = onBack) {
                 InsetGroup(
                     header = "Escaneo",
-                    footer = "La captura automática dispara sola con el documento estable y enfocado. Quitar rayas sueltas " +
+                    footer = "El tamaño del DNI es el de las dos caras en la hoja A4 (también al corregir su recorte en Revisión). La captura automática dispara sola con el documento estable y enfocado. Quitar rayas sueltas " +
                         "limpia dobleces, bolígrafo y bordes en las páginas nuevas. Encuadre IA usa una red neuronal (en el " +
                         "teléfono, sin conexión) para confirmar o corregir el recorte automático. Corregir distorsión de la lente endereza " +
                         "las letras y líneas curvadas cerca de los bordes de la foto y quita las franjas de color. La cámara del teléfono abre la app de " +
@@ -162,6 +162,15 @@ internal fun SettingsContent(
                             iconTint = ui.accent,
                             value = settings.defaultFilter.uiFilter.label,
                             onClick = { picker = Picker.FILTER },
+                        )
+                    }
+                    item {
+                        NavigationRow(
+                            "Tamaño del DNI en la hoja",
+                            icon = AppIcons.Page,
+                            iconTint = SystemBlue,
+                            value = settings.idCardSize.label,
+                            onClick = { picker = Picker.ID_CARD_SIZE },
                         )
                     }
                     item {
@@ -434,6 +443,15 @@ internal fun SettingsContent(
             label = { it.label },
             description = { it.description },
             onSelect = { v -> onUpdate { it.copy(defaultFilter = v) } },
+            onDismiss = { picker = null },
+        )
+        Picker.ID_CARD_SIZE -> OptionsSheet(
+            title = "Tamaño del DNI en la hoja",
+            options = com.scannerpromax.imaging.IdCardSize.entries,
+            selected = settings.idCardSize,
+            label = { it.label },
+            description = { it.description },
+            onSelect = { v -> onUpdate { it.copy(idCardSize = v) } },
             onDismiss = { picker = null },
         )
         Picker.PAGE_SIZE -> OptionsSheet(

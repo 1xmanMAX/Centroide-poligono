@@ -37,8 +37,8 @@ class AppContainer(context: Context) {
                 settings.settings.collect { s -> p.lensEdgeSharpen = s.lensCorrection }
             }
             // Orientación automática de páginas nuevas: si está descargada la "Maquetación de páginas", el modelo
-            // doc_ori apoya a la orientación por renglones (sin el modelo, sólo renglones; nunca se descarga aquí)
-            p.orientationModel = { bmp -> orientationEngine.takeIf { it.isReady() }?.orientationProbs(bmp) }
+            // doc_ori (o el incluido en la app) vota con la orientación por renglones y Jev (imaging/OrientationVote)
+            p.orientationModel = { bmp -> orientationEngine.orientationProbs(bmp) }
             // «Encuadre IA»: árbitro neuronal del recorte (captura y Auto-detectar; no en la vista en vivo ni escaneos).
             p.detector.neural = neuralCorners
         }
@@ -68,9 +68,9 @@ class AppContainer(context: Context) {
     /** ONNX Runtime (incluido en la app) arrancado o arrancable ahora. */
     private fun ortAvailableNow(): Boolean = com.scannerpromax.ai.parts.OrtNative.ensureLoaded()
 
-    /** Modelo de orientación (doc_ori) para la tubería normal: se carga al primer uso y sólo si está descargado. */
+    /** Modelo de orientación (doc_ori) para la tubería normal: se carga al primer uso (el descargado o, si no, el incluido en la app). */
     private val orientationEngine by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
-        com.scannerpromax.ai.parts.LayoutEngine(models, threads = 2)
+        com.scannerpromax.ai.parts.LayoutEngine(models, threads = 2, bundledOrientation = { appContext.assets.open(ORIENTATION_ASSET).use { it.readBytes() } })
     }
     val pageProcessor: PageProcessor by pageProcessorLazy
 
@@ -183,4 +183,9 @@ class AppContainer(context: Context) {
 
     /** El procesador solo si ya existe (para liberar cachés sin crearlo por accidente). */
     fun pageProcessorIfCreated(): PageProcessor? = if (pageProcessorLazy.isInitialized()) pageProcessor else null
+
+    private companion object {
+        /** doc_ori incluido en la app (assets/models/README-docori.txt). */
+        const val ORIENTATION_ASSET = "models/pp_lcnet_doc_ori.onnx"
+    }
 }

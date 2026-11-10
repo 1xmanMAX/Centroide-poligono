@@ -25,6 +25,7 @@ import com.scannerpromax.imaging.MultiFrameFusion
 import com.scannerpromax.imaging.PerspectiveCorrector
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.math.abs
@@ -251,7 +252,8 @@ internal class CaptureProcessor(private val container: AppContainer) {
             val fb = renderCardSide(front.file, front.quad, enhance).also { f = it }
             b = back?.let { renderCardSide(it.file, it.quad, enhance) }
             // Componer con el permiso; entregar al repositorio sin él (no anidar puertas de trabajo pesado).
-            val page = HeavyWork.run { IdCardComposer.compose(fb, b) }
+            val size = idCardSize()
+            val page = HeavyWork.run { IdCardComposer.compose(fb, b, size) }
             try {
                 val card = IdCardEdits(front.toSide(), back?.toSide(), enhance)
                 container.documents.addPageFromBitmap(docId, page, edits.copy(idCard = card), front.file, back?.file)
@@ -275,7 +277,8 @@ internal class CaptureProcessor(private val container: AppContainer) {
         try {
             val fb = renderCardSide(docs.idSourceFile(docId, pageId, back = false), card.front.quad, card.enhance).also { f = it }
             b = card.back?.let { renderCardSide(docs.idSourceFile(docId, pageId, back = true), it.quad, card.enhance) }
-            val page = HeavyWork.run { IdCardComposer.compose(fb, b) }
+            val size = idCardSize()
+            val page = HeavyWork.run { IdCardComposer.compose(fb, b, size) }
             try {
                 docs.recomposeIdCard(docId, pageId, page, card)
             } finally {
@@ -285,6 +288,10 @@ internal class CaptureProcessor(private val container: AppContainer) {
             f?.recycle(); b?.recycle()
         }
     }
+
+    /** «Tamaño del DNI en la hoja» (Ajustes › Escaneo); el de por defecto si no se puede leer. */
+    private suspend fun idCardSize(): com.scannerpromax.imaging.IdCardSize =
+        runCatching { container.settings.settings.first().idCardSize }.getOrDefault(com.scannerpromax.imaging.IdCardSize.DEFAULT)
 
     /** Galería: [uris] (1 o 2 imágenes: anverso y reverso) como DNI editable, con detección automática de cada cara. */
     suspend fun importIdCard(docId: String, uris: List<Uri>, enhance: FilterType?, edits: PageEdits) {

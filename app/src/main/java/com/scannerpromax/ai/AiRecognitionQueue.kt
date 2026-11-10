@@ -17,6 +17,7 @@ import com.scannerpromax.domain.Page
 import com.scannerpromax.domain.PageEdits
 import com.scannerpromax.imaging.BitmapIO
 import com.scannerpromax.imaging.DeviceTier
+import com.scannerpromax.imaging.PageRotation
 import com.scannerpromax.ocr.OcrUnavailableException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -337,9 +338,11 @@ class AiRecognitionQueue(
     private class Prepared(val edits: PageEdits, val bmp: Bitmap, val fullW: Int, val fullH: Int, val rotation: Int)
 
     /**
-     * Decodifica el procesado de la página y comprueba la ORIENTACIÓN (PP-LCNet doc_ori, voto de 5 recortes): una página
-     * girada se endereza en sus ediciones (giro horario tras el recorte), así la imagen procesada, la miniatura, el PDF y
-     * las coordenadas quedan derechos. Solo si la página no tiene ya un giro (respeta el del usuario).
+     * Decodifica el procesado de la página y comprueba la ORIENTACIÓN con el mismo voto que al crear la página
+     * ([com.scannerpromax.imaging.OrientationVote]: renglones + doc_ori; antes doc_ori SOLO con p ≥ 0,4, que giraba
+     * páginas derechas): una página girada se endereza en sus ediciones con un giro final sin pérdidas (no se reprocesa),
+     * así la imagen procesada, la miniatura, el PDF y las coordenadas quedan derechos. Solo si la página nunca se giró
+     * después de procesarla (respeta el giro del usuario, también cuando la devolvió a 0°).
      */
     private suspend fun prepare(j: AiJob, page0: Page, decodePx: Int, onProgress: (AiRecognizer.Progress) -> Unit): Prepared? {
         val repo = documents()
@@ -348,12 +351,12 @@ class AiRecognitionQueue(
         var bmp = withContext(Dispatchers.IO) { BitmapIO.decode(processed.absolutePath, decodePx) }
         var rotation = 0
         try {
-            if (page.edits.rotation == 0) {
+            if (page.edits.rotation == 0 && page.edits.geoRotation == null) {
                 onProgress(AiRecognizer.Progress(0.02f, "Comprobando la orientación"))
-                val o = withContext(Dispatchers.Default) { layoutEngine.orientation(bmp) }
-                val ccw = o?.let { DocOrientation.correction(it) } ?: 0
-                if (ccw != 0) {
-                    val newEdits = page.edits.copy(rotation = DocOrientation.clockwise(ccw))
+                val cw = withContext(Dispatchers.Default) { repo.orientationOf(bmp)?.rotation } ?: 0
+                val ccw = (360 - cw) % 360
+                if (cw != 0) {
+                    val newEdits = PageRotation.withRotation(page.edits, cw, bmp.width.toFloat() / bmp.height.coerceAtLeast(1))
                     val updated = selfEdit(j) { repo.updateEdits(j.docId, j.pageId, newEdits) }
                     if (updated != null && updated.edits == newEdits) {
                         onProgress(AiRecognizer.Progress(0.03f, "Enderezando la página"))
@@ -362,7 +365,7 @@ class AiRecognitionQueue(
                         bmp.recycle()
                         bmp = withContext(Dispatchers.IO) { BitmapIO.decode(processed.absolutePath, decodePx) }
                         rotation = ccw
-                        _notices.tryEmit("Página ${pageNumber(j)} enderezada (estaba girada ${o!!.angle}°). Puedes deshacerlo en el editor.")
+                        _notices.tryEmit("Página ${pageNumber(j)} enderezada (estaba girada ${ccw}°). Puedes deshacerlo en el editor.")
                     }
                 }
             }

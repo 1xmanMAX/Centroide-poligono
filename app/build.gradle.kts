@@ -259,6 +259,8 @@ tasks.withType<Test>().configureEach {
         "jevOcr" to "jev.ocr", "jevOpts" to "jev.opts",
         // JevIdeasEvalTest (captura, duplicados, firmas con la API real): -PjevIdeas=DIR con DIR/list.tsv (scratch jev_impl).
         "jevIdeas" to "jev.ideas",
+        // OrientationBenchTest (banco de orientación): -PoriBench=DIR (imágenes DERECHAS en DIR/src) [-PoriModel=doc_ori.onnx]
+        "oriBench" to "ori.bench", "oriModel" to "ori.model",
     ).forEach { (p, sp) ->
         (project.findProperty(p) as String?)?.let { systemProperty(sp, it) }
     }
