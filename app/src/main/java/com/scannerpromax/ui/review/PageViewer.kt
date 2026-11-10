@@ -186,6 +186,8 @@ internal fun PageViewerDialog(
     onDismiss: () -> Unit,
     onEdit: (Page) -> Unit,
     onRetake: ((Page) -> Unit)? = null,
+    /** DNI compuesto ([com.scannerpromax.domain.PageEdits.idCard]): editar una cara (0 anverso, 1 reverso) por separado. */
+    onEditIdSide: ((Page, Int) -> Unit)? = null,
     /** El usuario descartó los avisos de calidad de la página ("Mejorar con Jev"). */
     onDismissIssues: (Page) -> Unit = {},
 ) {
@@ -359,6 +361,17 @@ internal fun PageViewerDialog(
                     onDismiss = { dismissedIssues = dismissedIssues + page.id; onDismissIssues(page) },
                     modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 58.dp, start = 16.dp, end = 16.dp),
                 )
+            }
+            // DNI: cada cara se edita por separado (recorte, giro, mejora, reemplazar…)
+            val card = page.edits.idCard
+            if (card != null && onEditIdSide != null && !showRebuilt && issues.isEmpty()) {
+                Row(
+                    Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 58.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    ViewerTextButton("Editar anverso") { onEditIdSide(page, 0) }
+                    ViewerTextButton(if (card.back != null) "Editar reverso" else "Añadir reverso") { onEditIdSide(page, 1) }
+                }
             }
             val hintText = when {
                 showRebuilt || live.range != null -> null

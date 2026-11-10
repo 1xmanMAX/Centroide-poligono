@@ -151,13 +151,35 @@ data class PageEdits(
     val geoRotation: Int? = null,
 )
 
-/** Recorte de una cara del DNI: [quad] NORMALIZADO 0..1 sobre su foto original (con la orientación EXIF aplicada). */
+/**
+ * Recorte de una cara del DNI: [quad] NORMALIZADO 0..1 sobre su foto original (con la orientación EXIF aplicada). La
+ * esquina inicial de [quad] es la esquina superior izquierda de la cara (la orientación automática, ver
+ * imaging/CardOrientation, reordena las esquinas). Los campos opcionales son null en las páginas antiguas (no se
+ * serializan: el hash no cambia).
+ */
 @Serializable
 data class IdCardSide(
     val quad: Quad,
     /** true = el usuario ajustó las esquinas: nunca se vuelve a detectar automáticamente encima. */
     val manual: Boolean? = null,
-)
+    /** Giro horario EXTRA del usuario sobre el rectificado (90/180/270); null = 0. */
+    val rotation: Int? = null,
+    /** true = espejo horizontal (foto de un espejo o de una pantalla volteada); null = no. */
+    val mirror: Boolean? = null,
+    /** Mejora de ESTA cara; null = la común de la tarjeta ([IdCardEdits.enhance]). [FilterType.ORIGINAL] = sin mejora. */
+    val filter: FilterType? = null,
+) {
+    /** Giro extra normalizado (0/90/180/270). */
+    val turn: Int get() = (((rotation ?: 0) % 360) + 360) % 360 / 90 * 90
+
+    /** La misma cara girada [deg]° más (horario); 0 vuelve a null para no cambiar el hash. */
+    fun rotated(deg: Int): IdCardSide = copy(rotation = ((turn + deg) % 360 + 360) % 360 / 90 * 90).let { if (it.rotation == 0) it.copy(rotation = null) else it }
+
+    fun mirrored(): IdCardSide = copy(mirror = if (mirror == true) null else true)
+
+    /** Mejora efectiva de la cara con la común [common]; null = sin mejora. */
+    fun effectiveFilter(common: FilterType?): FilterType? = (filter ?: common)?.takeIf { it != FilterType.ORIGINAL }
+}
 
 /** Las dos caras de un DNI compuesto en una hoja y el filtro con que se mejoró cada cara (null = sin mejora). */
 @Serializable

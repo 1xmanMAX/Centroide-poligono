@@ -673,13 +673,55 @@ class DocumentRepository(
     /** Foto original de una cara del DNI compuesto (puede no existir: DNI antiguo). */
     fun idSourceFile(docId: String, pageId: String, back: Boolean): File = File(docDir(docId), PageFiles.idSourceName(pageId, back))
 
+    /** Caché de una cara del DNI ya renderizada ([PageFiles.idRenderName]); puede no existir. */
+    fun idRenderFile(docId: String, pageId: String, key: String): File = File(docDir(docId), PageFiles.idRenderName(pageId, key))
+
+    /**
+     * Instala las fotos de origen de las caras: [sources] (anverso, reverso; null en el reverso = sin reverso) pasan a ser
+     * `original/<página>_idfront|idback.jpg`. Admite intercambiarlas (cada una es la otra): primero se copian a temporales
+     * y después se renombran. Las temporales de la app (capturas) se borran. Con el candado de la página tomado.
+     */
+    private fun installIdSources(dir: File, pageId: String, sources: List<File?>) {
+        val targets = listOf(File(dir, PageFiles.idSourceName(pageId, false)), File(dir, PageFiles.idSourceName(pageId, true)))
+        val staged = arrayOfNulls<File>(2)
+        for (i in 0..1) {
+            val src = sources.getOrNull(i) ?: continue
+            if (src.absolutePath == targets[i].absolutePath) continue
+            val tmp = File(targets[i].path + ".new")
+            src.inputStream().use { input -> tmp.outputStream().use { input.copyTo(it, BUFFER) } }
+            staged[i] = tmp
+        }
+        for (i in 0..1) {
+            val t = staged[i]
+            if (t != null) {
+                targets[i].delete()
+                if (!t.renameTo(targets[i])) { t.copyTo(targets[i], overwrite = true); t.delete() }
+            } else if (i == 1 && sources.getOrNull(1) == null) {
+                targets[1].delete()
+            }
+        }
+        // temporales nuestras (capturas, galería copiada) que ya se instalaron
+        for (src in sources) {
+            if (src != null && src.absolutePath.startsWith(context.cacheDir.absolutePath) && targets.none { it.absolutePath == src.absolutePath }) src.delete()
+        }
+    }
+
     /**
      * Corrige el recorte de un DNI compuesto: [composed] es la hoja nueva (las caras recortadas otra vez desde sus fotos
      * originales con [card]); pasa a ser el ORIGINAL de la página (archivo nuevo: un render en curso del anterior no lee
      * una mezcla) y la página se re-renderiza con sus ediciones + [card]. El recorte de la hoja y los borrados manuales
      * se quitan (eran de la hoja anterior). No recicla [composed].
      */
-    suspend fun recomposeIdCard(docId: String, pageId: String, composed: Bitmap, card: com.scannerpromax.domain.IdCardEdits): Page {
+    suspend fun recomposeIdCard(
+        docId: String,
+        pageId: String,
+        composed: Bitmap,
+        card: com.scannerpromax.domain.IdCardEdits,
+        /** Fotos de origen de cada cara (null = las guardadas); ver [installIdSources]. */
+        sources: List<File?>? = null,
+        /** Claves de las cachés de caras en uso ([PageFiles.idRenderName]); las demás de la página se borran. null = no tocar. */
+        keepRenders: Set<String>? = null,
+    ): Page {
         loaded.await()
         val key = "$docId/$pageId"
         editGenerations.getOrPut(key) { AtomicLong() }.incrementAndGet()
@@ -697,6 +739,17 @@ class DocumentRepository(
                     } catch (t: Throwable) {
                         withContext(NonCancellable + Dispatchers.IO) { File(dir, newOriginal).delete() }
                         throw t
+                    }
+                }
+            }
+            // Solo con la hoja nueva ya renderizada: fotos de origen nuevas (cara reemplazada, intercambio, sin reverso) y
+            // limpieza de las cachés de caras que ya no se usan.
+            withContext(NonCancellable + Dispatchers.IO) {
+                if (sources != null) runCatching { installIdSources(dir, pageId, sources) }.onFailure { Log.w(TAG, "No se pudieron guardar las fotos de las caras", it) }
+                if (keepRenders != null) {
+                    val prefix = PageFiles.idRenderPrefix(pageId)
+                    File(dir, ORIGINAL_DIR).listFiles()?.forEach { f ->
+                        if (f.name.startsWith(prefix) && f.name.removePrefix(prefix).removeSuffix(".jpg") !in keepRenders) f.delete()
                     }
                 }
             }

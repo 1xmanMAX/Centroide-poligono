@@ -76,6 +76,44 @@ object PageFiles {
      */
     fun idSourceName(pageId: String, back: Boolean) = "original/${pageId}_${if (back) "idback" else "idfront"}.jpg"
 
+    /**
+     * Caché de UNA cara del DNI ya renderizada (recorte + giro + espejo + mejora): `original/<página>_idr_<clave>.jpg`
+     * ([idSideKey]). Recomponer la hoja tras editar una cara reutiliza la de la otra sin volver a procesarla. Empieza por
+     * el id de la página: se borra con ella; al copiar la página a otro documento no hace falta (se regenera).
+     */
+    fun idRenderName(pageId: String, key: String) = "original/${pageId}_idr_$key.jpg"
+
+    /** Prefijo de las cachés de caras de la página (para borrar las que ya no se usan). */
+    fun idRenderPrefix(pageId: String) = "${pageId}_idr_"
+
+    /**
+     * Clave de la cara renderizada: depende SOLO de la foto de origen ([sourceFingerprint], su contenido) y de las
+     * ediciones de ESA cara (recorte, giro, espejo y su mejora efectiva con la común [common]); no de la otra cara ni de
+     * la marca «manual». Así cambiar el anverso no invalida el reverso, e intercambiarlas reutiliza las dos.
+     */
+    fun idSideKey(side: com.scannerpromax.domain.IdCardSide, common: FilterType?, sourceFingerprint: String): String {
+        val norm = com.scannerpromax.domain.IdCardSide(
+            quad = side.quad,
+            rotation = side.turn.takeIf { it != 0 },
+            mirror = side.mirror?.takeIf { it },
+            filter = side.effectiveFilter(common) ?: FilterType.ORIGINAL,
+        )
+        val j = hashJson.encodeToString(com.scannerpromax.domain.IdCardSide.serializer(), norm) + "|" + sourceFingerprint
+        val crc = java.util.zip.CRC32().apply { update(j.toByteArray()) }.value
+        return java.lang.Long.toHexString(crc) + Integer.toHexString(j.hashCode())
+    }
+
+    /** Huella del CONTENIDO de un archivo (tamaño + CRC32): la misma foto movida o copiada da la misma. */
+    fun fingerprint(f: File): String {
+        if (!f.isFile) return "none"
+        val crc = java.util.zip.CRC32()
+        f.inputStream().use { input ->
+            val buf = ByteArray(64 * 1024)
+            while (true) { val n = input.read(buf); if (n <= 0) break; crc.update(buf, 0, n) }
+        }
+        return "${f.length()}-${java.lang.Long.toHexString(crc.value)}"
+    }
+
     /** Respuestas de "Mejorar con Jev" sobre la FOTO capturada (tipo, carpeta, encuadre, calidad): no dependen de las ediciones. */
     fun jevCaptureName(pageId: String) = "$JEV_DIR/${pageId}_capture.json"
 

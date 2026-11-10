@@ -342,7 +342,7 @@ internal fun StickerCropPanel(
     LaunchedEffect(albumId, slotId, source) {
         try {
             if (isNew && source != null) {
-                val d = processor.detectCardSide(container.albums.file(albumId, source), guide, withPreview = true)
+                val d = processor.detectCardSide(container.albums.file(albumId, source), guide, withPreview = true, idCard = false)
                 val p = d.preview ?: throw java.io.IOException("Sin vista previa")
                 preview = p
                 quad = CaptureProcessor.denormalize(d.quad, p.width, p.height)
@@ -373,7 +373,7 @@ internal fun StickerCropPanel(
         detecting = true
         scope.launch {
             try {
-                val d = processor.detectCardSide(container.albums.file(albumId, s), null, withPreview = false)
+                val d = processor.detectCardSide(container.albums.file(albumId, s), null, withPreview = false, idCard = false)
                 if (d.confidence <= 0f) toast("No se detectaron los bordes: ajusta las esquinas a mano")
                 else { quad = CaptureProcessor.denormalize(d.quad, p.width, p.height); manual = false }
             } catch (e: CancellationException) {

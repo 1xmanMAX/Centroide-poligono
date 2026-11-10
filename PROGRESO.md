@@ -303,3 +303,24 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
   Routes/AppNavHost. 23 tests nuevos. Notas: /tmp/claude-0/bench/notes_album.md. Sin probar en móvil.
 - 2026-11-10: FUSIONADOS libre-giro (giro sin reprocesar, OrientationVote + doc_ori incluido, tamaño DNI) y libre-album (Álbum / Diseño libre) en libre. Libre 1.3.0 (versionCode 4), release firmada, 655 tests OK. Falta probar en móvil. La clave Jev del banco se perdió en el reinicio (no medido Jev).
 - 2026-11-10: EN CURSO libre-dni2 (agente, push WIP): edición individual de cada cara del DNI (recorte, giro, espejo, filtro, reemplazar cara, intercambiar) y arreglo del DNI que sale volteado (orientación por cara: MRZ, foto, texto, doc_ori; excluir la hoja de DNI del giro automático de página). Notas /tmp/claude-0/bench/notes_dni2.md.
+- 2026-11-10: DNI POR CARA + DNI «VOLTEADO» (agente, rama `libre-dni2` desde `libre`, subida; SIN fusionar). Peticiones: "editar
+  los recortes de las fotos del DNI de forma individual" y "a veces el DNI sale volteado".
+  (1) «Editar DNI» (ui/editor/IdCardEdit.kt; ruta idcrop/{doc}/{page}?side=0|1|-1): pestañas Hoja / Anverso / Reverso; en la Hoja
+  se toca una cara para abrirla; por cara: 4 esquinas, Auto, ↺90°/↻90°/180°, Espejo, mejora (Color mejorado / Original /
+  Documento / B/N), vista de cómo quedará, Reemplazar SOLO esa cara (cámara propia con marco ID-1 o galería); en la Hoja:
+  Intercambiar anverso y reverso, Quitar reverso / Añadir reverso. Accesos: visor de Revisión («Editar anverso», «Editar
+  reverso»/«Añadir reverso»), editor de página (chips) y Recortar (abre la Hoja). La confirmación tras cada foto en la cámara
+  tiene también giro/espejo/mejora y la vista del resultado. Persistencia: IdCardSide.rotation/mirror/filter (null = como
+  antes, no se serializan: hash de páginas antiguas sin cambios). «Listo» recompone SOLO la hoja: cada cara renderizada se
+  guarda en caché (original/<pid>_idr_<clave>.jpg; clave = ediciones de esa cara + huella CRC de su foto), así editar una cara
+  no reprocesa la otra; fotos nuevas/intercambiadas se instalan tras renderizar (DocumentRepository.installIdSources).
+  (2) Orientación por cara (imaging/CardOrientation): SIEMPRE apaisada; voto MRZ (3) + cara de la foto a la izquierda (2;
+  piel YCrCb con forma de elipse, fondo de foto, sin dedos en el canto) + doc_ori sobre la cara (1 punto a 2:1, máx. 1,5) +
+  renglones; gira 180° solo con ≥ 1 punto; vertical: 90/270 por el voto, la posición del móvil (OrientationEventListener) o
+  270. Causas encontradas: esquina inicial por posición y SOLO la MRZ orientaba (caras sin MRZ del revés salían del revés);
+  tarjeta vertical en la foto -> cara vertical en la hoja; la cola de la IA pasaba el voto de páginas por la hoja compuesta
+  (doc_ori la giraba 270° con una cara vertical) -> PageRotation.autoOrientAllowed excluye las hojas de DNI; recorte en sentido
+  antihorario -> espejo (CardOrientation.clockwise). EXIF revisado: correcto. Banco CardOrientationBenchTest
+  (-PcardOriBench=salida.md, sintético peruano 4 paletas × 2 caras × 5 fondos × 4 giros): antes 62,3 % -> 100 % (ajuste);
+  VALIDACIÓN (otras semillas, mano, desenfoque) 55,5 % -> 96,1 %, ninguna cara derecha girada. Notas: /tmp/claude-0/bench/notes_dni2.md.
+  Falta: probar en móvil (cámara de una cara, tiempos de doc_ori por cara, DNI reales).

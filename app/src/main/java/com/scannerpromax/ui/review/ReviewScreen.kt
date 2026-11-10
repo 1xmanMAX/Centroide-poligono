@@ -183,6 +183,8 @@ fun ReviewScreen(
     onAddPages: (ScanMode) -> Unit,
     /** Volver a escanear una página (desde el visor): la nueva captura ocupa su lugar. */
     onRetakePage: ((pageId: String) -> Unit)? = null,
+    /** DNI compuesto: editar UNA cara (0 anverso, 1 reverso) por separado (desde el visor). */
+    onEditIdSide: ((pageId: String, side: Int) -> Unit)? = null,
     /** [pageIds] = solo esas páginas (modo selección), en el orden del documento; null = todas. */
     onExport: (pageIds: List<String>?) -> Unit,
     /**
@@ -634,6 +636,7 @@ fun ReviewScreen(
                 onDismiss = { viewerIndex = null },
                 onEdit = { p -> viewerIndex = null; reopenViewerPageId = p.id; onEditPage(p.id) },
                 onRetake = onRetakePage?.let { r -> { p: Page -> viewerIndex = null; r(p.id) } },
+                onEditIdSide = onEditIdSide?.let { r -> { p: Page, side: Int -> viewerIndex = null; reopenViewerPageId = p.id; r(p.id, side) } },
                 onDismissIssues = { p -> scope.launch { runCatching { repo.dismissIssues(docId, p.id) } } },
             )
         }

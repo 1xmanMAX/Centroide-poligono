@@ -154,8 +154,11 @@ fun EditorScreen(
     docId: String,
     pageId: String,
     onBack: () -> Unit,
-    /** DNI con fotos de origen ([com.scannerpromax.domain.PageEdits.idCard]): «Recortar» abre el editor de las 2 caras. */
-    onEditIdCard: ((String) -> Unit)? = null,
+    /**
+     * DNI con fotos de origen ([com.scannerpromax.domain.PageEdits.idCard]): abre «Editar DNI» en la cara indicada
+     * (0 anverso, 1 reverso, -1 la hoja). «Recortar» abre la hoja; «Editar anverso/reverso», esa cara sola.
+     */
+    onEditIdCard: ((String, Int) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -239,7 +242,7 @@ fun EditorScreen(
             if (session.saving) return
             scope.launch {
                 if (!ensureQuadValid()) return@launch
-                if (!session.hasChanges || session.save()) onEditIdCard(id) else toast("No se pudo guardar la página")
+                if (!session.hasChanges || session.save()) onEditIdCard(id, -1) else toast("No se pudo guardar la página")
             }
             return
         }
@@ -419,6 +422,19 @@ fun EditorScreen(
                 }
             }
 
+            // ------------------------------------------------ DNI: cada cara por separado
+            val idCard = session.edits.idCard
+            if (idCard != null && onEditIdCard != null && !session.loading && !erasing) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
+                ) {
+                    val id = session.pageId
+                    IdSideChip("Editar anverso") { saveThen { onEditIdCard(id, 0) } }
+                    IdSideChip(if (idCard.back != null) "Editar reverso" else "Añadir reverso") { saveThen { onEditIdCard(id, 1) } }
+                }
+            }
+
             // ------------------------------------------------ panel de la herramienta (encima de las herramientas)
             // Altura mínima común + animateContentSize: la imagen no salta al cambiar de herramienta.
             Box(
@@ -522,6 +538,22 @@ fun EditorScreen(
         )
     }
     }
+}
+
+/** Botón de una cara del DNI en el editor de la página. */
+@Composable
+private fun IdSideChip(label: String, onClick: () -> Unit) {
+    Text(
+        label,
+        color = Color.White,
+        fontSize = 14.sp,
+        fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(Color.White.copy(alpha = 0.14f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 7.dp),
+    )
 }
 
 /** Fondo del editor (casi negro, como Fotos). */
