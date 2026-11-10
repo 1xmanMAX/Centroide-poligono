@@ -79,7 +79,8 @@ class OrientationBenchTest {
                     val im = Imgcodecs.imread(File(dir, "photos/$n").absolutePath)
                     val w = im.cols().toDouble(); val h = im.rows().toDouble()
                     val q = (0 until 4).map { org.opencv.core.Point(c[it * 2] * w, c[it * 2 + 1] * h) }
-                    val ow = maxOf(q[0].distTo(q[1]), q[3].distTo(q[2])); val oh = maxOf(q[0].distTo(q[3]), q[1].distTo(q[2]))
+                    fun dist(a: org.opencv.core.Point, b: org.opencv.core.Point) = kotlin.math.hypot(a.x - b.x, a.y - b.y)
+                    val ow = maxOf(dist(q[0], q[1]), dist(q[3], q[2])); val oh = maxOf(dist(q[0], q[3]), dist(q[1], q[2]))
                     val m = Imgproc.getPerspectiveTransform(org.opencv.core.MatOfPoint2f(*q.toTypedArray()),
                         org.opencv.core.MatOfPoint2f(org.opencv.core.Point(0.0, 0.0), org.opencv.core.Point(ow, 0.0), org.opencv.core.Point(ow, oh), org.opencv.core.Point(0.0, oh)))
                     val out = Mat(); Imgproc.warpPerspective(im, out, m, org.opencv.core.Size(ow, oh), Imgproc.INTER_CUBIC)

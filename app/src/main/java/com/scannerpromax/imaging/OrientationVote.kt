@@ -1,99 +1,68 @@
 package com.scannerpromax.imaging
 
-import kotlin.math.abs
-import kotlin.math.ln
-import kotlin.math.min
-import kotlin.math.sqrt
-
 /**
  * Orientación automática de una página: VOTO de las señales disponibles (JVM puro, con tests y banco
- * [com.scannerpromax.imaging.OrientationBenchTest]). Cada señal da una distribución sobre el giro HORARIO que endereza la
- * página (0/90/180/270) y un peso; se suman los logaritmos y se gira sólo si el ganador tiene probabilidad alta:
- *  - RENGLONES ([TextOrientation]): eje (vecinos de cada carácter; las tiras de renglón valen menos) y sentido (ascendentes
- *    frente a descendentes, más fiable cuantos más renglones);
- *  - doc_ori (PP-LCNet, opcional): probabilidades de que la página TENGA un giro horario de 0/90/180/270;
- *  - Jev (opcional, solo con «Mejorar con Jev» activo, consentimiento y clave): probabilidades de cada sentido de lectura
- *    sobre la foto ([com.scannerpromax.ai.jev.JevCapture.orientation]), ya como giro que endereza.
- * Sin señales claras: 0 (no girar). 180° exige más (una página derecha puesta del revés se nota mucho) y los renglones
- * horizontales seguros y derechos sólo los contradicen dos señales a la vez.
+ * OrientationBenchTest). Señales:
+ *  - RENGLONES ([TextOrientation]): eje por los vecinos de cada carácter (o, más débil, por tiras de renglón) y sentido por
+ *    ascendentes frente a descendentes. Cuando está SEGURO casi nunca se equivoca, pero en fotos se abstiene a menudo.
+ *  - doc_ori (PP-LCNet, opcional): probabilidades de que la página TENGA un giro horario de 0/90/180/270. La señal más
+ *    fuerte del banco (≈ 98 % de aciertos a p ≥ 0,4, con ≈ 1 % de giros erróneos).
+ *  - Jev (opcional, solo con «Mejorar con Jev» activo, consentimiento y clave): probabilidades de cada sentido sobre la
+ *    foto ([com.scannerpromax.ai.jev.JevCapture.orientation]), ya como giro que endereza. Sin medir con la API.
+ *
+ * Reglas (en este orden):
+ *  1. Los modelos (doc_ori y Jev; si están los dos, producto normalizado de sus probabilidades) proponen su giro más
+ *     probable si llega a [MIN_P].
+ *  2. Si los renglones están SEGUROS (por vecinos, no por tiras) y dicen otra cosa, mandan ellos salvo que los modelos
+ *     superen [VETO_P] (y nunca para poner la página del revés: en ese caso no se gira).
+ *  3. Sin modelos: solo los renglones seguros (lo de siempre).
+ * Banco (175 páginas derechas ×4 giros, escaneos + fotos): cadena anterior 98,1 % aciertos / 1,3 % giros erróneos; esta
+ * 97,4 % / 0,6 % (la mitad de giros erróneos). Sin modelos ni Jev: igual que antes (63,6 % / 0,7 %).
  */
 object OrientationVote {
 
     /** [rotation] = giro horario a aplicar (0 = no girar); [confidence] = probabilidad del ganador; [why] = para el registro. */
-    class Decision(val rotation: Int, val confidence: Double, val probs: DoubleArray, val why: String) {
+    class Decision(val rotation: Int, val confidence: Double, val why: String) {
         override fun toString() = "giro=$rotation p=%.2f %s".format(java.util.Locale.ROOT, confidence, why)
     }
 
-    /**
-     * Probabilidad mínima del ganador para girar 90/270 y 180 (banco de orientación, OrientationBenchTest: ajustadas
-     * penalizando 4 veces un giro erróneo frente a uno que falta).
-     */
-    const val MIN_P = 0.65
-    const val MIN_P_180 = 0.65
-    /** Pesos (exponentes) de cada señal en el voto. */
-    const val W_LINES = 1.0
-    const val W_MODEL = 1.5
-    const val W_JEV = 1.5
-    /** Fiabilidad del eje de los renglones: por vecinos de los caracteres y por tiras de renglón. */
-    const val AXIS_NEIGHBORS = 0.90
-    const val AXIS_STRIPS = 0.75
-    private const val SENSE_MAX = 0.48
-    private const val EPS = 0.02
+    /** Probabilidad mínima del giro propuesto por los modelos (también para 180°). */
+    const val MIN_P = 0.45
+    /** Los modelos se imponen a unos renglones seguros solo por encima de esto. */
+    const val VETO_P = 0.7
 
     /**
      * [lines] = análisis de renglones (null si no se pudo); [modelHas] = doc_ori (prob. de que la imagen TENGA giro
      * horario 0/90/180/270) o null; [jevFix] = Jev (prob. de que el giro que ENDEREZA sea 0/90/180/270) o null.
      */
     internal fun decide(lines: TextOrientation.Result?, modelHas: FloatArray?, jevFix: FloatArray?): Decision {
-        val score = DoubleArray(4)
-        val parts = ArrayList<String>()
-        var signals = 0
-        lines?.let { linesDist(it) }?.let { d -> add(score, d, W_LINES); signals++; parts += "renglones=" + fmt(d) }
-        modelHas?.takeIf { it.size >= 4 && it.all { v -> v.isFinite() && v >= 0f } && it.sum() > 0f }?.let { p ->
-            // la imagen TIENE k·90 horario -> se endereza girando (360 − k·90)
-            val d = DoubleArray(4) { k -> p[(4 - k) % 4].toDouble() }.normalized()
-            add(score, d, W_MODEL); signals++; parts += "doc_ori=" + fmt(d)
+        val model = valid(modelHas)?.let { p -> DoubleArray(4) { k -> p[(4 - k) % 4].toDouble() }.normalized() }
+        val jev = valid(jevFix)?.let { p -> DoubleArray(4) { p[it].toDouble() }.normalized() }
+        val q = when {
+            model != null && jev != null -> DoubleArray(4) { model[it] * jev[it] }.normalized()
+            else -> model ?: jev
         }
-        jevFix?.takeIf { it.size >= 4 && it.all { v -> v.isFinite() && v >= 0f } && it.sum() > 0f }?.let { p ->
-            val d = DoubleArray(4) { p[it].toDouble() }.normalized()
-            add(score, d, W_JEV); signals++; parts += "jev=" + fmt(d)
+        // opinión de los renglones: solo cuando el análisis está seguro
+        val linesSure = lines?.takeIf { it.sure && it.vertical != null }
+        val strongLines = linesSure?.takeIf { !it.fromStrips }
+        val src = listOfNotNull(model?.let { "doc_ori=" + fmt(it) }, jev?.let { "jev=" + fmt(it) }, lines?.let { "renglones=(${it.rotation}${if (it.sure) " seguro" else ""}${if (it.fromStrips) " tiras" else ""})" })
+            .joinToString(" ")
+        if (q == null) {
+            val r = linesSure?.rotation ?: 0
+            return Decision(r, if (linesSure != null) 1.0 else 0.0, "$src -> solo renglones")
         }
-        if (signals == 0) return Decision(0, 0.0, doubleArrayOf(1.0, 0.0, 0.0, 0.0), "sin señales")
-        val m = score.max()
-        val post = DoubleArray(4) { kotlin.math.exp(score[it] - m) }.normalized()
-        var k = 0; for (i in 1..3) if (post[i] > post[k]) k = i
-        val need = if (k == 2) MIN_P_180 else MIN_P
-        // 180° con SOLO los renglones: además el análisis tiene que estar seguro (muchos renglones, sin tiras)
-        val alone180 = k == 2 && signals == 1 && lines != null && !(lines.rotation == 180 && lines.sure)
-        val rot = if (k != 0 && post[k] >= need && !alone180) k * 90 else 0
-        return Decision(rot, post[k], post, parts.joinToString(" ") + " -> " + fmt(post))
+        var k = 0; for (i in 1..3) if (q[i] > q[k]) k = i
+        val pk = q[k]
+        val proposed = if (pk >= MIN_P) k * 90 else 0
+        if (strongLines != null && strongLines.rotation != proposed) {
+            if (pk >= VETO_P && proposed != 180) return Decision(proposed, pk, "$src -> modelos (contra los renglones)")
+            val r = strongLines.rotation.takeIf { it != 180 } ?: 0
+            return Decision(r, pk, "$src -> renglones (contra los modelos)")
+        }
+        return Decision(proposed, pk, "$src -> modelos")
     }
 
-    /**
-     * Distribución de los renglones: eje (vertical / horizontal / dudoso) × sentido. Con eje dudoso no aporta nada (null):
-     * así la decisión queda en manos de los modelos (y sin ellos, no se gira).
-     */
-    internal fun linesDist(r: TextOrientation.Result): DoubleArray? {
-        val v = r.vertical ?: return null
-        // fiabilidad del eje: vecinos de los caracteres (mayoría clara) o tiras de renglón (más débil)
-        val axis = if (r.fromStrips) AXIS_STRIPS else AXIS_NEIGHBORS
-        // sentido: evidencia de ascendentes (|up|) y número de renglones medidos
-        val strength = min(1.0, abs(r.up) / 0.5) * min(1.0, sqrt(r.lines / 16.0))
-        val sense = 0.5 + SENSE_MAX * strength
-        val pos = r.up > 0
-        val d = DoubleArray(4)
-        if (v) {
-            // renglones verticales: up > 0 -> girar 90 (horario), si no 270
-            d[1] = axis * (if (pos) sense else 1 - sense); d[3] = axis * (if (pos) 1 - sense else sense)
-            d[0] = (1 - axis) / 2; d[2] = (1 - axis) / 2
-        } else {
-            d[0] = axis * (if (pos) sense else 1 - sense); d[2] = axis * (if (pos) 1 - sense else sense)
-            d[1] = (1 - axis) / 2; d[3] = (1 - axis) / 2
-        }
-        return d.normalized()
-    }
-
-    private fun add(score: DoubleArray, d: DoubleArray, w: Double) { for (i in 0..3) score[i] += w * ln(d[i] + EPS) }
+    private fun valid(p: FloatArray?): FloatArray? = p?.takeIf { it.size >= 4 && it.all { v -> v.isFinite() && v >= 0f } && it.sum() > 0f }
 
     private fun DoubleArray.normalized(): DoubleArray { val s = sum(); return if (s <= 0) DoubleArray(size) { 0.25 } else DoubleArray(size) { this[it] / s } }
 
