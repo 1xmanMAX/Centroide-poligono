@@ -422,6 +422,7 @@ private fun CameraContent(
     LifecycleEventEffect(Lifecycle.Event.ON_PAUSE) { motion.stop() }
     DisposableEffect(motion) { onDispose { motion.stop() } }
     LaunchedEffect(flash) { engine.setFlash(flash) }
+    LaunchedEffect(settings.lensCorrection) { engine.lensCorrection = settings.lensCorrection }
     // Con capturas mejorándose en segundo plano, el análisis en vivo cede CPU (la UI sigue fluida en gama baja).
     LaunchedEffect(pendingJobs) { engine.backgroundBusy = pendingJobs > 0 }
     LaunchedEffect(mode) {
@@ -497,9 +498,12 @@ private fun CameraContent(
      * Flujo normal de una captura (cámara propia o app de cámara del teléfono) según el modo [m]. [shots]: una foto
      * o una ráfaga (se fusiona en el trabajo de fondo). [guide]: marco del DNI normalizado (null = sin marco).
      */
-    fun processShots(m: ScanMode, shots: List<File>, guide: RectF?) {
-        // La fusión (si hay ráfaga) corre en el trabajo de fondo, antes del flujo normal de cada modo.
-        suspend fun shotFile(): File = processor.mergeBurst(shots, removeGlare = true)
+    fun processShots(m: ScanMode, shots: List<File>, guide: RectF?, lens: com.scannerpromax.imaging.SensorLens? = null) {
+        // La fusión (si hay ráfaga) corre en el trabajo de fondo, antes del flujo normal de cada modo; después, la
+        // corrección de la lente (distorsión y aberración cromática) sobre la foto original.
+        val lensOn = settings.lensCorrection
+        suspend fun shotFile(): File =
+            LensStep.apply(processor.mergeBurst(shots, removeGlare = true), lens, m, lensOn, container.deviceTier)
         when (m) {
             ScanMode.BOOK -> launchJob { processor.addBook(ensureDoc(m), shotFile(), extraEdits(m)) }
             ScanMode.ID_CARD -> {
@@ -573,7 +577,7 @@ private fun CameraContent(
             capturing = false
             capturedThisSession++
             engine.resetDetection()
-            processShots(m, shots, guide)
+            processShots(m, shots, guide, engine.lastLens)
         }
     }
 
