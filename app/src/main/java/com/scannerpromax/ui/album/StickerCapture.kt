@@ -256,7 +256,7 @@ private fun CameraContent(container: AppContainer, albumId: String, pageId: Stri
                     }
                 }
             }
-            Column(Modifier.fillMaxWidth().statusBarsPadding().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            if (cap == null) Column(Modifier.fillMaxWidth().statusBarsPadding().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     CircleIcon(AppIcons.Close, "Cerrar", onBack)
                     Spacer(Modifier.weight(1f))
@@ -269,7 +269,7 @@ private fun CameraContent(container: AppContainer, albumId: String, pageId: Stri
                         .background(Color.Black.copy(alpha = 0.4f)).padding(horizontal = 12.dp, vertical = 6.dp),
                 )
             }
-            Box(Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 28.dp)) {
+            if (cap == null) Box(Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 28.dp)) {
                 Box(
                     Modifier.size(76.dp).clip(CircleShape).border(4.dp, Color.White, CircleShape).padding(7.dp).clip(CircleShape)
                         .background(if (capturing) Color.White.copy(alpha = 0.5f) else Color.White)

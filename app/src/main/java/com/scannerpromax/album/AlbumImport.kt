@@ -43,7 +43,7 @@ class AlbumImport(private val context: Context, private val store: AlbumStore, p
      * guarda una vista previa para el editor.
      */
     suspend fun imageBackground(albumId: String, file: File, label: String? = null): SheetBackground = withContext(Dispatchers.Default) {
-        val bmp = BitmapIO.decode(file.absolutePath, MAX_BG_SIDE * MAX_BG_SIDE * 3 / 4)
+        val bmp = BitmapIO.decode(file.absolutePath, MAX_BG_PIXELS)
         try {
             val big = scaleToLongSide(bmp, MAX_BG_SIDE)
             val (f, name) = store.newFile(albumId, "bg", "img", "jpg")
@@ -132,6 +132,8 @@ class AlbumImport(private val context: Context, private val store: AlbumStore, p
 
     companion object {
         const val MAX_BG_SIDE = 4960
+        /** ≈ 12 MP: una foto normal entra sin reducir y la memoria queda acotada (48 MB) en gama baja. */
+        const val MAX_BG_PIXELS = 12_000_000
         const val PREVIEW_SIDE = 1600
 
         /** Píxeles a 300 ppp de una hoja de [wMm]×[hMm] mm, rebajados para no pasar de [maxPixels]. */

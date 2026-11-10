@@ -270,3 +270,16 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
   coherente). Ajuste «Corregir distorsión de la lente» (Ajustes › Escaneo, por defecto sí). LensTest 12/12; banco en
   /tmp/claude-0/bench/notes_lente.md. Sin probar en dispositivo. No toca el flujo DNI (libre-dni).
 - 2026-11-10: FUSIONADOS libre-dni (CardColorDetector, recorte DNI editable) y libre-lente (corrección de lente) en libre. Libre 1.2.0 (versionCode 3), release firmada, tests OK. Falta probar en móvil (logcat CameraLens/LensFix).
+- 2026-11-10: HECHO «Álbum / Diseño libre» (rama `libre-album`, desde `libre`; subida, SIN fusionar). Petición: hoja (en
+  blanco, imagen, página de PDF o página escaneada) donde se dibujan recuadros y cada escaneo se «pega» en su recuadro
+  como un cromo. Inicio › ••• › «Álbum / Diseño libre» → lista de álbumes → «Nuevo álbum». Editor: arrastrar = recuadro
+  nuevo, tocar = seleccionar, arrastrar = mover, esquinas = tamaño proporcional (o «Libre»), dos dedos = zoom, imán con
+  guías a bordes/centro de la hoja y a otros recuadros, Girar 90°/ángulo fino, Medidas en mm + medidas habituales (DNI
+  ID-1, foto pasaporte/carnet, cromo, 10×15, 13×18, A6), Duplicar, Eliminar, deshacer/rehacer. Hojas: añadir, girar 90°
+  (con sus recuadros), cambiar fondo, mover, borrar. Pegar: Escanear (cámara con guía de la proporción del recuadro y
+  contorno en vivo) o Galería → detección (CardColorDetector + detector de documentos vía CaptureProcessor.detectCardSide)
+  → esquinas arrastrables (CropTool) + mejora (Color mejorado/Original/Documento/B/N) → «Pegar»; Recortar de nuevo,
+  Rellenar/Encajar, Girar foto, Quitar foto. Exportar: PDF (fondo PDF como Form XObject vectorial vía LayerUtility; JPEG
+  sin recomprimir), JPG 300 ppp (compartir/galería) y «Crear documento en la app». Código: album/* (modelos, geometría,
+  almacén filesDir/albums, importación, render, PDF, StickerMaker) y ui/album/*; tocados AppContainer, HomeScreen (menú),
+  Routes/AppNavHost. 23 tests nuevos. Notas: /tmp/claude-0/bench/notes_album.md. Sin probar en móvil.
