@@ -301,3 +301,4 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
   sin recomprimir), JPG 300 ppp (compartir/galería) y «Crear documento en la app». Código: album/* (modelos, geometría,
   almacén filesDir/albums, importación, render, PDF, StickerMaker) y ui/album/*; tocados AppContainer, HomeScreen (menú),
   Routes/AppNavHost. 23 tests nuevos. Notas: /tmp/claude-0/bench/notes_album.md. Sin probar en móvil.
+- 2026-11-10: FUSIONADOS libre-giro (giro sin reprocesar, OrientationVote + doc_ori incluido, tamaño DNI) y libre-album (Álbum / Diseño libre) en libre. Libre 1.3.0 (versionCode 4), release firmada, 655 tests OK. Falta probar en móvil. La clave Jev del banco se perdió en el reinicio (no medido Jev).
