@@ -136,6 +136,28 @@ data class PageEdits(
      * su color), 2 = como el resto de la página (sin trato de foto). null no se serializa: el hash guardado no cambia.
      */
     val photoMode: Int? = null,
+    /**
+     * DNI / tarjeta compuesto en una hoja: recorte de cada cara sobre su foto ORIGINAL (guardada aparte, ver
+     * data/PageFiles.idSourceName), para poder corregir el recorte y recomponer la hoja. null = página normal (o DNI
+     * antiguo sin fotos de origen: el recorte se edita como siempre); al ser null no se serializa y el hash no cambia.
+     */
+    val idCard: IdCardEdits? = null,
+)
+
+/** Recorte de una cara del DNI: [quad] NORMALIZADO 0..1 sobre su foto original (con la orientación EXIF aplicada). */
+@Serializable
+data class IdCardSide(
+    val quad: Quad,
+    /** true = el usuario ajustó las esquinas: nunca se vuelve a detectar automáticamente encima. */
+    val manual: Boolean? = null,
+)
+
+/** Las dos caras de un DNI compuesto en una hoja y el filtro con que se mejoró cada cara (null = sin mejora). */
+@Serializable
+data class IdCardEdits(
+    val front: IdCardSide,
+    val back: IdCardSide? = null,
+    val enhance: FilterType? = null,
 )
 
 @Serializable

@@ -247,7 +247,13 @@ fun AppNavHost(
                     onBack = { entry.ifActive(nav) { nav.backTo(Routes.HOME) } },
                     onEditPage = { pageId -> entry.ifActive(nav) { nav.navigate(Routes.editor(docId, pageId)) } },
                     onAddPages = { mode -> entry.ifActive(nav) { nav.navigate(Routes.camera(mode, docId)) } },
-                    onRetakePage = { pageId -> entry.ifActive(nav) { nav.navigate(Routes.camera(ScanMode.DOCUMENT, docId, pageId)) } },
+                    onRetakePage = { pageId ->
+                        // un DNI compuesto se vuelve a escanear como DNI (anverso + reverso), el resto como documento
+                        val isCard = container.documents.documents.value.firstOrNull { it.id == docId }
+                            ?.pages?.firstOrNull { it.id == pageId }?.edits?.idCard != null
+                        val m = if (isCard) ScanMode.ID_CARD else ScanMode.DOCUMENT
+                        entry.ifActive(nav) { nav.navigate(Routes.camera(m, docId, pageId)) }
+                    },
                     onExport = { ids -> entry.ifActive(nav) { nav.navigate(Routes.export(docId, ids)) } },
                     onOpenCloudAi = { entry.ifActive(nav) { nav.navigate(Routes.CLOUD_AI) { launchSingleTop = true } } },
                 )
@@ -260,7 +266,24 @@ fun AppNavHost(
                     navArgument("pageId") { type = NavType.StringType },
                 ),
             ) { entry ->
+                val editorDocId = entry.arguments?.getString("docId").orEmpty()
                 EditorScreen(
+                    container = container,
+                    docId = editorDocId,
+                    pageId = entry.arguments?.getString("pageId").orEmpty(),
+                    onBack = { entry.ifActive(nav) { nav.popBackStack() } },
+                    onEditIdCard = { pid -> entry.ifActive(nav) { nav.navigate(Routes.idCrop(editorDocId, pid)) } },
+                )
+            }
+
+            composable(
+                Routes.ID_CROP,
+                arguments = listOf(
+                    navArgument("docId") { type = NavType.StringType },
+                    navArgument("pageId") { type = NavType.StringType },
+                ),
+            ) { entry ->
+                com.scannerpromax.ui.editor.IdCardCropScreen(
                     container = container,
                     docId = entry.arguments?.getString("docId").orEmpty(),
                     pageId = entry.arguments?.getString("pageId").orEmpty(),
