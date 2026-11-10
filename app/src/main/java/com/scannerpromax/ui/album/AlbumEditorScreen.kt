@@ -49,6 +49,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -71,6 +72,7 @@ import com.scannerpromax.album.AlbumHistory
 import com.scannerpromax.album.AlbumOps
 import com.scannerpromax.album.AlbumPage
 import com.scannerpromax.album.AlbumRenderer
+import com.scannerpromax.album.AlbumSessions
 import com.scannerpromax.album.AlbumSlot
 import com.scannerpromax.album.BackgroundKind
 import com.scannerpromax.album.P
@@ -96,7 +98,6 @@ import com.scannerpromax.ui.theme.ui
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -125,23 +126,27 @@ internal fun AlbumEditorScreen(
     var history by remember { mutableStateOf<AlbumHistory?>(null) }
     var pages by remember { mutableStateOf<List<AlbumPage>>(emptyList()) }
     var historyTick by remember { mutableIntStateOf(0) }
-    var pageIndex by remember { mutableIntStateOf(0) }
-    var selectedId by remember { mutableStateOf<String?>(null) }
+    var pageIndex by rememberSaveable { mutableIntStateOf(0) }
+    var selectedId by rememberSaveable { mutableStateOf<String?>(null) }
     val recentlySent = remember { ArrayDeque<List<AlbumPage>>() }
-    val saves = remember { Channel<List<AlbumPage>>(Channel.UNLIMITED) }
 
     // carga + adopción de cambios hechos fuera (cámara, recorte)
     LaunchedEffect(albumId) {
         store.observe(albumId).collect { a ->
             if (a == null) {
-                if (album != null) onBack()
+                if (album != null) { AlbumSessions.forget(albumId); onBack() }
                 return@collect
             }
             album = a
             val h = history
             if (h == null) {
-                history = AlbumHistory(a.pages)
+                // el historial de esta sesión de edición (si se vuelve de la cámara) o uno nuevo
+                val kept = AlbumSessions.get(albumId)
+                val nh = kept ?: AlbumHistory(a.pages).also { AlbumSessions.put(albumId, it) }
+                if (nh.current != a.pages) nh.push(a.pages)
+                history = nh
                 pages = a.pages
+                historyTick++
             } else if (a.pages != pages && recentlySent.none { it == a.pages }) {
                 h.push(a.pages)
                 pages = a.pages
@@ -149,14 +154,11 @@ internal fun AlbumEditorScreen(
             }
         }
     }
-    // guardado en orden
-    LaunchedEffect(albumId) {
-        for (p in saves) {
-            runCatching { store.update(albumId) { it.copy(pages = p) } }
-        }
-    }
-    DisposableEffect(albumId) {
-        onDispose { kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch { runCatching { store.compact(albumId) } } }
+    // salir del editor: se olvida el deshacer y se borran los archivos que ya nadie usa
+    val exit: () -> Unit = {
+        AlbumSessions.forget(albumId)
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch { runCatching { store.compact(albumId) } }
+        onBack()
     }
 
     fun commit(next: List<AlbumPage>) {
@@ -166,7 +168,7 @@ internal fun AlbumEditorScreen(
         historyTick++
         recentlySent.addLast(next)
         while (recentlySent.size > 12) recentlySent.removeFirst()
-        saves.trySend(next)
+        store.enqueue(albumId) { it.copy(pages = next) }
     }
 
     fun restore(p: List<AlbumPage>?) {
@@ -175,7 +177,7 @@ internal fun AlbumEditorScreen(
         historyTick++
         recentlySent.addLast(p)
         while (recentlySent.size > 12) recentlySent.removeFirst()
-        saves.trySend(p)
+        store.enqueue(albumId) { it.copy(pages = p) }
         if (selectedId != null && p.none { pg -> pg.slots.any { it.id == selectedId } }) selectedId = null
     }
 
@@ -251,13 +253,13 @@ internal fun AlbumEditorScreen(
         }
     }
 
-    BackHandler { if (selectedId != null) selectedId = null else onBack() }
+    BackHandler { if (selectedId != null) selectedId = null else exit() }
 
     Box(Modifier.fillMaxSize().background(ui.groupedBackground)) {
         Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
             // ---------------------------------------------------------- barra superior
             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                IconCircleButton(AppIcons.Back, "Atrás", onClick = onBack)
+                IconCircleButton(AppIcons.Back, "Atrás", onClick = exit)
                 Text(
                     a?.title ?: "Álbum",
                     style = MaterialTheme.typography.titleMedium,

@@ -227,21 +227,7 @@ private fun CameraContent(container: AppContainer, albumId: String, pageId: Stri
     }
 
     val cap = captured
-    if (cap != null) {
-        StickerCropPanel(
-            container, albumId, pageId, slotId, cap.first, isNew = true, guide = cap.second,
-            onCancel = {
-                val rel = cap.first
-                captured = null
-                scope.launch(Dispatchers.IO) { runCatching { container.albums.file(albumId, rel).delete() } }
-            },
-            cancelLabel = "Repetir",
-            onDone = onBack,
-        )
-        return
-    }
-
-    BackHandler { onBack() }
+    BackHandler(enabled = cap == null) { onBack() }
     ForcedDarkTheme {
         Box(Modifier.fillMaxSize().background(Color.Black).onSizeChanged { viewSize = it }) {
             AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
@@ -292,6 +278,19 @@ private fun CameraContent(container: AppContainer, albumId: String, pageId: Stri
                 ) {
                     if (capturing) CircularProgressIndicator(Modifier.size(28.dp), color = Color.Black, strokeWidth = 3.dp)
                 }
+            }
+            // tras la foto: recorte encima de la cámara (la vista previa sigue enlazada para «Repetir»)
+            if (cap != null) {
+                StickerCropPanel(
+                    container, albumId, pageId, slotId, cap.first, isNew = true, guide = cap.second,
+                    onCancel = {
+                        val rel = cap.first
+                        captured = null
+                        scope.launch(Dispatchers.IO) { runCatching { container.albums.file(albumId, rel).delete() } }
+                    },
+                    cancelLabel = "Repetir",
+                    onDone = onBack,
+                )
             }
         }
     }
@@ -409,7 +408,7 @@ internal fun StickerCropPanel(
                     val stLandscape = st.renderedW >= st.renderedH
                     st = st.copy(rotation = if (slotLandscape != stLandscape && abs(box.w / box.h - 1.0) > 0.08) 90 else 0, fit = slot.sticker?.fit ?: st.fit)
                 }
-                container.albums.update(albumId) { a ->
+                container.albums.updateQueued(albumId) { a ->
                     a.copy(pages = AlbumOps.updateSlot(a.pages, pageId, slotId) { it.copy(sticker = st) })
                 }
                 onDone()

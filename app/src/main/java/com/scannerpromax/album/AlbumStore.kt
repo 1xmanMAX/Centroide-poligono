@@ -5,6 +5,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -49,6 +50,31 @@ class AlbumStore(private val root: File, startScope: CoroutineScope? = Coroutine
                 }
             }
         }
+    }
+
+    /**
+     * Cola única de escrituras: las del editor ([enqueue]) y las de la cámara o el recorte ([updateQueued]) se aplican en
+     * el orden en que se pidieron aunque la pantalla que las pidió ya no exista (no se pierde el último cambio al
+     * navegar, y un cromo recién pegado no lo pisa una escritura anterior del editor).
+     */
+    private val writes = Channel<Pair<String, suspend () -> Unit>>(Channel.UNLIMITED)
+
+    init {
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            for ((_, w) in writes) runCatching { w() }.onFailure { e -> runCatching { Log.w(TAG, "No se pudo guardar el álbum", e) } }
+        }
+    }
+
+    /** Encola un cambio (sin esperar). */
+    fun enqueue(id: String, transform: (Album) -> Album) {
+        writes.trySend(id to { update(id, transform); Unit })
+    }
+
+    /** Encola un cambio y espera a que se guarde. */
+    suspend fun updateQueued(id: String, transform: (Album) -> Album): Album? {
+        val done = CompletableDeferred<Album?>()
+        writes.send(id to { done.complete(runCatching { update(id, transform) }.getOrNull()); Unit })
+        return done.await()
     }
 
     /** Álbumes, el más reciente primero. */

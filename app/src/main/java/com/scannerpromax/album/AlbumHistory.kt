@@ -39,6 +39,18 @@ class AlbumHistory(initial: List<AlbumPage>, private val limit: Int = 80) {
     }
 }
 
+/**
+ * Historial de deshacer de cada álbum abierto, en memoria del proceso: sobrevive a ir a la cámara y volver (la pantalla
+ * del editor sale de la composición). Se olvida al salir del editor con «Atrás».
+ */
+object AlbumSessions {
+    private val map = HashMap<String, AlbumHistory>()
+
+    @Synchronized fun get(id: String): AlbumHistory? = map[id]
+    @Synchronized fun put(id: String, h: AlbumHistory) { map[id] = h }
+    @Synchronized fun forget(id: String) { map.remove(id) }
+}
+
 /** Operaciones puras sobre las hojas (las usa el editor; probadas en la JVM). */
 object AlbumOps {
 

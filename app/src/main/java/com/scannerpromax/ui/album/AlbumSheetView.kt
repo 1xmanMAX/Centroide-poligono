@@ -274,8 +274,9 @@ internal fun AlbumSheetView(
                     }
                 }
             }
-            if (slot.id == selectedId) drawSelection(b, m, accent)
         }
+        // la selección encima de todos los recuadros (sus asas no quedan tapadas)
+        p.slots.firstOrNull { it.id == selectedId }?.let { drawSelection(AlbumGeometry.box(it, p), m, accent) }
         drawRect?.let { (a, b) ->
             val tl = m.toView(P(min(a.x, b.x), min(a.y, b.y)))
             val br = m.toView(P(max(a.x, b.x), max(a.y, b.y)))
