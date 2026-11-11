@@ -1046,7 +1046,8 @@ object TextRegions {
      * Render del filtro sobre [rgb] (8UC3, resolución completa; no se modifica). COLOR: 8UC3 (tinta con su
      * color reforzado sobre blanco puro); BLACK_WHITE: 8UC1 (tinta negra con bordes suaves sobre blanco puro).
      */
-    internal fun render(rgb: Mat, style: Style, fast: Boolean = false, keepRuling: Boolean = true, layoutImages: List<FloatArray> = emptyList(), photoMode: Int = 0): Mat = MatBag().use { bag ->
+    internal fun render(rgb: Mat, style: Style, fast: Boolean = false, keepRuling: Boolean = true, layoutImages: List<FloatArray> = emptyList(), photoMode: Int = 0,
+                        photoZones: com.scannerpromax.domain.PhotoZones? = null, photoReport: PhotoReport? = null): Mat = MatBag().use { bag ->
         val natural = style == Style.NATURAL
         val p = prepare(rgb, bgSide = if (fast) 256 else 384, refineSide = if (fast) 320 else 512, shadowColor = style != Style.BLACK_WHITE, separateColor = natural)
         try {
@@ -1093,7 +1094,8 @@ object TextRegions {
                     if (natural && PrintedPage.PHOTO_LAYER) runCatching {
                         val n = p.nColor ?: p.n
                         val photos = layoutPhotos(n, layoutImages, rgb, photoMode)
-                        if (photos.isNotEmpty()) PhotoLayer.paste(out, rgb, photos, PhotoLayer.paperWhite(rgb, n, Cv.PAPER_LEVEL))
+                        val white = if (photos.isEmpty() && !PrintedPage.hasManualPhotos(photoZones)) null else PhotoLayer.paperWhite(rgb, n, Cv.PAPER_LEVEL)
+                        PhotoLayer.compose(out, rgb, photos, photoZones, white, photoReport)
                     }.onFailure { if (Cv.isOutOfMemory(it)) throw it }
                     out
                 } finally { lay.release() }

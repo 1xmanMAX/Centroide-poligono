@@ -47,6 +47,11 @@ class PageProcessor(val tier: DeviceTier) {
          * sellos también, marcados como tinta ([NaturalColor.INK_FLAG]: tratamiento suave), y las tablas a [tableHints].
          */
         jev: ((Mat) -> com.scannerpromax.ai.jev.JevRenderHints?)? = null,
+        /**
+         * Informe de la capa de fotos ([PhotoReport]): cajas automáticas y, con [PhotoReport.keepLayers], la capa base y el
+         * origen de las fotos, todo ya en el marco FINAL (girado como el procesado). Quien lo pasa lo libera.
+         */
+        photoReport: PhotoReport? = null,
     ): Bitmap {
         progress?.invoke(0f)
         // Giro de 90° pedido DESPUÉS de procesar ([PageEdits.geoRotation]): todo se calcula en el marco de la geometría y
@@ -62,15 +67,28 @@ class PageProcessor(val tier: DeviceTier) {
         val photos = hints?.let { h -> com.scannerpromax.ai.jev.JevPage.mergePhotos(layoutGeo, h.photos) + h.inks.map { floatArrayOf(it[0], it[1], it[2], it[3], NaturalColor.INK_FLAG) } + h.verdicts } ?: layoutGeo
         val tables = hints?.let { tablesGeo + it.tables } ?: tablesGeo
         val fe = finishEdits(edits, d, geo)
-        var out = finish(geo, fe, ImageEnhancer.Options.of(tier, fast = false).copy(layoutImages = photos, tableHints = tables), progress)
+        var out = finish(geo, fe, ImageEnhancer.Options.of(tier, fast = false).copy(layoutImages = photos, tableHints = tables, photoReport = photoReport), progress)
         try {
             if (d != 0) { val r = PageRotation.rotateMat(out, d); out.release(); out = r }
+            if (photoReport != null) toFinalFrame(photoReport, d, out)
             val bmp = Cv.toBitmap(out)
             progress?.invoke(1f)
             return bmp
         } finally {
             out.release()
         }
+    }
+
+    /** Lleva el informe de la capa de fotos al marco FINAL (giro [d]); capas de otro tamaño que [out] = no valen. */
+    private fun toFinalFrame(r: PhotoReport, d: Int, out: Mat) {
+        if (d != 0) {
+            r.auto = PhotoZoneMath.boxesToFinal(r.auto, d)
+            if (d % 180 != 0) { val t = r.outW; r.outW = r.outH; r.outH = t }
+            r.base?.let { b -> r.base = PageRotation.rotateMat(b, d); b.release() }
+            r.orig?.let { o -> r.orig = PageRotation.rotateMat(o, d); o.release() }
+        }
+        val b = r.base
+        if (b != null && (b.cols() != out.cols() || b.rows() != out.rows() || b.channels() != out.channels())) r.valid = false
     }
 
     /** Ediciones para [finish] en el marco de la geometría [geo] (trazos de borrado girados de vuelta si hay giro final [d]). */
@@ -664,7 +682,7 @@ class PageProcessor(val tier: DeviceTier) {
         } else null
         val effective = ImageEnhancer.effectiveFilter(edits.filter, analysis)
         var cur = try {
-            ImageEnhancer.applyMat(geo, edits.filter, edits.adjustments, opt.copy(keepRuling = edits.keepRuling, photoMode = edits.photoMode ?: 0), analysis)
+            ImageEnhancer.applyMat(geo, edits.filter, edits.adjustments, opt.copy(keepRuling = edits.keepRuling, photoMode = edits.photoMode ?: 0, photoZones = edits.photoZones), analysis)
         } finally {
             geo.release()
         }
@@ -672,6 +690,8 @@ class PageProcessor(val tier: DeviceTier) {
         var ok = false
         try {
             progress?.invoke(0.65f)
+            // (lo que va DESPUÉS de la capa de fotos: la capa base guardada ya no vale para recomponer)
+            if (edits.autoRemoveLines || edits.eraseStrokes.isNotEmpty()) opt.photoReport?.valid = false
             if (edits.autoRemoveLines) {
                 val r = Cleanup.removeLinesMat(cur)
                 cur.release(); cur = r
@@ -683,6 +703,7 @@ class PageProcessor(val tier: DeviceTier) {
             ) {
                 val r = Cleanup.denoiseMat(cur)
                 cur.release(); cur = r
+                opt.photoReport?.valid = false
             }
             progress?.invoke(0.9f)
             if (edits.eraseStrokes.isNotEmpty()) {

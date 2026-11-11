@@ -71,8 +71,9 @@ object PhotoBoxRefine {
     }
 
     /** Resultado: rectángulo (px de salida), fuentes que lo pidieron, ¿fotografía?, medidas y opinión de Jev (o null). */
-    class Found(val rect: Rect, val src: Int, val photo: Boolean, val m: Metrics, val jevP: Double?, val why: String, val local: PhotoMath.Kind = PhotoMath.Kind.NOT, val big: Boolean = true) {
-        override fun toString() = "$rect $m jev=$jevP -> $why"
+    class Found(val rect: Rect, val src: Int, val photo: Boolean, val m: Metrics, val jevP: Double?, val why: String, val local: PhotoMath.Kind = PhotoMath.Kind.NOT, val big: Boolean = true,
+                val nat: Natural? = null) {
+        override fun toString() = "$rect $m $nat jev=$jevP -> $why"
     }
 
     /** Fila/columna "de foto": densidad mínima de píxeles de foto en el tramo. */
@@ -154,6 +155,7 @@ object PhotoBoxRefine {
                 val m = metrics(mp, bb)
                 val bw = bb[2] - bb[0]; val bh = bb[3] - bb[1]
                 val big = min(bw, bh) >= MIN_SIDE * side && bw.toDouble() * bh >= MIN_AREA * w * h
+                val nat = if (big) runCatching { natural(an, bb) }.onFailure { if (Cv.isOutOfMemory(it)) throw it }.getOrNull() else null
                 val rx0 = (fr0[0] * ow).roundToInt(); val ry0 = (fr0[1] * oh).roundToInt()
                 val rect = Cv.clampRect(Rect(rx0, ry0, (fr0[2] * ow).roundToInt() - rx0, (fr0[3] * oh).roundToInt() - ry0), ow, oh)
                 val fr = floatArrayOf(fr0[0].toFloat(), fr0[1].toFloat(), fr0[2].toFloat(), fr0[3].toFloat())
@@ -168,10 +170,103 @@ object PhotoBoxRefine {
                     else -> false to "dudosa"
                 }
                 log?.invoke("caja %d,%d %dx%d src=$src %s jev=%s -> $why".format(rect.x, rect.y, rect.width, rect.height, m, jev?.let { "%.2f".format(it) } ?: "-"))
-                if (rect.width > 0 && rect.height > 0) out += Found(rect, src, photo, m, jev, why, local, big)
+                if (rect.width > 0 && rect.height > 0) out += Found(rect, src, photo, m, jev, why, local, big, nat)
             }
             out
         }
+
+    /**
+     * Rasgos de IMAGEN NATURAL del interior de una caja (escala de análisis): separan una fotografía de cámara de lo que
+     * también es oscuro y denso pero no es foto (sombra del móvil o de la mano sobre el texto, viñeteado, sombra del
+     * doblez, fondo oscuro del canto, dedo, celdas o cabeceras oscuras, texto apretado, huellas, códigos de barras).
+     */
+    class Natural(
+        /** Fracción de los píxeles con contraste local que están A MEDIO TONO entre el mínimo y el máximo de su entorno
+         *  (tinta sobre fondo -texto, huellas, códigos de barras, rayas-: casi todo en los extremos; foto: tonos continuos). */
+        val midT: Double,
+        /** Desviación (niveles) de la luminancia de baja frecuencia respecto de un ajuste cuadrático: una sombra, el
+         *  viñeteado, el doblez o una zona lisa caen suaves (casi 0); una foto tiene objetos (estructura grande). */
+        val lowStd: Double,
+        /** Entropía normalizada (0..1) del tono de los píxeles con color (desenfocado: sin el ruido de color del sensor). */
+        val hueEnt: Double,
+        /** Fracción de píxeles con color de verdad (croma del desenfocado ≥ 22). */
+        val chroma: Double,
+        /** Fracción del gradiente en horizontal/vertical (±15°): texto, tablas, códigos de barras, rayas (≈ 0,33 sin orientación). */
+        val hv: Double,
+        /** Contraste de tinta: fracción de píxeles «tinta sobre papel» (≥ 35 niveles más oscuros que el máximo local de 9 px). */
+        val ink: Double,
+    ) {
+        override fun toString() = "midT=%.2f low=%.1f hue=%.2f croma=%.2f hv=%.2f tinta=%.2f".format(midT, lowStd, hueEnt, chroma, hv, ink)
+    }
+
+    /** [Natural] de la caja [b] (x0, y0, x1, y1 exclusivo) de [an] (RGB 8UC3, escala de análisis). */
+    internal fun natural(an: Mat, b: IntArray): Natural? = MatBag().use { bag ->
+        val bw = b[2] - b[0]; val bh = b[3] - b[1]
+        // (sin un 4 % de borde, como [metrics])
+        val r = Cv.clampRect(Rect(b[0] + (0.04 * bw).toInt(), b[1] + (0.04 * bh).toInt(), (0.92 * bw).toInt(), (0.92 * bh).toInt()), an.cols(), an.rows())
+        if (r.width < 16 || r.height < 16) return@use null
+        val sub = bag.add(an.submat(r))
+        val g = bag.add(Cv.gray(sub))
+        val w = r.width; val h = r.height; val n = w * h
+        // 1) medio tono local: (v - mín) / (máx - mín) en 5x5, sólo con contraste ≥ 24
+        val mn = bag.mat(); Imgproc.erode(g, mn, Cv.kernel(Imgproc.MORPH_RECT, 5))
+        val mx = bag.mat(); Imgproc.dilate(g, mx, Cv.kernel(Imgproc.MORPH_RECT, 5))
+        val gb = ByteArray(n); g.get(0, 0, gb)
+        val nb = ByteArray(n); mn.get(0, 0, nb); val xb = ByteArray(n); mx.get(0, 0, xb)
+        var cnt = 0; var mid = 0
+        for (i in 0 until n) {
+            val lo = nb[i].toInt() and 0xFF; val hi = xb[i].toInt() and 0xFF
+            if (hi - lo < 24) continue
+            cnt++
+            val t = ((gb[i].toInt() and 0xFF) - lo).toDouble() / (hi - lo)
+            if (t in 0.3..0.7) mid++
+        }
+        val midT = if (cnt < 0.02 * n) 0.5 else mid.toDouble() / cnt
+        // tinta: más oscuro que el máximo de 9x9 en ≥ 35 niveles
+        val mx9 = bag.mat(); Imgproc.dilate(g, mx9, Cv.kernel(Imgproc.MORPH_RECT, 9))
+        val x9 = ByteArray(n); mx9.get(0, 0, x9)
+        var ink = 0
+        for (i in 0 until n) if ((x9[i].toInt() and 0xFF) - (gb[i].toInt() and 0xFF) >= 35) ink++
+        // 2) baja frecuencia frente a un ajuste cuadrático (muestras en una rejilla de 24 x 24 del desenfocado)
+        val lp = bag.mat(); Imgproc.GaussianBlur(g, lp, Size(0.0, 0.0), max(2.0, min(w, h) / 12.0))
+        val lpb = ByteArray(n); lp.get(0, 0, lpb)
+        val k = 24
+        val xs = DoubleArray(k * k); val ys = DoubleArray(k * k); val vs = DoubleArray(k * k)
+        for (j in 0 until k) for (i in 0 until k) {
+            val x = ((i + 0.5) * w / k).toInt().coerceIn(0, w - 1); val y = ((j + 0.5) * h / k).toInt().coerceIn(0, h - 1)
+            xs[j * k + i] = x.toDouble() / w - 0.5; ys[j * k + i] = y.toDouble() / h - 0.5; vs[j * k + i] = (lpb[y * w + x].toInt() and 0xFF).toDouble()
+        }
+        val lowStd = PhotoMath.quadResidual(xs, ys, vs)
+        // 3) tono y croma del desenfocado (σ 1,5: el ruido de color del sensor no cuenta)
+        val sb = bag.mat(); Imgproc.GaussianBlur(sub, sb, Size(0.0, 0.0), 1.5)
+        val hsv = bag.mat(); Imgproc.cvtColor(sb, hsv, Imgproc.COLOR_RGB2HSV)
+        val hb = ByteArray(n * 3); hsv.get(0, 0, hb)
+        val rb = ByteArray(n * 3); sb.get(0, 0, rb)
+        val hist = IntArray(12); var col = 0
+        for (i in 0 until n) {
+            val rr = rb[i * 3].toInt() and 0xFF; val gg = rb[i * 3 + 1].toInt() and 0xFF; val bb = rb[i * 3 + 2].toInt() and 0xFF
+            val c = max(rr, max(gg, bb)) - min(rr, min(gg, bb))
+            if (c < 22 || max(rr, max(gg, bb)) < 40) continue
+            col++
+            hist[((hb[i * 3].toInt() and 0xFF) * 12 / 180).coerceIn(0, 11)]++
+        }
+        var ent = 0.0
+        if (col > 0) for (v in hist) if (v > 0) { val p = v.toDouble() / col; ent -= p * kotlin.math.ln(p) }
+        val hueEnt = if (col < 0.03 * n) 0.0 else ent / kotlin.math.ln(12.0)
+        // 4) orientación del gradiente (ponderada por su módulo)
+        val gx = bag.mat(); val gy = bag.mat()
+        Imgproc.Sobel(g, gx, CvType.CV_32F, 1, 0); Imgproc.Sobel(g, gy, CvType.CV_32F, 0, 1)
+        val ax = FloatArray(n); gx.get(0, 0, ax); val ay = FloatArray(n); gy.get(0, 0, ay)
+        var tot = 0.0; var hvs = 0.0
+        val tan15 = 0.2679
+        for (i in 0 until n) {
+            val dx = abs(ax[i]).toDouble(); val dy = abs(ay[i]).toDouble()
+            val m = dx + dy; if (m < 40) continue
+            tot += m
+            if (dy <= tan15 * dx || dx <= tan15 * dy) hvs += m
+        }
+        Natural(midT, lowStd, hueEnt, col.toDouble() / n, if (tot <= 0) 0.33 else hvs / tot, ink.toDouble() / n)
+    }
 
     /** Sólo los rectángulos de las fotografías. */
     fun photos(found: List<Found>): List<Rect> = found.filter { it.photo }.map { it.rect }
@@ -526,6 +621,36 @@ object PhotoMath {
         // foto con grano en casi todo, o con zonas lisas (cielo, pared) pero de muchos tonos
         m.photo >= 0.8 && m.paper <= 0.2 && m.colors >= 8 && (m.grain >= 0.6 || (m.grain >= 0.28 && m.top2 <= 0.6)) -> Kind.PHOTO
         else -> Kind.DOUBTFUL
+    }
+
+    /**
+     * Desviación típica del residuo de [v] frente al mejor ajuste cuadrático a + b·x + c·y + d·x² + e·xy + f·y² (mínimos
+     * cuadrados; [x], [y] centrados). Una sombra o un viñeteado son casi un plano curvo: residuo pequeño.
+     */
+    fun quadResidual(x: DoubleArray, y: DoubleArray, v: DoubleArray): Double {
+        val n = v.size
+        if (n < 6) return 0.0
+        val a = Array(6) { DoubleArray(7) }
+        val f = DoubleArray(6)
+        for (i in 0 until n) {
+            f[0] = 1.0; f[1] = x[i]; f[2] = y[i]; f[3] = x[i] * x[i]; f[4] = x[i] * y[i]; f[5] = y[i] * y[i]
+            for (r in 0 until 6) { for (c in 0 until 6) a[r][c] += f[r] * f[c]; a[r][6] += f[r] * v[i] }
+        }
+        // eliminación de Gauss con pivote parcial (+ un poco de regularización)
+        for (r in 0 until 6) a[r][r] += 1e-9
+        for (c in 0 until 6) {
+            var p = c; for (r in c + 1 until 6) if (abs(a[r][c]) > abs(a[p][c])) p = r
+            val t = a[c]; a[c] = a[p]; a[p] = t
+            if (abs(a[c][c]) < 1e-12) continue
+            for (r in 0 until 6) if (r != c) { val k = a[r][c] / a[c][c]; for (cc in c until 7) a[r][cc] -= k * a[c][cc] }
+        }
+        val co = DoubleArray(6) { if (abs(a[it][it]) < 1e-12) 0.0 else a[it][6] / a[it][it] }
+        var ss = 0.0
+        for (i in 0 until n) {
+            val e = v[i] - (co[0] + co[1] * x[i] + co[2] * y[i] + co[3] * x[i] * x[i] + co[4] * x[i] * y[i] + co[5] * y[i] * y[i])
+            ss += e * e
+        }
+        return kotlin.math.sqrt(ss / n)
     }
 
     /** ¿Se tocan los rectángulos (intersección no vacía)? */

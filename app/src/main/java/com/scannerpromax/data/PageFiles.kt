@@ -35,6 +35,8 @@ object PageFiles {
         REUSE,
         /** Solo cambia el giro: se giran el procesado, la miniatura y el OCR actuales, sin reprocesar NADA. */
         ROTATE,
+        /** Sólo cambian las imágenes a mano: la capa de fotos se recompone sobre la capa base guardada (sin reprocesar). */
+        RECOMPOSE,
         /** Tubería completa desde el original. */
         RENDER,
     }
@@ -43,11 +45,34 @@ object PageFiles {
      * [draftReady] = procesado y miniatura de las ediciones nuevas ya existen; [rotationOnly] = las nuevas solo cambian el
      * giro respecto de las actuales ([PageRotation.rotationOnly]) y el procesado actual existe.
      */
-    fun editPlan(draftReady: Boolean, rotationOnly: Boolean): EditPlan = when {
+    fun editPlan(draftReady: Boolean, rotationOnly: Boolean, layersReady: Boolean = false): EditPlan = when {
         draftReady -> EditPlan.REUSE
         rotationOnly -> EditPlan.ROTATE
+        layersReady -> EditPlan.RECOMPOSE
         else -> EditPlan.RENDER
     }
+
+    const val PHOTO_DIR = "photo"
+
+    /**
+     * Capas de la página para recomponer las imágenes a mano ([com.scannerpromax.domain.PageEdits.photoZones]):
+     * `photo/<página>_<hash de las ediciones SIN las zonas a mano>` + `.json` (cajas automáticas, blanco del papel),
+     * `.base.jpg|png` (capa base: el procesado sin fotos) y `.orig.jpg` (la página rectificada de la que salen las fotos).
+     * La clave no depende de las zonas: cambiarlas reutiliza las mismas capas.
+     */
+    fun photoLayersPrefix(pageId: String, edits: PageEdits) =
+        "$PHOTO_DIR/${pageId}_${editsHash(com.scannerpromax.imaging.PhotoZoneMath.layersKey(edits))}"
+
+    fun photoInfoName(pageId: String, edits: PageEdits) = photoLayersPrefix(pageId, edits) + ".json"
+    fun photoBaseName(pageId: String, edits: PageEdits) = photoLayersPrefix(pageId, edits) + if (isBinaryFilter(edits.filter)) ".base.png" else ".base.jpg"
+    fun photoOrigName(pageId: String, edits: PageEdits) = photoLayersPrefix(pageId, edits) + ".orig.jpg"
+
+    /** Contenido de [photoInfoName]: cajas automáticas (marco FINAL, normalizadas), tamaño del procesado y blanco del papel. */
+    @kotlinx.serialization.Serializable
+    data class PhotoInfo(val auto: List<List<Float>> = emptyList(), val w: Int = 0, val h: Int = 0, val white: List<Double>? = null)
+
+    fun encodePhotoInfo(i: PhotoInfo): String = hashJson.encodeToString(PhotoInfo.serializer(), i)
+    fun decodePhotoInfo(s: String): PhotoInfo? = runCatching { hashJson.decodeFromString(PhotoInfo.serializer(), s) }.getOrNull()
 
     /** Hash estable (entre ejecuciones) de las ediciones: va en el nombre de archivo, así cada versión tiene el suyo. */
     fun editsHash(edits: PageEdits): String =

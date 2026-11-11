@@ -16,6 +16,7 @@ import com.scannerpromax.domain.FilterType
 import com.scannerpromax.domain.OcrResult
 import com.scannerpromax.domain.Page
 import com.scannerpromax.domain.PageEdits
+import com.scannerpromax.domain.PhotoZone
 import com.scannerpromax.domain.Pt
 import com.scannerpromax.domain.photoBoxes
 import com.scannerpromax.domain.Quad
@@ -27,6 +28,9 @@ import com.scannerpromax.imaging.Cv
 import com.scannerpromax.imaging.DuplicatePages
 import com.scannerpromax.imaging.PageProcessor
 import com.scannerpromax.imaging.PageRotation
+import com.scannerpromax.imaging.PhotoLayer
+import com.scannerpromax.imaging.PhotoReport
+import com.scannerpromax.imaging.PhotoZoneMath
 import com.scannerpromax.imaging.PerspectiveCorrector
 import com.scannerpromax.imaging.ProgressCallback
 import com.scannerpromax.ocr.OcrEngine
@@ -539,14 +543,26 @@ class DocumentRepository(
             // es exactamente el mismo resultado (mismo original, presupuesto y tubería), así que se reutiliza sin volver a procesar.
             val draftThumb = thumbName(pageId, edits)
             val draftReady = withContext(Dispatchers.IO) { File(dir, newProcessed).exists() && File(dir, draftThumb).exists() }
-            val (processedName, thumbName) = when (PageFiles.editPlan(draftReady, rotOnly)) {
-                PageFiles.EditPlan.REUSE -> newProcessed to draftThumb
-                PageFiles.EditPlan.ROTATE -> withContext(Dispatchers.Default) { rotateFiles(docId, pageId, current.edits, edits) }
-                PageFiles.EditPlan.RENDER -> heavyWork {
+            // ¿Sólo cambian las imágenes a mano y están las capas? Se recompone la capa de fotos (sin reprocesar).
+            val layers = !draftReady && !rotOnly && withContext(Dispatchers.IO) { layersReady(dir, pageId, edits) }
+            val renderAll: suspend () -> Pair<String, String> = {
+                heavyWork {
                     withContext(Dispatchers.Default) {
                         renderFromOriginal(docId, pageId, File(dir, current.originalFile), edits, current.width, current.height)
                     }
                 }
+            }
+            val (processedName, thumbName) = when (PageFiles.editPlan(draftReady, rotOnly, layers)) {
+                PageFiles.EditPlan.REUSE -> newProcessed to draftThumb
+                PageFiles.EditPlan.ROTATE -> withContext(Dispatchers.Default) { rotateFiles(docId, pageId, current.edits, edits) }
+                PageFiles.EditPlan.RECOMPOSE -> heavyWork { withContext(Dispatchers.Default) { recompose(docId, dir, pageId, edits) } } ?: renderAll()
+                PageFiles.EditPlan.RENDER -> renderAll()
+            }
+            // Sólo las imágenes a mano: el texto de la página es el mismo (el OCR y la maquetación de la IA se conservan)
+            val zonesOnly = PhotoZoneMath.zonesOnly(current.edits, edits)
+            if (zonesOnly) withContext(Dispatchers.IO) {
+                val from = File(dir, PageFiles.layoutName(pageId, current.edits)); val to = File(dir, PageFiles.layoutName(pageId, edits))
+                if (from.exists() && !to.exists()) runCatching { from.copyTo(to) }
             }
             // OCR girado (mismo texto, cajas transformadas): no se vuelve a leer la página
             val rotatedOcr = if (rotOnly) current.ocrFile?.let { old ->
@@ -563,6 +579,7 @@ class DocumentRepository(
                         // El OCR guardado deja de ser válido solo si la imagen cambió (con un giro, va girado).
                         val editsChanged = p.edits != edits
                         val keptOcr = rotatedOcr?.takeIf { p.edits == current.edits && p.ocrFile == current.ocrFile }
+                            ?: p.ocrFile?.takeIf { zonesOnly && p.edits == current.edits }
                         if (editsChanged) {
                             p.ocrFile?.takeIf { it != keptOcr }?.let { File(dir, it).delete() }
                             File(dir, PageFiles.layoutName(pageId, p.edits)).delete()
@@ -585,7 +602,7 @@ class DocumentRepository(
             if (result.ocrFile == null) {
                 enqueueOcr(docId, pageId)
                 aiHook?.onPageChanged(docId, pageId)
-            } else if (hadLayout) {
+            } else if (hadLayout || (zonesOnly && withContext(Dispatchers.IO) { !File(dir, PageFiles.layoutName(pageId, edits)).exists() })) {
                 aiHook?.onPageChanged(docId, pageId)
             }
             result
@@ -1009,6 +1026,10 @@ class DocumentRepository(
     }
 
     /** Procesado ACTUAL de la página si ya existe en disco (sin renderizar nunca; null si falta). */
+    /** Procesado (o borrador) de [edits] si ya está en disco. */
+    fun processedFileFor(docId: String, pageId: String, edits: PageEdits): File? =
+        File(docDir(docId), processedName(pageId, edits)).takeIf { it.exists() }
+
     fun processedFileIfReady(docId: String, page: Page): File? {
         val f = File(docDir(docId), processedName(page.id, page.edits))
         return if (f.exists()) f else null
@@ -1303,6 +1324,7 @@ class DocumentRepository(
         pageH: Int,
         budget: Int = tier.maxWorkingPixels,
         progress: ProgressCallback? = null,
+        keepLayers: Boolean = false,
     ): Pair<String, String> {
         var px = budget
         while (true) {
@@ -1310,7 +1332,7 @@ class DocumentRepository(
             try {
                 val original = BitmapIO.decode(originalFile.absolutePath, px)
                 try {
-                    return renderAndSave(docId, pageId, original, edits, pageW, pageH, progress)
+                    return renderAndSave(docId, pageId, original, edits, pageW, pageH, progress, keepLayers)
                 } finally {
                     original.recycle()
                 }
@@ -1356,6 +1378,7 @@ class DocumentRepository(
         pageW: Int,
         pageH: Int,
         progress: ProgressCallback? = null,
+        keepLayers: Boolean = false,
     ): Pair<String, String> {
         val dir = docDir(docId)
         val processedName = processedName(pageId, edits)
@@ -1363,7 +1386,14 @@ class DocumentRepository(
         val workEdits = edits.quad?.let { q -> edits.copy(quad = toSpace(q, pageW, pageH, original.width, original.height)) } ?: edits
         // Cajas de foto de la maquetación guardada (PP-DocLayoutV3): "Color natural" las conserva como foto
         val photos = if (edits.filter == FilterType.NATURAL) layoutPhotoBoxes(docId, pageId, edits) else emptyList()
-        val rendered = processor.render(original, workEdits, progress, photos, jev = jevHook(dir, pageId, edits))
+        // capa de fotos: cajas automáticas (el editor las muestra) y, si se piden, las capas para recomponer sin reprocesar
+        val report = PhotoReport(keepLayers && PhotoZoneMath.recomposable(edits))
+        val rendered = try {
+            processor.render(original, workEdits, progress, photos, jev = jevHook(dir, pageId, edits), photoReport = report)
+        } catch (t: Throwable) { report.release(); throw t }
+        try {
+            withContext(NonCancellable + Dispatchers.IO) { runCatching { savePhotoLayers(docId, dir, pageId, edits, report) }.onFailure { Log.w(TAG, "No se guardaron las capas de fotos", it) } }
+        } finally { report.release() }
         try {
             currentCoroutineContext().ensureActive()
             val thumb = BitmapIO.thumbnail(rendered, THUMB_SIDE)
@@ -1390,6 +1420,118 @@ class DocumentRepository(
             if (rendered !== original) rendered.recycle()
         }
         return processedName to thumbName
+    }
+
+    /** Guarda lo del informe de la capa de fotos: cajas automáticas y, si las hay y valen, las capas base y de origen. */
+    private fun savePhotoLayers(docId: String, dir: File, pageId: String, edits: PageEdits, r: PhotoReport) {
+        if (!r.composed) return
+        checkAlive(docId)
+        File(dir, PageFiles.PHOTO_DIR).mkdirs()
+        val base = r.base; val orig = r.orig
+        if (r.keepLayers && r.valid && base != null && orig != null) {
+            val bb = Cv.toBitmap(base)
+            try {
+                if (isBinaryFilter(edits.filter)) saveAtomic(bb, File(dir, PageFiles.photoBaseName(pageId, edits)), Bitmap.CompressFormat.PNG, 100)
+                else saveJpegAtomic(bb, File(dir, PageFiles.photoBaseName(pageId, edits)), LAYER_QUALITY)
+            } finally { bb.recycle() }
+            val ob = Cv.toBitmap(orig)
+            try { saveJpegAtomic(ob, File(dir, PageFiles.photoOrigName(pageId, edits)), LAYER_QUALITY) } finally { ob.recycle() }
+        }
+        val info = PageFiles.PhotoInfo(r.auto.map { it.toList() }, r.outW, r.outH, r.white?.toList())
+        val f = File(dir, PageFiles.photoInfoName(pageId, edits))
+        val tmp = File(f.parentFile, f.name + ".tmp")
+        tmp.writeText(PageFiles.encodePhotoInfo(info))
+        if (!tmp.renameTo(f)) { f.delete(); tmp.renameTo(f) }
+    }
+
+    /** Cajas automáticas de fotos guardadas para [edits] (marco final, normalizadas) o null si aún no se calcularon. */
+    private fun readPhotoInfo(dir: File, pageId: String, edits: PageEdits): PageFiles.PhotoInfo? =
+        File(dir, PageFiles.photoInfoName(pageId, edits)).takeIf { it.isFile }?.let { PageFiles.decodePhotoInfo(it.readText()) }
+
+    /** ¿Están las capas para recomponer [edits] sin reprocesar? */
+    private fun layersReady(dir: File, pageId: String, edits: PageEdits): Boolean =
+        PhotoZoneMath.recomposable(edits) && File(dir, PageFiles.photoInfoName(pageId, edits)).isFile &&
+            File(dir, PageFiles.photoBaseName(pageId, edits)).isFile && File(dir, PageFiles.photoOrigName(pageId, edits)).isFile
+
+    /** Imágenes de la página para el editor: cajas automáticas (marco final) y si cada cambio se recompone al instante. */
+    class PhotoState(val auto: List<PhotoZone>, val fast: Boolean)
+
+    /**
+     * Prepara «Imágenes de la página» para [edits]: si faltan las cajas automáticas o las capas para recomponer, hace UN
+     * render completo que las guarda (y deja el procesado de [edits] como borrador). Después cada cambio de las zonas a
+     * mano es una recomposición ([recomposeDraft]).
+     */
+    suspend fun photoState(docId: String, pageId: String, edits: PageEdits, progress: ProgressCallback? = null): PhotoState {
+        loaded.await()
+        val current = findPage(docId, pageId) ?: throw IOException("Página no encontrada")
+        val dir = docDir(docId)
+        val ready = withContext(Dispatchers.IO) { readPhotoInfo(dir, pageId, edits) != null && (layersReady(dir, pageId, edits) || !PhotoZoneMath.recomposable(edits)) }
+        if (!ready) {
+            heavyWork {
+                withContext(Dispatchers.Default) {
+                    renderFromOriginal(docId, pageId, File(dir, current.originalFile), edits, current.width, current.height, progress = progress, keepLayers = true)
+                }
+            }
+        }
+        return withContext(Dispatchers.IO) {
+            val info = readPhotoInfo(dir, pageId, edits)
+            PhotoState(info?.auto.orEmpty().filter { it.size >= 4 }.map { PhotoZone(it[0], it[1], it[2], it[3]) }, layersReady(dir, pageId, edits))
+        }
+    }
+
+    /**
+     * Procesado de [edits] RECOMPUESTO: la capa base guardada + la capa de fotos con las zonas a mano de [edits] (sin
+     * reprocesar la página: decodificar dos imágenes y filtrar sólo los recortes de foto). null si no hay capas para esas
+     * ediciones ([photoState]) o la tubería pone algo después de la capa de fotos ([PhotoZoneMath.recomposable]).
+     */
+    suspend fun recomposeDraft(docId: String, pageId: String, edits: PageEdits): File? {
+        loaded.await()
+        val dir = docDir(docId)
+        val pName = processedName(pageId, edits)
+        val tName = thumbName(pageId, edits)
+        if (withContext(Dispatchers.IO) { File(dir, pName).exists() && File(dir, tName).exists() }) return File(dir, pName)
+        if (!withContext(Dispatchers.IO) { layersReady(dir, pageId, edits) }) return null
+        return heavyWork { withContext(Dispatchers.Default) { recompose(docId, dir, pageId, edits) } }?.let { File(dir, it.first) }
+    }
+
+    /** Recompone y guarda procesado + miniatura de [edits]; null si no se pudo (capas ilegibles). */
+    private suspend fun recompose(docId: String, dir: File, pageId: String, edits: PageEdits): Pair<String, String>? {
+        val t0 = System.nanoTime()
+        val info = withContext(Dispatchers.IO) { readPhotoInfo(dir, pageId, edits) } ?: return null
+        val pName = processedName(pageId, edits)
+        val tName = thumbName(pageId, edits)
+        val out = try {
+            val bb = BitmapIO.decode(File(dir, PageFiles.photoBaseName(pageId, edits)).absolutePath, 0)
+            val base = try { if (isBinaryFilter(edits.filter)) Cv.toRgba(bb).let { m -> Cv.gray(m).also { m.release() } } else Cv.toRgb(bb) } finally { bb.recycle() }
+            try {
+                val ob = BitmapIO.decode(File(dir, PageFiles.photoOrigName(pageId, edits)).absolutePath, 0)
+                val orig = try { Cv.toRgb(ob) } finally { ob.recycle() }
+                try {
+                    currentCoroutineContext().ensureActive()
+                    PhotoLayer.recompose(base, orig, info.auto, edits.photoZones, info.white?.toDoubleArray())
+                    Cv.toBitmap(base)
+                } finally { orig.release() }
+            } finally { base.release() }
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            Log.w(TAG, "No se pudo recomponer la capa de fotos", t)
+            return null
+        }
+        try {
+            val thumb = BitmapIO.thumbnail(out, THUMB_SIDE)
+            try {
+                withContext(Dispatchers.IO) {
+                    checkAlive(docId)
+                    File(dir, PROCESSED_DIR).mkdirs(); File(dir, THUMB_DIR).mkdirs()
+                    saveJpegAtomic(thumb, File(dir, tName), THUMB_QUALITY)
+                    if (isBinaryFilter(edits.filter)) saveAtomic(out, File(dir, pName), Bitmap.CompressFormat.PNG, 100)
+                    else saveJpegAtomic(out, File(dir, pName), PROCESSED_QUALITY)
+                }
+            } finally { if (thumb !== out) thumb.recycle() }
+        } finally { out.recycle() }
+        Log.i(TAG, "Capa de fotos recompuesta sin reprocesar en ${(System.nanoTime() - t0) / 1_000_000} ms")
+        return pName to tName
     }
 
     /**
@@ -1456,6 +1598,9 @@ class DocumentRepository(
             val rel = "$PROCESSED_DIR/${f.name}"
             if (f.name.startsWith(page.id) && rel != keepProcessed && rel != keepProcessed + PageFiles.LAYOUT_SUFFIX) f.delete()
         }
+        // capas de fotos de otras ediciones (se conservan las de las que se guardan)
+        val keepPhoto = PageFiles.photoLayersPrefix(page.id, page.edits).substringAfter('/')
+        File(dir, PageFiles.PHOTO_DIR).listFiles()?.forEach { f -> if (f.name.startsWith(page.id + "_") && !f.name.startsWith("$keepPhoto.")) f.delete() }
         File(dir, THUMB_DIR).listFiles()?.forEach { f ->
             if (f.name.startsWith(page.id) && "$THUMB_DIR/${f.name}" != keepThumb) f.delete()
         }
@@ -2023,7 +2168,9 @@ class DocumentRepository(
         private const val PROCESSED_DIR = "processed"
         private const val THUMB_DIR = "thumb"
         private const val OCR_DIR = "ocr"
-        private val SUBDIRS = listOf(ORIGINAL_DIR, PROCESSED_DIR, THUMB_DIR, OCR_DIR, PageFiles.JEV_DIR)
+        private val SUBDIRS = listOf(ORIGINAL_DIR, PROCESSED_DIR, THUMB_DIR, OCR_DIR, PageFiles.JEV_DIR, PageFiles.PHOTO_DIR)
+        /** Calidad JPEG de las capas para recomponer (capa base en color y origen de las fotos). */
+        private const val LAYER_QUALITY = 95
         /** Duplicados: páginas anteriores con las que se compara la nueva y rasgos ORB guardados en memoria. */
         private const val DUP_WINDOW = 6
         private const val DUP_CACHE = 12
