@@ -263,6 +263,8 @@ tasks.withType<Test>().configureEach {
         "oriBench" to "ori.bench", "oriModel" to "ori.model",
         // CardOrientationBenchTest (orientación de las caras del DNI, sintético): -PcardOriBench=salida.md
         "cardOriBench" to "card.ori.bench",
+        // PhotoDarkZoneBenchTest (fotos frente a zonas oscuras): -PfotosBench=salida.md [-PfotosNat=DIR] [-PfotosReal=DIR] [-PfotosSeeds=N]
+        "fotosBench" to "fotos.bench", "fotosNat" to "fotos.nat", "fotosReal" to "fotos.real", "fotosSeeds" to "fotos.seeds", "fotosRealLabels" to "fotos.realLabels", "fotosOnly" to "fotos.only",
     ).forEach { (p, sp) ->
         (project.findProperty(p) as String?)?.let { systemProperty(sp, it) }
     }

@@ -54,6 +54,8 @@ object PageRotation {
             rotation = target,
             geoRotation = geo.takeIf { it != target },
             eraseStrokes = rotateStrokes(e.eraseStrokes, k, aspect),
+            // (las imágenes a mano están en el marco final: giran con la página)
+            photoZones = PhotoZoneMath.rotate(e.photoZones, k),
         )
     }
 
@@ -92,6 +94,7 @@ object PageRotation {
             rotation = geoRotation(e),
             geoRotation = null,
             eraseStrokes = rotateStrokes(e.eraseStrokes, back, finalW.toFloat() / finalH.coerceAtLeast(1)),
+            photoZones = PhotoZoneMath.rotate(e.photoZones, back),
         )
     }
 
@@ -127,8 +130,10 @@ object PageRotation {
     fun rotationOnly(a: PageEdits, b: PageEdits, aspectA: Float = 1f): Boolean {
         if (norm(a.rotation) == norm(b.rotation)) return false
         if (geoRotation(a) != geoRotation(b)) return false
-        val strip = { e: PageEdits -> e.copy(rotation = 0, geoRotation = null, eraseStrokes = emptyList()) }
+        val strip = { e: PageEdits -> e.copy(rotation = 0, geoRotation = null, eraseStrokes = emptyList(), photoZones = null) }
         if (strip(a) != strip(b)) return false
+        // imágenes a mano: las de [a] giradas son las de [b]
+        if (!PhotoZoneMath.sameZones(PhotoZoneMath.rotate(a.photoZones, norm(b.rotation - a.rotation) / 90), b.photoZones)) return false
         if (a.eraseStrokes.size != b.eraseStrokes.size) return false
         if (a.eraseStrokes.isEmpty()) return true
         val k = norm(b.rotation - a.rotation) / 90

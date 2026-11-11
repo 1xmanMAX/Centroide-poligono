@@ -326,3 +326,31 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
   Falta: probar en móvil (cámara de una cara, tiempos de doc_ori por cara, DNI reales).
 - 2026-11-10: FUSIONADO libre-dni2 (pantalla «Editar DNI» por cara, CardOrientation, hoja DNI excluida del giro automático). Libre 1.4.0 (versionCode 5), release firmada, 666 tests OK. Falta probar en móvil con DNI reales.
 - 2026-11-11: EN CURSO (agentes, push WIP): libre-rendimiento (perfilado por etapas, hilos según núcleos grandes/medianos por SoC Kirin/Exynos/Snapdragon/Dimensity/Tensor/Unisoc, OpenCL/NNAPI/XNNPACK con autoprueba, prioridad alta, ajuste Rendimiento Máximo/Equilibrado/Ahorro) y libre-fotos (zonas oscuras ya no como foto; editor «Imágenes de la página»: quitar zona, «Aquí no hay imágenes», añadir subzona). Al terminar: fusionar ambos en libre, APK 1.5.0.
+- 2026-11-11: IMÁGENES DE LA PÁGINA A MANO + ZONAS OSCURAS (agente, rama `libre-fotos` desde `libre`, subida; SIN fusionar).
+  Queja: "una ZONA OSCURA de mi foto se reconoce como imagen y se recorta con otro color"; quiere auto + «aquí no hay
+  imágenes» + «no es una imagen» + SUB-SELECCIÓN de la zona de imagen.
+  (1) Detección: PhotoBoxRefine.Natural (rasgos de imagen natural por caja: medio tono local midT, estructura grande frente
+  a un ajuste cuadrático lowStd, entropía de tono y croma del desenfocado, gradiente H/V, tinta, frecuencia media/fina mf,
+  oscuridad) + PhotoMath.naturalVeto (trazos, rayas, huella/trama, «sombra o fondo oscuro: grano sin forma», «zona lisa
+  de un solo tono») y naturalPhoto (foto lisa dudosa con formas -> foto). Banco PhotoDarkZoneBenchTest (-PfotosBench,
+  escenas PhotoScenes: 13 tipos de zona oscura × 6 + 56 fotos naturales de skimage/Commons/picsum en
+  /tmp/claude-0/bench/datasets/fotos/nat + 108 capturas reales datasets/ori/photos_rect con etiquetas
+  fotos_oscuras/reales_fotos.tsv): zonas oscuras tratadas como foto 3/78 -> 0/78 (con pista de la IA 5/78 -> 0/78; la
+  sombra muy oscura de esquina era 2/6), fotos acertadas 55,4 -> 58,9 % (pista 57,1 -> 60,7 %), cajas extra 1 -> 0;
+  reales: cajas falsas 51 (33 páginas) -> 14 (13), fotos de verdad 13/13 -> 13/13; firmas/sellos/logos 0. Informe:
+  /tmp/claude-0/bench/fotos_oscuras/{antes,despues}.md (+ _cajas.tsv, _detalle.txt, _reales/).
+  (2) Control manual: PageEdits.photoZones (PhotoZones: manual [PhotoZone recuadro normalizado en el marco FINAL, lazo
+  opcional `poly`, `normal`=«como el resto»], excluded, none; null = hash de siempre). PhotoZoneMath: resolución
+  (auto - descartadas - «aquí no hay» + manuales; «como el resto» deja la capa base), giros (PageRotation.withRotation /
+  geoEdits / rotationOnly giran las zonas), cambio de recorte (homografías de los dos cuadriláteros), recomponible.
+  Editor › nueva herramienta «Imágenes» (PhotoZonesTool + PhotosPanel; también «Editar imágenes de la página…» bajo
+  Fotos: Auto/Recortar/Como el resto): recuadros con etiqueta (Imagen / No es imagen / Zona de imagen / Como el resto),
+  tocar = elegir, esquinas y lados = ajustar, dentro = mover, «No es una imagen», «Sí es una imagen», «Foto natural» /
+  «Como el resto», «Quitar zona», «Añadir zona» (recuadro), «Lazo», «Aquí no hay», «Detectar de nuevo».
+  (3) Sin reprocesar: PhotoReport (PageProcessor.render -> ImageEnhancer -> PrintedPage/TextRegions -> PhotoLayer.compose)
+  guarda photo/<pid>_<hash sin zonas>.{json (cajas auto, blanco del papel), base.jpg|png (capa base), orig.jpg}; al abrir
+  «Imágenes» un render con capas (photoState); cada cambio = PhotoLayer.recompose (recomposeDraft, EditPlan.RECOMPOSE en
+  updateEdits; OCR y maquetación de la IA se conservan). Sólo sin ajustes finos / quitar rayas / borrado manual (si no,
+  render completo). Test: recompuesta == render completo píxel a píxel.
+  Tests nuevos: PhotoZonesEditsTest (10), PhotoZonesRenderTest (2), PhotoNaturalRulesTest (3). Notas: /tmp/claude-0/bench/notes_fotos.md.
+  Falta: probar en móvil (gestos, tiempos de recomposición), fotos reales del usuario con la zona oscura.

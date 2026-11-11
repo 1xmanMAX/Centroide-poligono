@@ -142,6 +142,7 @@ internal enum class EditorTool(val label: String, val icon: ImageVector) {
     FILTERS("Filtros", AppIcons.Filters),
     CLEAN("Limpiar", AppIcons.Clean),
     ROTATE("Rotar", AppIcons.Rotate),
+    PHOTOS("Imágenes", AppIcons.Gallery),
 }
 
 /** Qué ajustes copiar al resto de páginas con "Aplicar a todas". */
@@ -190,6 +191,9 @@ fun EditorScreen(
     var bulkProgress by remember { mutableStateOf<Float?>(null) }
     var bulkMessage by remember { mutableStateOf("") }
     var bulkJob by remember { mutableStateOf<Job?>(null) }
+    // «Imágenes de la página»: modo de los gestos y recuadro elegido
+    var zoneMode by remember { mutableStateOf(ZoneMode.SELECT) }
+    var selectedZone by remember { mutableStateOf<ZoneItem?>(null) }
 
     val perf = LocalPerf.current
     val primary = MaterialTheme.ui.accent
@@ -253,9 +257,14 @@ fun EditorScreen(
             session.regenerateThumbs()
         }
         if (t == EditorTool.CROP) quadOnEnterCrop = session.edits.quad
+        if (t == EditorTool.PHOTOS) { zoneMode = ZoneMode.SELECT; selectedZone = null; session.loadPhotos() }
         erasing = false
         tool = t
     }
+
+    // Con la herramienta de imágenes abierta, si cambia algo que no son las zonas a mano (giro, filtro…), se vuelven a buscar
+    val photosKey = if (tool == EditorTool.PHOTOS && !session.loading) com.scannerpromax.imaging.PhotoZoneMath.layersKey(session.edits) else null
+    LaunchedEffect(photosKey) { if (photosKey != null) { selectedZone = null; session.loadPhotos() } }
 
     /** Guarda (si hay cambios) y después ejecuta [after]. */
     fun saveThen(after: () -> Unit) {
@@ -395,6 +404,34 @@ fun EditorScreen(
                         secondary = secondary,
                         error = errorColor,
                     )
+                    tool == EditorTool.PHOTOS && session.preview != null -> PhotoZonesTool(
+                        image = session.preview!!,
+                        items = zoneItems(session.photoAuto.orEmpty(), session.edits.photoZones),
+                        selected = selectedZone,
+                        mode = zoneMode,
+                        accent = primary,
+                        onSelect = { selectedZone = it },
+                        onChange = { item, z ->
+                            val cur = session.edits.photoZones
+                            when (item.kind) {
+                                ZoneKind.MANUAL -> session.setPhotoZones(com.scannerpromax.imaging.PhotoZoneMath.replaceManual(cur, item.index, z))
+                                else -> {
+                                    // caja automática ajustada a mano: queda como zona a mano (la automática, descartada)
+                                    val nz = com.scannerpromax.imaging.PhotoZoneMath.adjustAuto(cur, item.zone, z)
+                                    session.setPhotoZones(nz)
+                                    selectedZone = nz?.manual?.lastIndex?.takeIf { it >= 0 }?.let { ZoneItem(ZoneKind.MANUAL, nz.manual[it], it) }
+                                    return@PhotoZonesTool
+                                }
+                            }
+                            selectedZone = ZoneItem(item.kind, z, item.index)
+                        },
+                        onAdd = { z ->
+                            val nz = com.scannerpromax.imaging.PhotoZoneMath.addManual(session.edits.photoZones, z)
+                            session.setPhotoZones(nz)
+                            zoneMode = ZoneMode.SELECT
+                            selectedZone = nz?.manual?.lastIndex?.takeIf { it >= 0 }?.let { ZoneItem(ZoneKind.MANUAL, nz.manual[it], it) }
+                        },
+                    )
                     erasing && session.preview != null -> EraseTool(
                         image = session.preview!!,
                         strokes = session.edits.eraseStrokes,
@@ -474,7 +511,7 @@ fun EditorScreen(
                             onFull = { session.setWorkingQuad(null) },
                             onReset = { session.update(session.edits.copy(quad = session.savedEdits.quad, manualQuad = session.savedEdits.manualQuad), refresh = false) },
                         )
-                        EditorTool.FILTERS -> FiltersPanel(session, onApplyAll = if (canApplyAll) ({ applyToAll(BulkKind.FILTER) }) else null)
+                        EditorTool.FILTERS -> FiltersPanel(session, onApplyAll = if (canApplyAll) ({ applyToAll(BulkKind.FILTER) }) else null, onEditPhotos = { selectTool(EditorTool.PHOTOS) })
                         EditorTool.CLEAN -> CleanPanel(
                             session,
                             onManual = {
@@ -493,6 +530,13 @@ fun EditorScreen(
                             onLeft = { session.rotate(clockwise = false) },
                             onRight = { session.rotate(clockwise = true) },
                         )
+                        EditorTool.PHOTOS -> PhotosPanel(
+                            session = session,
+                            selected = selectedZone,
+                            mode = zoneMode,
+                            onMode = { zoneMode = if (zoneMode == it) ZoneMode.SELECT else it; selectedZone = null },
+                            onSelected = { selectedZone = it },
+                        )
                     }
                 }
             }
@@ -502,7 +546,7 @@ fun EditorScreen(
                 Modifier
                     .fillMaxWidth()
                     .navigationBarsPadding()
-                    .padding(start = 24.dp, end = 24.dp, top = 10.dp, bottom = 12.dp),
+                    .padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 12.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 EditorTool.entries.forEach { t ->
@@ -537,6 +581,94 @@ fun EditorScreen(
             ),
         )
     }
+    }
+}
+
+/**
+ * Recuadros de «Imágenes de la página»: cajas automáticas (aplicadas o descartadas; las sustituidas por una zona a mano no
+ * se muestran) y zonas a mano. Todo en el marco final normalizado.
+ */
+internal fun zoneItems(auto: List<com.scannerpromax.domain.PhotoZone>, z: com.scannerpromax.domain.PhotoZones?): List<ZoneItem> {
+    val m = com.scannerpromax.imaging.PhotoZoneMath
+    val active = m.activeAuto(auto.map { m.box(it) }, z)
+    val manualPhotos = z?.manual.orEmpty().filter { it.normal != true }
+    val autos = auto.mapIndexedNotNull { i, a ->
+        when {
+            active.any { m.same(it, a) } -> ZoneItem(ZoneKind.AUTO, a, i)
+            manualPhotos.any { m.same(it, a) } -> null
+            else -> ZoneItem(ZoneKind.EXCLUDED, a, i)
+        }
+    }
+    return autos + z?.manual.orEmpty().mapIndexed { i, mz -> ZoneItem(ZoneKind.MANUAL, mz, i) }
+}
+
+/**
+ * Panel de «Imágenes de la página»: estado, acciones de la imagen elegida («No es una imagen», «Sí es una imagen»,
+ * «Foto natural» / «Como el resto», «Quitar zona») y las globales («Añadir zona», «Lazo», «Aquí no hay imágenes»,
+ * «Detectar de nuevo»).
+ */
+@Composable
+private fun PhotosPanel(session: EditorSession, selected: ZoneItem?, mode: ZoneMode, onMode: (ZoneMode) -> Unit, onSelected: (ZoneItem?) -> Unit) {
+    val m = com.scannerpromax.imaging.PhotoZoneMath
+    val z = session.edits.photoZones
+    val auto = session.photoAuto
+    val items = zoneItems(auto.orEmpty(), z)
+    val nPhotos = items.count { it.kind == ZoneKind.AUTO || (it.kind == ZoneKind.MANUAL && it.zone.normal != true) }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        val status = when {
+            !session.photoFilter -> "Las imágenes se tratan aparte en «Color natural» y «Blanco y negro»."
+            session.photoLoading || auto == null -> "Buscando imágenes en la página…"
+            mode == ZoneMode.RECT -> "Arrastra sobre la página para marcar la zona de imagen."
+            mode == ZoneMode.LASSO -> "Rodea con el dedo la zona de imagen."
+            selected != null -> when (selected.kind) {
+                ZoneKind.AUTO -> "Imagen detectada: quítala o arrastra sus esquinas y lados para ajustarla."
+                ZoneKind.EXCLUDED -> "Descartada: se procesa como el resto de la página."
+                ZoneKind.MANUAL -> "Zona a mano: muévela, ajústala o elige su tratamiento."
+            }
+            z?.none == true && nPhotos == 0 -> "Aquí no hay imágenes: toda la página se procesa igual."
+            nPhotos == 0 -> "No se detectaron imágenes. Puedes añadir una zona."
+            else -> "$nPhotos ${if (nPhotos == 1) "imagen" else "imágenes"} con filtro de foto. Toca una para cambiarla."
+        }
+        Text(status, color = Color.White.copy(alpha = 0.65f), fontSize = 12.sp, style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center,
+            modifier = Modifier.padding(bottom = 6.dp))
+        // acciones de la imagen elegida
+        if (selected != null && mode == ZoneMode.SELECT) {
+            Row(horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                when (selected.kind) {
+                    ZoneKind.AUTO -> TextAction("No es una imagen", {
+                        session.setPhotoZones(m.excludeAuto(z, selected.zone)); onSelected(null)
+                    }, highlighted = true)
+                    ZoneKind.EXCLUDED -> TextAction("Sí es una imagen", {
+                        // con «Aquí no hay imágenes», sólo vuelve ésta (las demás quedan descartadas)
+                        val base = if (z?.none == true) com.scannerpromax.domain.PhotoZones(manual = z.manual,
+                            excluded = auto.orEmpty().filter { !m.same(it, selected.zone) }) else z
+                        session.setPhotoZones(m.restoreAuto(base, selected.zone)); onSelected(null)
+                    }, highlighted = true)
+                    ZoneKind.MANUAL -> {
+                        val natural = selected.zone.normal != true
+                        TextAction("Foto natural", {
+                            if (!natural) { val nz = selected.zone.copy(normal = null); session.setPhotoZones(m.replaceManual(z, selected.index, nz)); onSelected(selected.copy(zone = nz)) }
+                        }, highlighted = natural)
+                        TextAction("Como el resto", {
+                            if (natural) { val nz = selected.zone.copy(normal = true); session.setPhotoZones(m.replaceManual(z, selected.index, nz)); onSelected(selected.copy(zone = nz)) }
+                        }, highlighted = !natural)
+                        Text("·", color = Color.White.copy(alpha = 0.5f), fontSize = 13.sp)
+                        TextAction("Quitar zona", { session.setPhotoZones(m.removeManual(z, selected.index)); onSelected(null) })
+                    }
+                }
+            }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            val on = session.photoFilter && !session.photoLoading
+            PanelButton(AppIcons.Plus, if (mode == ZoneMode.RECT) "Cancelar" else "Añadir zona", Modifier.weight(1f), enabled = on) { onMode(ZoneMode.RECT) }
+            PanelButton(AppIcons.Wand, if (mode == ZoneMode.LASSO) "Cancelar" else "Lazo", Modifier.weight(1f), enabled = on) { onMode(ZoneMode.LASSO) }
+            PanelButton(AppIcons.Close, "Aquí no hay", Modifier.weight(1f), enabled = on && !(z?.none == true && z.manual.isEmpty())) {
+                session.setPhotoZones(m.noPhotos()); onSelected(null)
+            }
+            PanelButton(AppIcons.Sparkles, "Detectar de nuevo", Modifier.weight(1f), enabled = on && z != null, busy = session.photoLoading) {
+                session.setPhotoZones(null); onSelected(null)
+            }
+        }
     }
 }
 
@@ -758,7 +890,7 @@ internal fun ToolTab(tool: EditorTool, selected: Boolean, enabled: Boolean, onCl
     val fg by animateColorAsState(if (selected) Color.White else Dim, label = "tabFg")
     Column(
         Modifier
-            .width(72.dp)
+            .width(64.dp)
             .clip(RoundedCornerShape(12.dp))
             .selectable(selected = selected, enabled = enabled, role = Role.Tab, onClick = onClick)
             .graphicsLayer { alpha = if (enabled) 1f else 0.4f }
@@ -831,7 +963,7 @@ private fun CropPanel(detecting: Boolean, invalid: Boolean, onAuto: () -> Unit, 
 }
 
 @Composable
-private fun FiltersPanel(session: EditorSession, onApplyAll: (() -> Unit)?) {
+private fun FiltersPanel(session: EditorSession, onApplyAll: (() -> Unit)?, onEditPhotos: () -> Unit = {}) {
     val edits = session.edits
     // Solo el filtro (estable entre movimientos de slider): las miniaturas no se recomponen al ajustar.
     // Los filtros antiguos de páginas guardadas se muestran como su equivalente visible.
@@ -870,6 +1002,8 @@ private fun FiltersPanel(session: EditorSession, onApplyAll: (() -> Unit)?) {
                     )
                 }
             }
+            // (las mismas imágenes, una a una: quitar, ajustar o añadir zonas)
+            TextAction(if (edits.photoZones != null) "Editar imágenes de la página • a mano" else "Editar imágenes de la página…", onEditPhotos)
         }
         val adj = edits.adjustments
         // Los ajustes finos van plegados por defecto: en pantallas pequeñas la imagen necesita el espacio.

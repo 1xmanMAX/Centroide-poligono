@@ -64,6 +64,10 @@ object ImageEnhancer {
         val layoutImages: List<FloatArray> = emptyList(),
         /** Fotos de la página ([com.scannerpromax.domain.PageEdits.photoMode]; 0 automático). */
         val photoMode: Int = 0,
+        /** Imágenes a mano ([com.scannerpromax.domain.PageEdits.photoZones]) en el marco de la geometría (el de la salida). */
+        val photoZones: com.scannerpromax.domain.PhotoZones? = null,
+        /** Informe de la capa de fotos (cajas automáticas y, si se piden, las capas para recomponer); null = nada. */
+        val photoReport: PhotoReport? = null,
         /**
          * Tablas localizadas por Jev ("Mejorar con Jev"), normalizadas 0..1 como [layoutImages] (y opcionalmente [4] = filas rayadas, [5] = columnas rayadas, 0/1): [TableLines] acepta líneas
          * más tenues dentro y completa la rejilla por las zonas quemadas por la luz. Vacía = como siempre.
@@ -119,9 +123,10 @@ object ImageEnhancer {
         applyBitmap(src, filter, adjustments, Options.default())
 
     /** Variante con perfil del dispositivo: [fast] = vista previa (sin des-ruido costoso ni super-resolución). */
-    fun apply(src: Bitmap, filter: FilterType, adjustments: Adjustments, tier: DeviceTier, fast: Boolean, keepRuling: Boolean = true, photoMode: Int = 0): Bitmap {
+    fun apply(src: Bitmap, filter: FilterType, adjustments: Adjustments, tier: DeviceTier, fast: Boolean, keepRuling: Boolean = true, photoMode: Int = 0,
+              photoZones: com.scannerpromax.domain.PhotoZones? = null): Bitmap {
         Cv.configureThreads(tier)
-        return applyBitmap(src, filter, adjustments, Options.of(tier, fast).copy(keepRuling = keepRuling, photoMode = photoMode))
+        return applyBitmap(src, filter, adjustments, Options.of(tier, fast).copy(keepRuling = keepRuling, photoMode = photoMode, photoZones = photoZones))
     }
 
     /**
@@ -214,6 +219,8 @@ object ImageEnhancer {
                 else -> applyFilter(src, filter, opt, analysis)
             }
             applyAdjustments(out, adj)
+            // (la capa base guardada no tiene los ajustes ni la inversión de la pizarra: no vale para recomponer)
+            if (darkBoard || adj != Adjustments()) opt.photoReport?.valid = false
             return out
         } finally {
             if (src !== rgb) src.release()
@@ -537,21 +544,23 @@ object ImageEnhancer {
             val st = if (k != 1.0) stats.scaled(k) else stats
             // capa base (render normal + bordes + líneas de tabla) y, encima, la capa de fotos ([PhotoLayer])
             var photos: List<Rect> = emptyList(); var white: DoubleArray? = null
+            var composed = false
             return@use PrintedPage.render(base, style, opt.fast, opt.maxPixels, st, sheetSides = opt.sheetSides, layoutImages = opt.layoutImages, photoMode = opt.photoMode,
-                photoSink = { p, w -> photos = p; white = w }).also {
+                photoSink = { p, w -> photos = p; white = w; composed = true }, photoZones = opt.photoZones).also {
                 cleanEdges(it, base, opt.sheetSides)
                 if (opt.keepRuling) restoreTableLines(it, base, st, opt, photos)
-                if (photos.isNotEmpty() && PrintedPage.PHOTO_LAYER) PhotoLayer.paste(it, base, photos, white)
+                if (composed && PrintedPage.PHOTO_LAYER && style != TextRegions.Style.COLOR) PhotoLayer.compose(it, base, photos, opt.photoZones, white, opt.photoReport)
             }
         }
         // Si la segmentación de cuaderno falla con una imagen atípica (no por memoria), la ruta que conserva todo
         try {
-            TextRegions.render(base, style, opt.fast, opt.keepRuling, opt.layoutImages, opt.photoMode)
+            TextRegions.render(base, style, opt.fast, opt.keepRuling, opt.layoutImages, opt.photoMode, opt.photoZones, opt.photoReport)
         } catch (e: Exception) {
             if (Cv.isOutOfMemory(e)) throw e
             val k = base.cols().toDouble() / max(1, rgb.cols())
             val st = stats?.let { if (k != 1.0) it.scaled(k) else it }
-            PrintedPage.render(base, style, opt.fast, opt.maxPixels, st, sheetSides = opt.sheetSides, layoutImages = opt.layoutImages, photoMode = opt.photoMode).also {
+            PrintedPage.render(base, style, opt.fast, opt.maxPixels, st, sheetSides = opt.sheetSides, layoutImages = opt.layoutImages, photoMode = opt.photoMode,
+                photoZones = opt.photoZones, photoReport = opt.photoReport?.also { r -> r.valid = false }).also {
                 cleanEdges(it, base, opt.sheetSides)
                 if (opt.keepRuling && st != null) restoreTableLines(it, base, st, opt)
             }
