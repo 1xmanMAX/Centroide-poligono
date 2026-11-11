@@ -370,3 +370,4 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
   3760 -> 2512 ms (-33 %), con OpenCV en 1 hilo 4167 -> 2924 ms; primera miniatura a ~1.4 s. 702 tests OK, assembleDebug OK.
   Notas: /tmp/claude-0/bench/notes_rendimiento.md. Falta: probar en móvil (tiempos reales por SoC, NNAPI/XNNPACK elegidos).
 - 2026-11-11: FUSIONADOS libre-fotos (zonas de imagen a mano, menos falsos positivos en zonas oscuras) y libre-rendimiento (Par, SocProfile, prioridad alta, vista rápida, OrtAccel NNAPI/XNNPACK, Ajustes › Rendimiento). Libre 1.5.0 (versionCode 6), release firmada, 718 tests OK. Falta probar en móvil (vista rápida, NNAPI, tiempos reales).
+- 2026-11-11: PinDesk (repo 1xmanMAX/pixpin_pro_android, commit 1f4a4ec en main, 0.205.1) ahora abre también com.scannerpromax.libre (antes solo buscaba com.scannerpromax). Falta: juntar main en restringida/play-store (bloqueado por permisos) y compilar su APK (el usuario lo hará).
