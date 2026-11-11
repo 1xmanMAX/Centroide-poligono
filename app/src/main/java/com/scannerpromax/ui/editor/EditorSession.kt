@@ -244,7 +244,12 @@ internal class EditorSession(
 
     /** Cambia las ediciones; [refresh] = recalcular la vista previa (no durante el arrastre de esquinas). */
     fun update(newEdits: PageEdits, refresh: Boolean = true) {
-        edits = newEdits
+        // otro recorte: las imágenes a mano se llevan al recorte nuevo (están en el marco del procesado)
+        val old = edits
+        edits = if (newEdits.photoZones != null && newEdits.photoZones == old.photoZones && newEdits.quad != old.quad) {
+            val p = page
+            newEdits.copy(photoZones = PhotoZoneMath.remapQuad(newEdits.photoZones, old, newEdits, p?.width ?: sourceWidth, p?.height ?: sourceHeight))
+        } else newEdits
         if (refresh) requestPreview()
     }
 

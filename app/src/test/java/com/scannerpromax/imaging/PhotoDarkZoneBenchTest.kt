@@ -33,12 +33,12 @@ class PhotoDarkZoneBenchTest {
 
     /** Todas las cajas ajustadas del último [detect] (px de la entrada) con sus medidas. */
     private var lastAll: List<Pair<Rect, PhotoBoxRefine.Found>> = emptyList()
-    private val tsv = StringBuilder("conjunto\tnombre\tetiqueta\tdecision\tfoto\tpapel\tgrano\tplano\tcolores\tmedio\ttop2\tmidT\tlow\thue\tcroma\thv\ttinta\n")
+    private val tsv = StringBuilder("conjunto\tnombre\tetiqueta\tdecision\tfoto\tpapel\tgrano\tplano\tcolores\tmedio\ttop2\tmidT\tlow\thue\tcroma\thv\ttinta\tmf\tosc\n")
 
     private fun row(set: String, name: String, label: Int, f: PhotoBoxRefine.Found) {
         val m = f.m; val n = f.nat ?: return
-        tsv.append("$set\t$name\t$label\t${if (f.photo) 1 else 0}\t%.3f\t%.3f\t%.3f\t%.3f\t${m.colors}\t%.3f\t%.3f\t%.3f\t%.2f\t%.3f\t%.3f\t%.3f\t%.3f\n"
-            .format(m.photo, m.paper, m.grain, m.flat, m.mid, m.top2, n.midT, n.lowStd, n.hueEnt, n.chroma, n.hv, n.ink))
+        tsv.append("$set\t$name\t$label\t${if (f.photo) 1 else 0}\t%.3f\t%.3f\t%.3f\t%.3f\t${m.colors}\t%.3f\t%.3f\t%.3f\t%.2f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\n"
+            .format(m.photo, m.paper, m.grain, m.flat, m.mid, m.top2, n.midT, n.lowStd, n.hueEnt, n.chroma, n.hv, n.ink, n.mf, n.dark))
     }
 
     /** Fotografías (px de la entrada) del render «Color natural» de [m] con las pistas [hints]; [log] = medidas de cada caja. */

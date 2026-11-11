@@ -155,14 +155,23 @@ object PhotoBoxRefine {
                 val m = metrics(mp, bb)
                 val bw = bb[2] - bb[0]; val bh = bb[3] - bb[1]
                 val big = min(bw, bh) >= MIN_SIDE * side && bw.toDouble() * bh >= MIN_AREA * w * h
-                val nat = if (big) runCatching { natural(an, bb) }.onFailure { if (Cv.isOutOfMemory(it)) throw it }.getOrNull() else null
+                val nat = if (big) runCatching { natural(an, bb, pm) }.onFailure { if (Cv.isOutOfMemory(it)) throw it }.getOrNull() else null
                 val rx0 = (fr0[0] * ow).roundToInt(); val ry0 = (fr0[1] * oh).roundToInt()
                 val rect = Cv.clampRect(Rect(rx0, ry0, (fr0[2] * ow).roundToInt() - rx0, (fr0[3] * oh).roundToInt() - ry0), ow, oh)
                 val fr = floatArrayOf(fr0[0].toFloat(), fr0[1].toFloat(), fr0[2].toFloat(), fr0[3].toFloat())
                 val jev = verdicts.map { iou(it.box, fr) to it.p }.filter { it.first >= 0.5 }.maxByOrNull { it.first }?.second
-                val local = PhotoMath.classify(m)
+                // clasificación por las medidas de siempre, corregida por los rasgos de imagen natural: lo que sólo parecía
+                // foto por el grano (sombra, fondo oscuro, huella, texto apretado) no lo es; una foto lisa con formas, sí
+                val local0 = PhotoMath.classify(m)
+                val veto = if (local0 != PhotoMath.Kind.NOT && nat != null) PhotoMath.naturalVeto(nat) else null
+                val local = when {
+                    veto != null -> PhotoMath.Kind.NOT
+                    local0 == PhotoMath.Kind.DOUBTFUL && nat != null && PhotoMath.naturalPhoto(m, nat) -> PhotoMath.Kind.PHOTO
+                    else -> local0
+                }
                 val (photo, why) = when {
                     !big -> false to "pequeña"
+                    veto != null -> false to "no es foto ($veto)"
                     local == PhotoMath.Kind.NOT -> false to "no es foto (local)"
                     jev != null && jev < JEV_NO -> false to "Jev: no es foto"
                     local == PhotoMath.Kind.PHOTO -> true to "foto (local)"
@@ -195,12 +204,17 @@ object PhotoBoxRefine {
         val hv: Double,
         /** Contraste de tinta: fracción de píxeles «tinta sobre papel» (≥ 35 niveles más oscuros que el máximo local de 9 px). */
         val ink: Double,
+        /** Energía de FRECUENCIA MEDIA (σ 1 -> 4) frente a la FINA (píxel -> σ 1): el grano del sensor amplificado en una
+         *  sombra es casi todo fino; una foto tiene bordes y formas (frecuencia media). */
+        val mf: Double = 1.0,
+        /** Gris mediano de la caja relativo al papel (0..1+): una zona oscura (sombra, fondo, objeto) queda baja. */
+        val dark: Double = 1.0,
     ) {
-        override fun toString() = "midT=%.2f low=%.1f hue=%.2f croma=%.2f hv=%.2f tinta=%.2f".format(midT, lowStd, hueEnt, chroma, hv, ink)
+        override fun toString() = "midT=%.2f low=%.1f hue=%.2f croma=%.2f hv=%.2f tinta=%.2f mf=%.2f osc=%.2f".format(midT, lowStd, hueEnt, chroma, hv, ink, mf, dark)
     }
 
     /** [Natural] de la caja [b] (x0, y0, x1, y1 exclusivo) de [an] (RGB 8UC3, escala de análisis). */
-    internal fun natural(an: Mat, b: IntArray): Natural? = MatBag().use { bag ->
+    internal fun natural(an: Mat, b: IntArray, pm: Double = 230.0): Natural? = MatBag().use { bag ->
         val bw = b[2] - b[0]; val bh = b[3] - b[1]
         // (sin un 4 % de borde, como [metrics])
         val r = Cv.clampRect(Rect(b[0] + (0.04 * bw).toInt(), b[1] + (0.04 * bh).toInt(), (0.92 * bw).toInt(), (0.92 * bh).toInt()), an.cols(), an.rows())
@@ -265,7 +279,18 @@ object PhotoBoxRefine {
             tot += m
             if (dy <= tan15 * dx || dx <= tan15 * dy) hvs += m
         }
-        Natural(midT, lowStd, hueEnt, col.toDouble() / n, if (tot <= 0) 0.33 else hvs / tot, ink.toDouble() / n)
+        // 5) frecuencia media frente a fina y oscuridad
+        val f = bag.mat(); g.convertTo(f, CvType.CV_32F)
+        val g1 = bag.mat(); Imgproc.GaussianBlur(f, g1, Size(0.0, 0.0), 1.0)
+        val g4 = bag.mat(); Imgproc.GaussianBlur(f, g4, Size(0.0, 0.0), 4.0)
+        val fine = bag.mat(); Core.subtract(f, g1, fine)
+        val midF = bag.mat(); Core.subtract(g1, g4, midF)
+        val sdF = bag.mat(); val mF = org.opencv.core.MatOfDouble(); val sF = org.opencv.core.MatOfDouble()
+        Core.meanStdDev(fine, mF, sF); val eFine = sF.toArray()[0]
+        Core.meanStdDev(midF, mF, sF); val eMid = sF.toArray()[0]
+        mF.release(); sF.release(); sdF.release()
+        val dark = Cv.percentile(Cv.histogram(g), 0.5) / max(1.0, pm)
+        Natural(midT, lowStd, hueEnt, col.toDouble() / n, if (tot <= 0) 0.33 else hvs / tot, ink.toDouble() / n, eMid / max(0.3, eFine), dark)
     }
 
     /** Sólo los rectángulos de las fotografías. */
@@ -652,6 +677,40 @@ object PhotoMath {
         }
         return kotlin.math.sqrt(ss / n)
     }
+
+    /**
+     * Rasgos de imagen natural ([PhotoBoxRefine.Natural]) que dicen que la caja NO es una fotografía aunque las medidas de
+     * siempre lo parezcan (motivo, o null). Ajustado en el banco de zonas oscuras (PhotoDarkZoneBenchTest: 78 páginas
+     * sintéticas con sombras, viñeteado, doblez, celdas y cabeceras oscuras, dedo, fondo oscuro, objetos; 108 capturas
+     * reales de documentos; 56 fotos naturales), sin perder ninguna foto de verdad etiquetada:
+     *  - trazos: casi todo el contraste es tinta sobre fondo (texto, recibos, cabeceras con letras, códigos);
+     *  - rayas: el gradiente es horizontal/vertical (texto, códigos de barras, tablas);
+     *  - huella: mucha tinta fina y sin color (huellas dactilares, tramas);
+     *  - grano sin forma: gris, sin frecuencias medias (sólo el ruido del sensor que amplificó la división por el fondo
+     *    en una SOMBRA o en un fondo oscuro) y sin estructura grande;
+     *  - liso de un tono: un solo tono de color liso y sin estructura (dedo, mancha, sello de color macizo).
+     */
+    fun naturalVeto(n: PhotoBoxRefine.Natural): String? = when {
+        n.midT < NV_MIDT -> "trazos"
+        n.hv >= NV_HV -> "rayas"
+        n.ink >= NV_INK && n.chroma < 0.15 -> "huella o trama"
+        n.chroma < 0.1 && n.mf < NV_MF && n.lowStd < NV_LOW -> "sombra o fondo oscuro: grano sin forma"
+        n.chroma >= 0.1 && n.hueEnt < 0.35 && n.lowStd < 9 -> "zona lisa de un solo tono"
+        else -> null
+    }
+
+    /**
+     * Foto DUDOSA por las medidas de siempre (foto digital lisa, sin grano de impresión) que los rasgos de imagen natural
+     * confirman: estructura grande, tonos continuos, frecuencias medias, sin rayas ni tinta, casi sin papel.
+     */
+    fun naturalPhoto(m: PhotoBoxRefine.Metrics, n: PhotoBoxRefine.Natural): Boolean =
+        n.lowStd >= 14 && n.midT in 0.36..0.7 && n.mf >= 2.0 && n.hv < 0.6 && n.ink < 0.6 && m.paper <= 0.12 && m.photo >= 0.85
+
+    const val NV_MIDT = 0.26
+    const val NV_HV = 0.85
+    const val NV_INK = 0.7
+    const val NV_MF = 1.8
+    const val NV_LOW = 20.0
 
     /** ¿Se tocan los rectángulos (intersección no vacía)? */
     fun overlaps(a: Rect, b: Rect): Boolean =
