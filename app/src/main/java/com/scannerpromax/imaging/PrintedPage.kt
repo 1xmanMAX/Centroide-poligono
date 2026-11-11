@@ -363,7 +363,7 @@ internal object PrintedPage {
      * de la salida (la ampliación de la letra pequeña no lo supera). COLOR -> 8UC3, BLACK_WHITE -> 8UC1.
      */
     fun render(rgb: Mat, style: TextRegions.Style, fast: Boolean, maxPixels: Int, stats: Stats? = null, sheetSides: Int = 0, layoutImages: List<FloatArray> = emptyList(), photoMode: Int = 0,
-               photoSink: ((List<Rect>, DoubleArray?) -> Unit)? = null): Mat = MatBag().use { bag ->
+               photoSink: ((List<Rect>, DoubleArray?) -> Unit)? = null, photoZones: com.scannerpromax.domain.PhotoZones? = null, photoReport: PhotoReport? = null): Mat = MatBag().use { bag ->
         val st = stats ?: analyze(rgb)
         val w = rgb.cols(); val h = rgb.rows()
         val color = style == TextRegions.Style.COLOR
@@ -447,7 +447,7 @@ internal object PrintedPage {
         // va entera, pegada en su recuadro exacto). Color natural: ningún bloque (texto, firmas, sellos y logos con su
         // tinta sobre blanco). Las fotografías se pegan después encima ([PhotoLayer.paste]).
         val images = if (natural) emptyList() else blocks.filter { b -> photos.none { p -> PhotoMath.overlaps(b, p) } }
-        val photoWhite = if (photos.isEmpty()) null else runCatching { PhotoLayer.paperWhite(rgb, smNz, pm) }.onFailure { if (Cv.isOutOfMemory(it)) throw it }.getOrNull()
+        val photoWhite = if (photos.isEmpty() && !hasManualPhotos(photoZones)) null else runCatching { PhotoLayer.paperWhite(rgb, smNz, pm) }.onFailure { if (Cv.isOutOfMemory(it)) throw it }.getOrNull()
         onImages?.invoke(images, ow, oh)
         val outsideFull = if (outside == null) null else bag.mat().also { Imgproc.resize(outside, it, Size(ow.toDouble(), oh.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR) }
         // Sombras: la división por el fondo amplifica el ruido del papel (ganancia g) -> el punto blanco local baja
@@ -595,9 +595,12 @@ internal object PrintedPage {
         } else out
         // capa de fotos: quien llama la pega al final (tras sus retoques de la capa base) o, sin él, aquí
         if (photoSink != null) photoSink(photos, photoWhite)
-        else if (photos.isNotEmpty() && PHOTO_LAYER) PerfTrace.stage("capa de fotos") { PhotoLayer.paste(base, rgb, photos, photoWhite) }
+        else if (PHOTO_LAYER && !color) PerfTrace.stage("capa de fotos") { PhotoLayer.compose(base, rgb, photos, photoZones, photoWhite, photoReport) }
         base
     }
+
+    /** ¿Hay zonas de foto dibujadas a mano? (hace falta el blanco del papel aunque no haya fotos automáticas). */
+    internal fun hasManualPhotos(z: com.scannerpromax.domain.PhotoZones?): Boolean = z?.manual?.any { it.normal != true } == true
 
     /** Capa de fotos ([PhotoLayer]); false = sólo la capa base (test de identidad, banco). */
     @Volatile internal var PHOTO_LAYER = true

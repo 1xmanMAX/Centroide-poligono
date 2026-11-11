@@ -149,7 +149,47 @@ data class PageEdits(
      * mismo que [rotation] (lo de siempre); al ser null no se serializa y el hash guardado no cambia.
      */
     val geoRotation: Int? = null,
+    /**
+     * «Imágenes de la página» a mano ([PhotoZones]): zonas de imagen dibujadas, cajas automáticas descartadas («No es una
+     * imagen») y «Aquí no hay imágenes». null = todo automático; al ser null no se serializa y el hash guardado no cambia.
+     */
+    val photoZones: PhotoZones? = null,
 )
+
+/**
+ * Zona de imagen de la página: recuadro NORMALIZADO 0..1 ([x0], [y0], [x1], [y1]) en el marco FINAL del procesado (lo que
+ * ve el usuario, con el giro ya aplicado, igual que los trazos de borrado). [poly] = contorno libre opcional (lazo; puntos
+ * normalizados del mismo marco, dentro del recuadro): sólo se trata lo de dentro. [normal] = true: la zona se procesa
+ * «como el resto» (sin filtro de foto aunque la detección automática la viera como foto); null = foto natural.
+ */
+@Serializable
+data class PhotoZone(
+    val x0: Float,
+    val y0: Float,
+    val x1: Float,
+    val y1: Float,
+    val poly: List<Pt>? = null,
+    val normal: Boolean? = null,
+) {
+    val width: Float get() = x1 - x0
+    val height: Float get() = y1 - y0
+}
+
+/**
+ * Control manual de las imágenes de una página (editor › «Imágenes»). Lo manual manda sobre lo automático:
+ *  - [none] = true: «Aquí no hay imágenes» (ninguna caja automática; las zonas de [manual] sí se aplican);
+ *  - [excluded]: cajas automáticas descartadas con «No es una imagen» (se procesan como el resto);
+ *  - [manual]: zonas dibujadas o ajustadas a mano (foto natural o, con [PhotoZone.normal], como el resto).
+ */
+@Serializable
+data class PhotoZones(
+    val manual: List<PhotoZone> = emptyList(),
+    val excluded: List<PhotoZone> = emptyList(),
+    val none: Boolean? = null,
+) {
+    /** ¿Sin nada manual? (entonces [PageEdits.photoZones] vuelve a null: hash de siempre). */
+    val isEmpty: Boolean get() = manual.isEmpty() && excluded.isEmpty() && none != true
+}
 
 /**
  * Recorte de una cara del DNI: [quad] NORMALIZADO 0..1 sobre su foto original (con la orientación EXIF aplicada). La

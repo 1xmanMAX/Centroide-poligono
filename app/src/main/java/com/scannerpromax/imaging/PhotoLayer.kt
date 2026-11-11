@@ -87,6 +87,74 @@ object PhotoLayer {
         }
     }
 
+    /**
+     * Capa de fotos con las imágenes a mano ([com.scannerpromax.domain.PageEdits.photoZones], ya en el marco de [out]):
+     * las cajas automáticas [auto] (px de [out]) menos las descartadas, más las zonas manuales; las zonas «como el resto»
+     * se quedan con la capa base. [report] recibe las cajas automáticas (normalizadas, ANTES de las zonas a mano) y, si las
+     * pide, copias de la capa base y de la imagen de origen para recomponer después sin reprocesar ([recompose]).
+     */
+    fun compose(out: Mat, orig: Mat, auto: List<Rect>, zones: com.scannerpromax.domain.PhotoZones?, white: DoubleArray?, report: PhotoReport? = null) {
+        val w = out.cols(); val h = out.rows()
+        val autoN = auto.map { r -> floatArrayOf(r.x.toFloat() / w, r.y.toFloat() / h, (r.x + r.width).toFloat() / w, (r.y + r.height).toFloat() / h) }
+        if (report != null) {
+            report.auto = autoN; report.outW = w; report.outH = h; report.white = white
+            if (report.keepLayers) {
+                report.base?.release(); report.orig?.release()
+                report.base = out.clone()
+                report.orig = if (orig.channels() == 4) Mat().also { Imgproc.cvtColor(orig, it, Imgproc.COLOR_RGBA2RGB) } else orig.clone()
+            }
+        }
+        val res = PhotoZoneMath.resolve(autoN, zones)
+        if (res.isEmpty) return
+        pasteZones(out, orig, res, white)
+    }
+
+    /**
+     * RECOMPOSICIÓN sin reprocesar: [base] (capa base guardada, se modifica) + la capa de fotos con las cajas automáticas
+     * [auto] (normalizadas, marco de [base]) y las zonas a mano [zones] (mismo marco), recortadas de [orig] (la página
+     * rectificada, cualquier escala). Da lo mismo que el render completo con esas zonas ([compose]).
+     */
+    fun recompose(base: Mat, orig: Mat, auto: List<List<Float>>, zones: com.scannerpromax.domain.PhotoZones?, white: DoubleArray?) {
+        val res = PhotoZoneMath.resolve(auto.filter { it.size >= 4 }.map { b -> floatArrayOf(b[0], b[1], b[2], b[3]) }, zones)
+        if (!res.isEmpty) pasteZones(base, orig, res, white)
+    }
+
+    /** Pega [res] (normalizado al marco de [out]): fotos (con su contorno libre, si lo tienen) y luego las zonas que se quedan con la base. */
+    fun pasteZones(out: Mat, orig: Mat, res: PhotoZoneMath.Resolved, white: DoubleArray?) = MatBag().use { bag ->
+        val w = out.cols(); val h = out.rows()
+        // (redondeo: una caja automática en px -> normalizada -> px vuelve exacta)
+        fun px(z: com.scannerpromax.domain.PhotoZone): Rect {
+            val x0 = (z.x0 * w.toDouble()).roundToInt(); val y0 = (z.y0 * h.toDouble()).roundToInt()
+            return Cv.clampRect(Rect(x0, y0, (z.x1 * w.toDouble()).roundToInt() - x0, (z.y1 * h.toDouble()).roundToInt() - y0), w, h)
+        }
+        // máscara 8U del contorno libre de [z] dentro de su recuadro [r] (null = todo el recuadro)
+        fun mask(z: com.scannerpromax.domain.PhotoZone, r: Rect): Mat? {
+            val poly = z.poly?.takeIf { it.size >= 3 } ?: return null
+            val m = bag.add(Mat.zeros(r.height, r.width, CvType.CV_8U))
+            val pts = org.opencv.core.MatOfPoint(*poly.map { org.opencv.core.Point(it.x * w.toDouble() - r.x, it.y * h.toDouble() - r.y) }.toTypedArray())
+            Imgproc.fillPoly(m, listOf(pts), Scalar(255.0), Imgproc.LINE_AA); pts.release()
+            return m
+        }
+        // (lo de las zonas «como el resto», antes de pegar nada)
+        val keeps = res.keep.mapNotNull { z -> px(z).takeIf { it.width > 0 && it.height > 0 }?.let { r -> Triple(z, r, bag.add(out.submat(r).clone())) } }
+        for (z in res.photos) {
+            val r = px(z); if (r.width < 4 || r.height < 4) continue
+            val m = mask(z, r)
+            val before = if (m != null) bag.add(out.submat(r).clone()) else null
+            paste(out, orig, listOf(r), white)
+            if (m != null && before != null) {
+                // fuera del contorno, la capa base
+                val inv = bag.mat(); Core.bitwise_not(m, inv)
+                val dst = bag.add(out.submat(r)); before.copyTo(dst, inv)
+            }
+        }
+        for ((z, r, snap) in keeps) {
+            val dst = bag.add(out.submat(r))
+            val m = mask(z, r)
+            if (m != null) snap.copyTo(dst, m) else snap.copyTo(dst)
+        }
+    }
+
     /** Copia [patch] en [r] de [out] con un fundido de [FEATHER] px hacia dentro (nada fuera de [r]). */
     private fun blendInto(out: Mat, r: Rect, patch: Mat, bag: MatBag) {
         val dst = bag.add(out.submat(r))
@@ -154,6 +222,27 @@ object PhotoLayer {
         val out = bag.mat(); dn.convertTo(out, CvType.CV_8UC3, 255.0)
         return out
     }
+}
+
+/**
+ * Informe de la capa de fotos de UN render (lo rellena [PhotoLayer.compose]): cajas automáticas de [PhotoBoxRefine]
+ * (normalizadas al marco de la salida, antes de las zonas a mano: el editor las muestra) y, con [keepLayers], la capa
+ * BASE (sin fotos) y la imagen de ORIGEN de las fotos, para recomponer sólo la capa de fotos cuando cambian las zonas a
+ * mano ([com.scannerpromax.domain.PageEdits.photoZones]). [valid] = false si algo de la tubería va DESPUÉS de la capa de
+ * fotos (ajustes, pizarra invertida, limpieza): entonces la base guardada no vale para recomponer.
+ */
+class PhotoReport(val keepLayers: Boolean = false) {
+    @Volatile var auto: List<FloatArray> = emptyList()
+    @Volatile var outW = 0
+    @Volatile var outH = 0
+    @Volatile var white: DoubleArray? = null
+    @Volatile var base: Mat? = null
+    @Volatile var orig: Mat? = null
+    @Volatile var valid = true
+    /** ¿Pasó por la capa de fotos? (filtros sin ella: ni cajas ni capas). */
+    val composed: Boolean get() = outW > 0
+
+    fun release() { base?.release(); orig?.release(); base = null; orig = null }
 }
 
 /** Partes puras (testeables sin OpenCV) del filtro de foto ([PhotoLayer.filter]). */

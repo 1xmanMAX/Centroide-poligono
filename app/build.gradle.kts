@@ -263,6 +263,8 @@ tasks.withType<Test>().configureEach {
         "oriBench" to "ori.bench", "oriModel" to "ori.model",
         // CardOrientationBenchTest (orientación de las caras del DNI, sintético): -PcardOriBench=salida.md
         "cardOriBench" to "card.ori.bench",
+        // PhotoDarkZoneBenchTest (fotos frente a zonas oscuras): -PfotosBench=salida.md [-PfotosNat=DIR] [-PfotosReal=DIR] [-PfotosSeeds=N]
+        "fotosBench" to "fotos.bench", "fotosNat" to "fotos.nat", "fotosReal" to "fotos.real", "fotosSeeds" to "fotos.seeds", "fotosRealLabels" to "fotos.realLabels", "fotosOnly" to "fotos.only",
         // PipelineBenchTest (banco de rendimiento de la cadena completa): -PperfBench=DIR [-PperfLabel=antes] [-PperfReps=2]
         // [-PperfOnly=texto] [-PperfGolden=reset]
         "perfBench" to "perf.bench", "perfLabel" to "perf.label", "perfReps" to "perf.reps", "perfOnly" to "perf.only",

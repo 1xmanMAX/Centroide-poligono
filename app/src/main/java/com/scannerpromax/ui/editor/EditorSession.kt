@@ -15,6 +15,8 @@ import com.scannerpromax.domain.EraseStroke
 import com.scannerpromax.domain.FilterType
 import com.scannerpromax.domain.Page
 import com.scannerpromax.domain.PageEdits
+import com.scannerpromax.domain.PhotoZone
+import com.scannerpromax.domain.PhotoZones
 import com.scannerpromax.domain.Pt
 import com.scannerpromax.domain.Quad
 import com.scannerpromax.imaging.BitmapIO
@@ -22,6 +24,7 @@ import com.scannerpromax.imaging.DeviceProfiler
 import com.scannerpromax.imaging.ImageEnhancer
 import com.scannerpromax.imaging.PageRotation
 import com.scannerpromax.imaging.PerspectiveCorrector
+import com.scannerpromax.imaging.PhotoZoneMath
 import androidx.compose.ui.graphics.asAndroidBitmap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -107,6 +110,18 @@ internal class EditorSession(
     var detecting by mutableStateOf(false)
         private set
     val filterThumbs = mutableStateMapOf<FilterType, ImageBitmap>()
+
+    /** «Imágenes de la página»: cajas automáticas (marco final) de las ediciones [photoKey]; null = aún no se buscaron. */
+    var photoAuto by mutableStateOf<List<PhotoZone>?>(null)
+        private set
+    /** Buscando las imágenes (un render completo la primera vez). */
+    var photoLoading by mutableStateOf(false)
+        private set
+    /** ¿Cada cambio de las zonas a mano se recompone al instante? (capas guardadas) */
+    var photoFast by mutableStateOf(false)
+        private set
+    private var photoKey: PageEdits? = null
+    private var photoJob: Job? = null
 
     /** Pila de rehacer para los trazos de borrado. */
     private val redoStack = ArrayList<EraseStroke>()
@@ -229,7 +244,12 @@ internal class EditorSession(
 
     /** Cambia las ediciones; [refresh] = recalcular la vista previa (no durante el arrastre de esquinas). */
     fun update(newEdits: PageEdits, refresh: Boolean = true) {
-        edits = newEdits
+        // otro recorte: las imágenes a mano se llevan al recorte nuevo (están en el marco del procesado)
+        val old = edits
+        edits = if (newEdits.photoZones != null && newEdits.photoZones == old.photoZones && newEdits.quad != old.quad) {
+            val p = page
+            newEdits.copy(photoZones = PhotoZoneMath.remapQuad(newEdits.photoZones, old, newEdits, p?.width ?: sourceWidth, p?.height ?: sourceHeight))
+        } else newEdits
         if (refresh) requestPreview()
     }
 
@@ -251,6 +271,56 @@ internal class EditorSession(
     }
 
     fun setFilter(f: FilterType) = update(edits.copy(filter = f))
+
+    // ---------------------------------------------------------------------------------------------
+    // Imágenes de la página (zonas de foto a mano)
+    // ---------------------------------------------------------------------------------------------
+
+    /** ¿Tienen tratamiento de foto las imágenes con el filtro actual? (Color natural y B/N) */
+    val photoFilter: Boolean get() = edits.filter.uiFilter == FilterType.NATURAL || edits.filter.uiFilter == FilterType.BLACK_WHITE
+
+    /**
+     * Carga (o busca) las imágenes de la página para las ediciones actuales: cajas automáticas y capas para recomponer.
+     * Sólo se repite si cambia algo que no son las zonas a mano (filtro, recorte, giro…).
+     */
+    fun loadPhotos(force: Boolean = false) {
+        val key = PhotoZoneMath.layersKey(edits)
+        if (!force && key == photoKey && (photoAuto != null || photoJob?.isActive == true)) return
+        photoKey = key
+        photoJob?.cancel()
+        if (!photoFilter) { photoAuto = emptyList(); photoFast = false; return }
+        photoAuto = null
+        photoJob = scope.launch {
+            photoLoading = true
+            try {
+                // (el render en segundo plano de estas mismas ediciones ya no hace falta: lo hace este)
+                cancelDraft()
+                withContext(Dispatchers.Default) { work.withLock { processor.clearPreviewCache() } }
+                val e = edits
+                val st = container.documents.photoState(docId, pageId, e)
+                if (PhotoZoneMath.layersKey(edits) != key) return@launch
+                photoAuto = st.auto
+                photoFast = st.fast
+                // el render completo dejó el procesado de [e]: se muestra
+                val f = withContext(Dispatchers.IO) { container.documents.processedFileFor(docId, pageId, e) }
+                if (f != null) {
+                    finalFiles[e] = f
+                    if (edits == e) { editsFlow.value = null; requestPreview() }
+                }
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                Log.w(TAG, "No se pudieron buscar las imágenes", t)
+                photoAuto = emptyList()
+            } finally {
+                photoLoading = false
+            }
+        }
+    }
+
+    /** Cambia las zonas a mano (normalizadas; null = todo automático) y actualiza lo que se ve. */
+    fun setPhotoZones(z: PhotoZones?) = update(edits.copy(photoZones = PhotoZoneMath.normalized(z)))
+
     fun setAdjustments(a: Adjustments) = update(edits.copy(adjustments = a))
 
     /**
@@ -435,6 +505,24 @@ internal class EditorSession(
                         finalFiles.remove(e)
                     } finally {
                         previewBusy = false
+                    }
+                }
+                // a1) Sólo cambian las imágenes a mano y están las capas: se RECOMPONE la capa de fotos (resultado final real,
+                //     sin reprocesar la página)
+                if (photoFast && e.photoZones != null || finalFiles.keys.any { PhotoZoneMath.zonesOnly(it, e) }) {
+                    val rec = runCatching { container.documents.recomposeDraft(docId, pageId, e) }
+                        .onFailure { if (it is CancellationException) throw it; Log.w(TAG, "No se pudo recomponer", it) }.getOrNull()
+                    if (rec != null) {
+                        finalFiles[e] = rec
+                        val shown = withContext(Dispatchers.IO) { runCatching { decodeFinal(rec, side) }.getOrNull() }
+                        if (shown != null) {
+                            preview = shown.first.asImageBitmap()
+                            previewEdits = e
+                            previewFinal = true
+                            renderedSide = shown.second
+                            previewPending = false
+                            return@collectLatest
+                        }
                     }
                 }
                 // b) Vista previa aproximada (rápida + refinada) y, después, el render final en segundo plano.
@@ -632,7 +720,7 @@ internal class EditorSession(
             fastGeo = geo
             fastGeoKey = key
         }
-        return ImageEnhancer.apply(geo, e.filter, e.adjustments, tier, true, e.keepRuling, e.photoMode ?: 0)
+        return ImageEnhancer.apply(geo, e.filter, e.adjustments, tier, true, e.keepRuling, e.photoMode ?: 0, e.photoZones)
     }
 
     /** Miniaturas de cada filtro (~200 px) en segundo plano. Solo se rehacen si cambia la geometría. */
