@@ -36,6 +36,9 @@ object DevicePerf {
     val ortThreads: Int get() = policy.ortThreads
     /** Hilos de pdfsqueeze. */
     val squeezeThreads: Int get() = policy.squeezeThreads
+    /** ¿La app inició la política? (en los tests JVM no). */
+    val initializedForApp: Boolean get() = initialized
+
     /** Renders completos a la vez. */
     val parallelPages: Int get() = policy.parallelPages
 
@@ -107,15 +110,16 @@ object DevicePerf {
         val want = policy.workerPriority
         // solo se SUBE la prioridad (en Ahorro no se baja la de un hilo ajeno, p. ej. el de la interfaz)
         if (old != null && want < old) runCatching { Process.setThreadPriority(want) }
-        val hint = if (mode == PerfMode.SAVER) null else PerfHint.begin(appContext, intArrayOf(tid) + Par.workerTids(), mode)
-        PerfTrace.current?.hint = hint?.let { h -> { ns: Long -> PerfHint.report(h, ns) } }
+        // (anidado: la sesión de fuera ya informa)
+        val nested = PerfTrace.current?.hint != null
+        val hint = if (mode == PerfMode.SAVER || nested) null else PerfHint.begin(appContext, intArrayOf(tid) + Par.workerTids(), mode)
+        if (hint != null) PerfTrace.current?.hint = { ns: Long -> PerfHint.report(hint, ns) }
         return Boost(tid, if (old != null && want < old) old else null, hint)
     }
 
     @PublishedApi internal fun endBoost(b: Boost?) {
         b ?: return
-        PerfTrace.current?.hint = null
-        b.hint?.let { PerfHint.end(it) }
+        b.hint?.let { PerfTrace.current?.hint = null; PerfHint.end(it) }
         b.oldPrio?.let { runCatching { Process.setThreadPriority(it) } }
     }
 
@@ -139,6 +143,22 @@ object DevicePerf {
         t.start()
     }
 
+    @Volatile private var sustainedOn = false
+
+    /**
+     * Modo de rendimiento sostenido de la ventana ([android.view.Window.setSustainedPerformanceMode]) para tandas LARGAS en
+     * Máximo: el sistema fija frecuencias que se pueden mantener sin calentarse (menos pico, sin bajones). Solo si el equipo
+     * lo admite; se apaga al terminar la tanda.
+     */
+    fun sustained(window: android.view.Window?, on: Boolean) {
+        window ?: return
+        val want = on && mode == PerfMode.MAX
+        if (want == sustainedOn) return
+        val pm = appContext?.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
+        if (pm?.isSustainedPerformanceModeSupported != true) return
+        runCatching { window.setSustainedPerformanceMode(want); sustainedOn = want }
+    }
+
     /** Líneas de diagnóstico para Ajustes › Rendimiento. */
     fun diagnostics(): List<Pair<String, String>> {
         val p = policy
@@ -153,7 +173,8 @@ object DevicePerf {
             "Procesador" to s.name,
             "Núcleos" to "${s.totalCores}: ${s.clustersText()}",
             "Hilos" to "OpenCV ${p.cvThreads} · bucles ${p.bandThreads} · IA ${p.ortThreads} · PDF ${p.squeezeThreads} · ${p.parallelPages} ${if (p.parallelPages == 1) "página" else "páginas"} a la vez",
-            "Prioridad" to prio + if (Build.VERSION.SDK_INT >= 31 && mode != PerfMode.SAVER) " · PerformanceHint" else "",
+            "Prioridad" to prio + (if (Build.VERSION.SDK_INT >= 31 && mode != PerfMode.SAVER) " · PerformanceHint" else "") +
+                (if ((appContext?.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager)?.isSustainedPerformanceModeSupported == true) " · rendimiento sostenido en tandas" else ""),
             "GPU (OpenCL)" to Accel.openClStatus(),
             "IA (NNAPI / XNNPACK)" to Accel.ortStatus(),
             "Última página" to PerfTrace.summary(),

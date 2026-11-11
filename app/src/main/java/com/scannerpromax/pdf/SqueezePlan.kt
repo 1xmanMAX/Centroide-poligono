@@ -118,6 +118,14 @@ object SqueezePlan {
 
     // ------------------------------------------------------------------------------------ hilos y memoria
 
+    /**
+     * Hilos de pdfsqueeze: los de la política del procesador ([com.scannerpromax.imaging.DevicePerf], núcleos rápidos según
+     * el modo de Ajustes › Rendimiento) si está iniciada; si no, [threadsFor]. [fitThreads] los acota luego por memoria.
+     */
+    fun threadsForDevice(tier: DeviceTier): Int =
+        if (com.scannerpromax.imaging.DevicePerf.initializedForApp) com.scannerpromax.imaging.DevicePerf.squeezeThreads.coerceAtLeast(1)
+        else threadsFor(tier)
+
     /** Hilos según la gama: baja 1, media 2, alta la mitad de los núcleos (máx. 4). */
     fun threadsFor(tier: DeviceTier): Int = when {
         tier.isLowRam -> 1

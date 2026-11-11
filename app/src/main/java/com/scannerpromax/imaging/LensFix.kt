@@ -99,6 +99,7 @@ internal object LensFix {
         // 1) Modelo geométrico
         var map: LensMap? = null
         var how: String? = null
+        var chromaAhead: Par.Deferred<LensCorrection.Chroma?>? = null
         if (opt.geometry) {
             if (lens != null && lens.ispCorrected) notes += "ISP corrige la distorsión"
             val meta = if (lens != null && !lens.ispCorrected) lens.toImage(w, h) else null
@@ -114,14 +115,24 @@ internal object LensFix {
                 }
             }
             if (map == null && opt.selfCal && (lens == null || !lens.ispCorrected)) {
-                LensSelfCal.estimate(src) { f -> notes += "autocal k=%.4f %s".format(f.k, f.reason) }?.let { map = it; how = "autocalibrado" }
+                // El autocalibrado da un modelo de división (centro = centro de la foto): la estimación de la aberración
+                // cromática, que solo LEE la foto con ese mismo centro, se calcula a la vez ([Par.async]); se aplica después
+                val wantCa = opt.chroma && lens?.ispChromaCorrected != true
+                chromaAhead = if (wantCa) Par.async { runCatching { LensCorrection.chroma(src, (w - 1) / 2.0, (h - 1) / 2.0) }.getOrNull() } else null
+                try {
+                    LensSelfCal.estimate(src) { f -> notes += "autocal k=%.4f %s".format(f.k, f.reason) }?.let { map = it; how = "autocalibrado" }
+                } catch (t: Throwable) {
+                    chromaAhead?.join(); throw t   // (la estimación en paralelo aún lee la foto)
+                }
             }
         }
         // 2) Aberración cromática (antes del remap: el modelo es radial alrededor del centro óptico de la foto)
         var ca = false
         if (opt.chroma && lens?.ispChromaCorrected != true) {
             val (cx, cy) = (map as? LensMap.Brown)?.let { it.cx to it.cy } ?: ((w - 1) / 2.0 to (h - 1) / 2.0)
-            val est = runCatching { LensCorrection.chroma(src, cx, cy) }.getOrNull()
+            val ahead = chromaAhead
+            val est = if (ahead != null && map !is LensMap.Brown) runCatching { ahead.await() }.getOrNull()
+                else { ahead?.join(); runCatching { LensCorrection.chroma(src, cx, cy) }.getOrNull() }
             if (est != null) {
                 ca = LensCorrection.fixChroma(src, est)
                 notes += "CA %.2f px".format(est.fringe(w, h))

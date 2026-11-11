@@ -93,7 +93,7 @@ object OrtAccel {
         val tr = results.firstOrNull { it.ep == best }
         decisions[key] = Accel.Decision(best, tr?.ms ?: cpuMs, cpuMs, tr?.err ?: 0.0)
         store?.put(sk, best.name)
-        android.util.Log.i("OrtAccel", "$key: CPU %.1f ms; ".format(cpuMs) + results.joinToString { "${it.ep.label} %.1f ms err %.4f".format(it.ms, it.err) } + " -> ${best.label}")
+        runCatching { android.util.Log.i("OrtAccel", "$key: CPU %.1f ms; ".format(cpuMs) + results.joinToString { "${it.ep.label} %.1f ms err %.4f".format(it.ms, it.err) } + " -> ${best.label}") }
         return chosen
     }
 
@@ -134,17 +134,18 @@ object OrtAccel {
     }
 
     /**
-     * Prueba genérica: entradas float con la forma de la sesión ([dims] para las dimensiones variables, en orden) rellenas
-     * con un patrón fijo; devuelve la primera salida float aplanada.
+     * Prueba genérica: entradas float con la forma de la sesión (dimensión variable del eje i -> [dim](i)) rellenas con un
+     * patrón fijo; devuelve la primera salida float aplanada. Una entrada no float (p. ej. anchos int64) hace fallar la
+     * prueba: entonces se usa la CPU.
      */
-    fun imageProbe(env: OrtEnvironment, dims: LongArray): (OrtSession) -> FloatArray = { s ->
+    fun imageProbe(env: OrtEnvironment, dim: (Int) -> Long): (OrtSession) -> FloatArray = { s ->
         val tensors = ArrayList<OnnxTensor>()
         try {
             val feed = HashMap<String, OnnxTensor>()
             for ((name, info) in s.inputInfo) {
                 val ti = info.info as? ai.onnxruntime.TensorInfo ?: error("entrada no tensor")
-                var k = 0
-                val shape = LongArray(ti.shape.size) { i -> if (ti.shape[i] > 0) ti.shape[i] else dims.getOrElse(k++) { 1L } }
+                require(ti.type == ai.onnxruntime.OnnxJavaType.FLOAT) { "entrada no float" }
+                val shape = LongArray(ti.shape.size) { i -> if (ti.shape[i] > 0) ti.shape[i] else dim(i) }
                 val n = shape.fold(1L) { a, b -> a * b }.toInt()
                 val data = FloatArray(n) { i -> (((i * 2654435761L) ushr 7) and 0xFF).toFloat() / 255f }
                 val t = OnnxTensor.createTensor(env, FloatBuffer.wrap(data), shape)
@@ -157,5 +158,8 @@ object OrtAccel {
             }
         } finally { tensors.forEach { it.close() } }
     }
+
+    /** [imageProbe] con forma fija [dims] (para las dimensiones variables, por eje). */
+    fun imageProbe(env: OrtEnvironment, dims: LongArray): (OrtSession) -> FloatArray = imageProbe(env) { i -> dims.getOrElse(i) { 1L } }
 
 }

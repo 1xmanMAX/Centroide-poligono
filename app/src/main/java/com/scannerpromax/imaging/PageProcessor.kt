@@ -49,13 +49,21 @@ class PageProcessor(val tier: DeviceTier) {
         jev: ((Mat) -> com.scannerpromax.ai.jev.JevRenderHints?)? = null,
     ): Bitmap {
         progress?.invoke(0f)
-        val out = renderMat(PerfTrace.stage("bitmap→mat") { Cv.toRgba(original) }, edits, progress, layoutImages, tableHints, jev)
+        // Tiempos por etapa (Ajustes › Rendimiento) y prioridad/frecuencias altas mientras el usuario espera ([DevicePerf])
+        val trace = PerfTrace.beginIfNone()
         try {
-            val bmp = PerfTrace.stage("mat→bitmap") { Cv.toBitmap(out) }
-            progress?.invoke(1f)
-            return bmp
+            return DevicePerf.boost {
+                val out = renderMat(PerfTrace.stage("bitmap→mat") { Cv.toRgba(original) }, edits, progress, layoutImages, tableHints, jev)
+                try {
+                    val bmp = PerfTrace.stage("mat→bitmap") { Cv.toBitmap(out) }
+                    progress?.invoke(1f)
+                    bmp
+                } finally {
+                    out.release()
+                }
+            }
         } finally {
-            out.release()
+            PerfTrace.end(trace)
         }
     }
 
@@ -99,7 +107,9 @@ class PageProcessor(val tier: DeviceTier) {
      * curvada / ángulo medidos a la misma escala fija; sólo lee la caché del modelo (no la llena: lo que se guarda es lo
      * que calcula el render).
      */
-    fun preview(original: Bitmap, edits: PageEdits, maxSide: Int = 1200): Bitmap {
+    fun preview(original: Bitmap, edits: PageEdits, maxSide: Int = 1200): Bitmap = DevicePerf.boost { previewImpl(original, edits, maxSide) }
+
+    private fun previewImpl(original: Bitmap, edits: PageEdits, maxSide: Int): Bitmap {
         val d = PageRotation.delta(edits)
         val geo = geometryPreview(original, PageRotation.geoOnly(edits), maxSide)
         if (classifyRef.get() == null) runCatching { setClassify(PrintedPage.reduceForAnalysis(geo)) }
@@ -527,28 +537,64 @@ class PageProcessor(val tier: DeviceTier) {
      * Geometría para vista previa: el original se reduce UNA vez (INTER_AREA, en caché) a la escala justa para que
      * la zona del documento mida ~[maxSide]; así el warp no produce aliasing y es muy rápido.
      */
-    private fun geometryPreview(original: Bitmap, edits: PageEdits, maxSide: Int): Mat {
+    private fun geometryPreview(original: Bitmap, edits: PageEdits, maxSide: Int): Mat =
+        geometryPreviewFrom(original.width, original.height, edits, maxSide, cached = true) { scale -> previewSourceFor(original, scale) }
+
+    /**
+     * [geometryPreview] con la foto reducida que da [source] (escala -> Mat RGBA): de la caché ([cached], no se libera) o
+     * una copia propia (se libera al terminar).
+     */
+    private fun geometryPreviewFrom(ow: Int, oh: Int, edits: PageEdits, maxSide: Int, cached: Boolean, source: (Double) -> Mat): Mat {
         sheetExact.set(0); setClassify(null)
-        val ow = original.width; val oh = original.height
         val (qw, qh) = edits.quad?.let { PerspectiveCorrector.quadExtent(it) } ?: (ow.toDouble() to oh.toDouble())
         val wanted = min(1.0, maxSide * 1.1 / max(1.0, max(qw, qh)))
         // Cuantizar la escala para reutilizar la caché aunque el quad cambie un poco
         val scale = if (wanted >= 0.999) 1.0 else (wanted * 20).let { kotlin.math.ceil(it) / 20.0 }.coerceAtMost(1.0)
+        fun <T> withSrc(f: (Mat) -> T): T =
+            if (cached) synchronized(previewLock) { f(source(scale)) } else { val m = source(scale); try { f(m) } finally { m.release() } }
         // Con recorte y enderezado automático, la misma composición que el render final (perspectiva + rotación + hoja
         // curvada en un único remuestreo): el modelo por los cantos de la hoja ([DwBorder]) toma de la foto lo que queda
         // fuera del recorte, que la imagen ya recortada no tiene
         if (edits.autoDewarp && edits.quad != null && !PerspectiveCorrector.isFullFrame(edits.quad, ow, oh)) {
-            val input = synchronized(previewLock) { previewSourceFor(original, scale).clone() }
+            val input = withSrc { it.clone() }
             val q = PerspectiveCorrector.scaleQuad(edits.quad, input.cols().toDouble() / ow, input.rows().toDouble() / oh)
             return geometryFullMat(input, edits.copy(quad = q), maxSide, preview = true)
         }
-        val warped = synchronized(previewLock) {
-            val src = previewSourceFor(original, scale)
+        val warped = withSrc { src ->
             val q = edits.quad?.let { PerspectiveCorrector.scaleQuad(it, src.cols().toDouble() / ow, src.rows().toDouble() / oh) }
             cropMat(src, q, maxPixels = 0, maxSide = maxSide)
         }
         val qk = quadKey(edits.quad?.takeIf { !PerspectiveCorrector.isFullFrame(it, ow, oh) }, ow, oh)
         return orient(warped, edits, qk, cacheable = false)
+    }
+
+    /** Foto RGBA [rgba] reducida a [scale] como en [previewSourceFor] (Mat nuevo). */
+    private fun scaledCopy(rgba: Mat, scale: Double): Mat {
+        if (scale >= 1.0) return rgba.clone()
+        val m = Mat()
+        Imgproc.resize(rgba, m, Size(max(1.0, (rgba.cols() * scale).roundToInt().toDouble()), max(1.0, (rgba.rows() * scale).roundToInt().toDouble())), 0.0, 0.0, Imgproc.INTER_AREA)
+        return m
+    }
+
+    /**
+     * Vista previa SIN la caché del editor (la «vista rápida» de una página nueva, [DocumentRepository]): mismo resultado
+     * que [preview] sobre la foto RGBA [rgba] (no se libera). Devuelve el Mat final.
+     */
+    internal fun previewMat(rgba: Mat, edits: PageEdits, maxSide: Int): Mat {
+        val d = PageRotation.delta(edits)
+        val geo = geometryPreviewFrom(rgba.cols(), rgba.rows(), PageRotation.geoOnly(edits), maxSide, cached = false) { scale -> scaledCopy(rgba, scale) }
+        if (classifyRef.get() == null) runCatching { setClassify(PrintedPage.reduceForAnalysis(geo)) }
+        val fe = finishEdits(edits, d, geo)
+        var out = finish(geo, fe, ImageEnhancer.Options.of(tier, fast = false).copy(preview = true), null)
+        if (d != 0) { val r = PageRotation.rotateMat(out, d); out.release(); out = r }
+        return out
+    }
+
+    /** [previewMat] desde un Bitmap (sin tocar la caché de vista previa del editor). */
+    fun quickPreview(original: Bitmap, edits: PageEdits, maxSide: Int): Bitmap = DevicePerf.boost {
+        val rgba = Cv.toRgba(original)
+        val out = try { previewMat(rgba, edits, maxSide) } finally { rgba.release() }
+        try { Cv.toBitmap(out) } finally { out.release() }
     }
 
     private fun previewSourceFor(original: Bitmap, scale: Double): Mat {

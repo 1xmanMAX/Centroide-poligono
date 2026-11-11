@@ -84,6 +84,20 @@ class ScannerApp : Application(), ImageLoaderFactory {
                 }
             }
             runCatching { settingsThread.join(STARTUP_DATA_TIMEOUT_MS) }
+            // OpenCV ya está cargado: sus hilos (TBB) y los de [Par] se crean ahora con la prioridad de la política (los
+            // hilos heredan la prioridad del que los crea) y no en la primera foto
+            runCatching { com.scannerpromax.imaging.DevicePerf.warmUpOpenCv() }
+            // Modelos de la captura (doc_ori, encuadre IA) precargados en segundo plano: la primera página no paga la carga
+            // (con la prioridad de la política, no BACKGROUND: los hilos de ONNX Runtime se crean aquí y la heredan)
+            Thread({
+                runCatching { Thread.sleep(PREWARM_DELAY_MS) }
+                runCatching { Process.setThreadPriority(com.scannerpromax.imaging.DevicePerf.policy.workerPriority) }
+                runCatching { c.neuralCorners.prewarm() }.onFailure { Log.w(TAG, "precarga encuadre", it) }
+                runCatching {
+                    val b = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888); b.eraseColor(android.graphics.Color.WHITE)
+                    try { c.pageProcessor.orientationModel?.invoke(b) } finally { b.recycle() }
+                }.onFailure { Log.w(TAG, "precarga orientación", it) }
+            }, "models-prewarm").apply { isDaemon = true }.start()
             // Indra (único OCR): si falta, se descarga ya en segundo plano (respeta "solo Wi-Fi").
             runCatching { c.indraProvisioner.start() }.onFailure { Log.w(TAG, "Indra", it) }
         } catch (t: Throwable) {
@@ -180,6 +194,8 @@ class ScannerApp : Application(), ImageLoaderFactory {
     companion object {
         private const val TAG = "ScannerApp"
         private const val STARTUP_DATA_TIMEOUT_MS = 2_500L
+        /** Espera antes de precargar los modelos (la primera pantalla ya se ve). */
+        private const val PREWARM_DELAY_MS = 2_500L
     }
 }
 

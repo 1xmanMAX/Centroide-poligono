@@ -122,7 +122,7 @@ class PdfCompressor internal constructor(
         if (a.status == SqueezeEnvelope.STATUS_ENCRYPTED || a.analysis?.encrypted == true) return Prep.Fallback(REASON_ENCRYPTED)
         if (!a.ok) return Prep.Fallback(REASON_ENGINE_FAILED)
         val probe = SqueezeProbe.of(a.analysis)
-        val threads = SqueezePlan.fitThreads(SqueezePlan.threadsFor(engine.tier), probe.maxImagePixels, source.length(), engine.availableMemory())
+        val threads = SqueezePlan.fitThreads(SqueezePlan.threadsForDevice(engine.tier), probe.maxImagePixels, source.length(), engine.availableMemory())
         if (threads <= 0) return Prep.Fallback(REASON_MEMORY)
         return Prep.Go(threads, probe)
     }

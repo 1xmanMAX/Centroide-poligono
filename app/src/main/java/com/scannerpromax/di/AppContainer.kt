@@ -27,6 +27,21 @@ class AppContainer(context: Context) {
     val deviceTier = DeviceProfiler.profile(appContext)
     val settings = SettingsRepository(appContext)
 
+    init {
+        // Procesador (SoC) y política de hilos/prioridades: antes de crear nada que procese imágenes. El modo de
+        // Ajustes › Rendimiento se aplica en cuanto se leen los ajustes (por defecto Máximo).
+        com.scannerpromax.imaging.DevicePerf.init(appContext, deviceTier)
+        // Decisiones de acelerador (NNAPI/XNNPACK/CPU) por modelo y equipo: se miden una vez y se guardan
+        val epPrefs = appContext.getSharedPreferences("aceleradores", Context.MODE_PRIVATE)
+        com.scannerpromax.imaging.Accel.store = object : com.scannerpromax.imaging.Accel.Store {
+            override fun get(key: String): String? = epPrefs.getString(key, null)
+            override fun put(key: String, value: String) { epPrefs.edit().putString(key, value).apply() }
+        }
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default).launch {
+            settings.settings.collect { s -> com.scannerpromax.imaging.DevicePerf.setMode(s.perfMode) }
+        }
+    }
+
     private val pageProcessorLazy = lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         NativeLibs.ensureOpenCv()
         // Registra el contexto para que la super-resolución (FSRCNN en assets) pueda cargarse al primer uso.
@@ -52,7 +67,7 @@ class AppContainer(context: Context) {
         com.scannerpromax.imaging.NeuralCorners(
             modelBytes = { appContext.assets.open(com.scannerpromax.imaging.NeuralCorners.ASSET).use { it.readBytes() } },
             ortReady = ::ortAvailableNow,
-            threads = 2,
+            threads = com.scannerpromax.imaging.DevicePerf.ortThreads,
         ).also { n ->
             kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default).launch {
                 settings.settings.collect { s -> n.enabled = s.neuralFraming }
@@ -70,7 +85,7 @@ class AppContainer(context: Context) {
 
     /** Modelo de orientación (doc_ori) para la tubería normal: se carga al primer uso (el descargado o, si no, el incluido en la app). */
     private val orientationEngine by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
-        com.scannerpromax.ai.parts.LayoutEngine(models, threads = 2, bundledOrientation = { appContext.assets.open(ORIENTATION_ASSET).use { it.readBytes() } })
+        com.scannerpromax.ai.parts.LayoutEngine(models, threads = com.scannerpromax.imaging.DevicePerf.ortThreads, bundledOrientation = { appContext.assets.open(ORIENTATION_ASSET).use { it.readBytes() } })
     }
     val pageProcessor: PageProcessor by pageProcessorLazy
 
@@ -80,7 +95,7 @@ class AppContainer(context: Context) {
 
     /** Indra, el único OCR (ONNX Runtime con hasta 4 hilos). Crearlo no carga nada: eso ocurre al primer OCR. */
     val indraEngine: com.scannerpromax.ocr.indra.IndraEngine by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
-        com.scannerpromax.ocr.indra.IndraEngine({ models }, com.scannerpromax.ai.CpuInfo.recommendedThreads().coerceIn(1, 4)) {
+        com.scannerpromax.ocr.indra.IndraEngine({ models }, com.scannerpromax.imaging.DevicePerf.ortThreads) {
             // Léxico español (hunspell es_ES, ~240 KB comprimido en assets): se carga al primer OCR.
             appContext.assets.open("lexicon/es_ES.aff.gz").use { aff ->
                 appContext.assets.open("lexicon/es_ES.dic.gz").use { dic -> com.scannerpromax.ocr.lexicon.Hunspell.load(aff, dic) }

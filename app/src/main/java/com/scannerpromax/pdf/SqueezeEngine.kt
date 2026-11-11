@@ -20,7 +20,7 @@ interface SqueezeEngine {
     suspend fun compress(input: File, output: File, params: SqueezeParams, threads: Int, progress: ((Float) -> Unit)?): SqueezeEnvelope
 }
 
-/** Implementación real: JNI con libpdfsqueeze.so a prioridad de fondo (nice 10). */
+/** Implementación real: JNI con libpdfsqueeze.so (nice 0, o 10 en «Ahorro de batería»). */
 class NativeSqueezeEngine(private val context: Context, override val tier: DeviceTier) : SqueezeEngine {
     override val available: Boolean get() = PdfSqueeze.isAvailable()
 
@@ -35,7 +35,11 @@ class NativeSqueezeEngine(private val context: Context, override val tier: Devic
     override suspend fun analyze(input: File): SqueezeEnvelope = PdfSqueezeClient.analyze(input)
 
     override suspend fun compress(input: File, output: File, params: SqueezeParams, threads: Int, progress: ((Float) -> Unit)?): SqueezeEnvelope =
-        PdfSqueezeClient.compress(input, output, params.toJson(), threads, nice = 10, onProgress = progress)
+        // Prioridad según Ajustes › Rendimiento: normal en Máximo/Equilibrado (el usuario espera el PDF), de fondo en Ahorro
+        PdfSqueezeClient.compress(input, output, params.toJson(), threads, nice = squeezeNice(), onProgress = progress)
+
+    private fun squeezeNice(): Int =
+        if (com.scannerpromax.imaging.DevicePerf.mode == com.scannerpromax.imaging.PerfMode.SAVER || !com.scannerpromax.imaging.DevicePerf.initializedForApp) 10 else 0
 }
 
 /** Lo que interesa del análisis para decidir hilos y punto de partida. */

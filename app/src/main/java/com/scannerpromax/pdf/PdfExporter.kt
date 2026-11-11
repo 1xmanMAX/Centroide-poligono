@@ -164,7 +164,7 @@ class PdfExporter(private val context: Context, private val squeeze: SqueezeEngi
         try {
             val analysis = try { engine.analyze(file) } catch (c: kotlinx.coroutines.CancellationException) { throw c } catch (_: Throwable) { null }
             val probe = SqueezeProbe.of(analysis?.analysis?.takeIf { analysis.ok })
-            val threads = SqueezePlan.fitThreads(SqueezePlan.threadsFor(engine.tier), probe.maxImagePixels, file.length(), engine.availableMemory())
+            val threads = SqueezePlan.fitThreads(SqueezePlan.threadsForDevice(engine.tier), probe.maxImagePixels, file.length(), engine.availableMemory())
             if (analysis?.ok == true && threads > 0) {
                 val env = try {
                     engine.compress(file, optimized, SqueezePlan.forExport(options.quality), threads, progress)

@@ -65,6 +65,7 @@ class SettingsRepository(private val context: Context) {
             prefs[Keys.SPELL_CHECK] = updated.spellCheck
             prefs[Keys.LENS_CORRECTION] = updated.lensCorrection
             prefs[Keys.ID_CARD_SIZE] = updated.idCardSize.name
+            prefs[Keys.PERF_MODE] = updated.perfMode.name
         }
     }
 
@@ -105,6 +106,7 @@ class SettingsRepository(private val context: Context) {
             spellCheck = this[Keys.SPELL_CHECK] ?: d.spellCheck,
             lensCorrection = this[Keys.LENS_CORRECTION] ?: d.lensCorrection,
             idCardSize = enumOr(this[Keys.ID_CARD_SIZE], d.idCardSize),
+            perfMode = enumOr(this[Keys.PERF_MODE], d.perfMode),
         )
     }
 
@@ -137,6 +139,7 @@ class SettingsRepository(private val context: Context) {
         val SPELL_CHECK = booleanPreferencesKey("spell_check")
         val LENS_CORRECTION = booleanPreferencesKey("lens_correction")
         val ID_CARD_SIZE = stringPreferencesKey("id_card_size")
+        val PERF_MODE = stringPreferencesKey("perf_mode")
     }
 
     private companion object {
@@ -202,6 +205,11 @@ data class AppSettings(
     val lensCorrection: Boolean = true,
     /** «Tamaño del DNI en la hoja»: escala de las caras al componer la hoja A4 (cámara, galería y Recortar DNI). */
     val idCardSize: com.scannerpromax.imaging.IdCardSize = com.scannerpromax.imaging.IdCardSize.DEFAULT,
+    /**
+     * «Rendimiento» (Ajustes): Máximo (por defecto: todos los núcleos, prioridad alta y frecuencias altas mientras se procesa),
+     * Equilibrado o Ahorro de batería ([com.scannerpromax.imaging.DevicePerf]). No cambia el resultado, solo la velocidad.
+     */
+    val perfMode: com.scannerpromax.imaging.PerfMode = com.scannerpromax.imaging.PerfMode.MAX,
 ) {
     fun cloudConsent(id: com.scannerpromax.ai.cloud.CloudProviderId): Boolean = when (id) {
         com.scannerpromax.ai.cloud.CloudProviderId.DEEPSEEK -> cloudConsentDeepSeek

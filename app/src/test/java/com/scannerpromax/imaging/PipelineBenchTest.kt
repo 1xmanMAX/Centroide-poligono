@@ -71,8 +71,8 @@ class PipelineBenchTest {
         val n = Runtime.getRuntime().availableProcessors()
         data class Cfg(val name: String, val cv: Int, val par: Int, val nc: Int)
         val all = listOf(
-            Cfg("antes-N", n, 1, 0), Cfg("después-N", n, n, n),
-            Cfg("antes-cv1", 1, 1, 0), Cfg("después-cv1", 1, n, n),
+            Cfg("antes-N", n, 1, 0), Cfg("despues-N", n, n, n),
+            Cfg("antes-cv1", 1, 1, 0), Cfg("despues-cv1", 1, n, n),
         )
         val wanted = System.getProperty("perf.cfg")?.split(',')?.map { it.trim() }?.toSet()
         val configs = all.filter { wanted == null || it.name in wanted }
@@ -180,7 +180,7 @@ class PipelineBenchTest {
     private fun compare(a: Mat, b: Mat): String {
         if (a.size() != b.size() || a.channels() != b.channels()) return "TAMAÑO DISTINTO ${a.size()}x${a.channels()} vs ${b.size()}x${b.channels()}"
         val d = Mat(); Core.absdiff(a, b, d)
-        val g = if (d.channels() == 1) d else Mat().also { Imgproc.cvtColor(d, it, Imgproc.COLOR_BGR2GRAY) }
+        val g = d.reshape(1)   // todos los canales (una diferencia de 1 en un canal también cuenta)
         val mx = Core.minMaxLoc(g).maxVal
         val nz = Core.countNonZero(g) * 100.0 / g.total()
         val psnr = Core.PSNR(a, b)

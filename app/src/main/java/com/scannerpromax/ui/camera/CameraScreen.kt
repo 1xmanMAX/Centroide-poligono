@@ -442,6 +442,11 @@ private fun CameraContent(
     LaunchedEffect(settings.lensCorrection) { engine.lensCorrection = settings.lensCorrection }
     // Con capturas mejorándose en segundo plano, el análisis en vivo cede CPU (la UI sigue fluida en gama baja).
     LaunchedEffect(pendingJobs) { engine.backgroundBusy = pendingJobs > 0 }
+    // Ráfaga larga de capturas (3+ procesándose) en «Máximo»: modo de rendimiento SOSTENIDO del sistema (si lo tiene), que
+    // evita los bajones por temperatura en tandas largas. Con 1-2 capturas no: limita el pico y la foto tardaría más.
+    val window = remember(context) { context.findActivity()?.window }
+    LaunchedEffect(pendingJobs) { com.scannerpromax.imaging.DevicePerf.sustained(window, pendingJobs >= 3) }
+    DisposableEffect(window) { onDispose { com.scannerpromax.imaging.DevicePerf.sustained(window, false) } }
     // (sin detección en vivo mientras se revisa el recorte de una cara del DNI: la CPU es para esa pantalla)
     val reviewing = cardReview != null
     LaunchedEffect(mode, reviewing) {

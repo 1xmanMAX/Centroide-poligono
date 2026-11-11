@@ -23,6 +23,8 @@ import com.scannerpromax.domain.ScanMode
 import com.scannerpromax.imaging.BitmapIO
 import com.scannerpromax.imaging.DeviceProfiler
 import com.scannerpromax.imaging.DeviceTier
+import com.scannerpromax.imaging.DevicePerf
+import com.scannerpromax.imaging.PerfTrace
 import com.scannerpromax.imaging.Cv
 import com.scannerpromax.imaging.DuplicatePages
 import com.scannerpromax.imaging.PageProcessor
@@ -105,7 +107,8 @@ class DocumentRepository(
      * Renders completos simultáneos. Cada render a 8-12 MP tiene un pico nativo de cientos de MB y OpenCV ya
      * paraleliza internamente, así que un segundo permiso solo compensa en gama alta con mucha RAM.
      */
-    private val heavy = Semaphore(heavyPermits())
+    private val heavy = Semaphore(HEAVY_SLOTS)
+    private val heavyAcquire = Mutex()
     /** Trabajos pesados en curso o esperando permiso (el OCR de fondo espera a que llegue a 0). */
     private val activeHeavy = MutableStateFlow(0)
     /** Pantallas que piden pausar el OCR de fondo (cámara abierta, editor con vistas previas, fusión...). */
@@ -314,6 +317,9 @@ class DocumentRepository(
 
         var capture: CaptureHints? = null
         var docBox: JevBox? = null
+        // Tiempos por etapa de esta página (Ajustes › Rendimiento: «Última página»)
+        val ps = PerfTrace.Session()
+        var early = false
         val page = heavyWork {
             withContext(Dispatchers.Default) {
                 var bitmap: Bitmap? = null
@@ -325,14 +331,14 @@ class DocumentRepository(
                     }
                     val (fw, fh) = withContext(Dispatchers.IO) { BitmapIO.decodeBounds(dst.absolutePath) }
                     // Decodifica respetando el presupuesto de memoria del dispositivo (EXIF aplicado por BitmapIO).
-                    val bmp = BitmapIO.decode(dst.absolutePath, tier.maxWorkingPixels)
+                    val bmp = timed(ps, "decodificación") { BitmapIO.decode(dst.absolutePath, tier.maxWorkingPixels) }
                     bitmap = bmp
                     val pw = if (fw > 0 && fh > 0) fw else bmp.width
                     val ph = if (fw > 0 && fh > 0) fh else bmp.height
                     currentCoroutineContext().ensureActive()
 
                     val edits = presetEdits ?: run {
-                        val det = if (autoDetect && m != ScanMode.PHOTO) detectQuadWithConfidence(bmp) else null
+                        val det = if (autoDetect && m != ScanMode.PHOTO) timed(ps, "detección") { detectQuadWithConfidence(bmp) } else null
                         // "Mejorar con Jev" (opcional): tipo, carpeta, encuadre y calidad de la foto en UNA petición. Sin
                         // clave, sin red o si falla: null y todo como siempre.
                         val hints = if (autoDetect && m != ScanMode.PHOTO && m != ScanMode.ID_CARD) captureHints(bmp, dir, pageId) else null
@@ -353,31 +359,61 @@ class DocumentRepository(
                         // queda en las ediciones (el usuario lo cambia o deshace en el editor y la IA no vuelve a girar)
                         val rot = if (autoDetect && (m == ScanMode.DOCUMENT || m == ScanMode.RECEIPT) && base.aiHint != "photo") {
                             // voto: renglones + doc_ori (si está descargado) + Jev (si «Mejorar con Jev» respondió la orientación)
-                            runCatching { processor.autoOrientation(bmp, q0, JevCapture.orientation(hints)) }.getOrDefault(0)
+                            runCatching { timed(ps, "orientación") { processor.autoOrientation(bmp, q0, JevCapture.orientation(hints)) } }.getOrDefault(0)
                         } else 0
                         if (rot != 0) base.copy(rotation = rot) else base
                     }
-                    val (processedName, thumbName) = try {
-                        renderAndSave(docId, pageId, bmp, edits, pw, ph)
-                    } catch (t: Throwable) {
-                        if (!isOutOfMemory(t)) throw t
-                        // Sin memoria a resolución completa: se libera el bitmap y se reintenta con menos píxeles.
-                        bmp.recycle(); bitmap = null
-                        renderFromOriginal(docId, pageId, dst, edits, pw, ph, (tier.maxWorkingPixels * 0.6).toInt())
+                    val issues = JevCapture.issues(capture, docBox).takeIf { it.isNotEmpty() }
+                    // VISTA RÁPIDA: miniatura a baja resolución con las mismas decisiones (PageProcessor.preview) y la página
+                    // aparece YA en la cámara y la revisión; el procesado completo sigue aquí y la sustituye. Mientras tanto
+                    // el candado de la página hace esperar a quien pida el procesado (no se renderiza dos veces).
+                    val earlyLock = pageLock("$docId/$pageId")
+                    if (DevicePerf.mode != com.scannerpromax.imaging.PerfMode.SAVER) {
+                        earlyLock.lock()
+                        try {
+                            early = quickPage(docId, pageId, bmp, edits, pw, ph, originalName, issues, ps)
+                        } catch (c: kotlinx.coroutines.CancellationException) {
+                            earlyLock.unlock(); throw c
+                        } catch (t: Throwable) {
+                            if (isOutOfMemory(t)) { earlyLock.unlock(); throw t }
+                            Log.w(TAG, "Vista rápida", t)
+                        }
+                        if (!early) earlyLock.unlock()
                     }
-                    val page = Page(
-                        id = pageId,
-                        originalFile = originalName,
-                        processedFile = processedName,
-                        thumbFile = thumbName,
-                        width = pw,
-                        height = ph,
-                        edits = edits,
-                        issues = JevCapture.issues(capture, docBox).takeIf { it.isNotEmpty() },
-                    )
-                    appendPage(docId, page)
-                    page
+                    try {
+                        val (processedName, thumbName) = try {
+                            renderAndSave(docId, pageId, bmp, edits, pw, ph, trace = ps)
+                        } catch (t: Throwable) {
+                            if (!isOutOfMemory(t)) throw t
+                            // Sin memoria a resolución completa: se libera el bitmap y se reintenta con menos píxeles.
+                            bmp.recycle(); bitmap = null
+                            renderFromOriginal(docId, pageId, dst, edits, pw, ph, (tier.maxWorkingPixels * 0.6).toInt())
+                        }
+                        val page = Page(
+                            id = pageId,
+                            originalFile = originalName,
+                            processedFile = processedName,
+                            thumbFile = thumbName,
+                            width = pw,
+                            height = ph,
+                            edits = edits,
+                            issues = issues,
+                        )
+                        if (early) {
+                            // la página ya está: se completa (si el usuario la borró mientras tanto, fuera sus archivos)
+                            var present = false
+                            mutatePagesIfPresent(docId) { pages ->
+                                pages.map { if (it.id == pageId) { present = true; it.copy(processedFile = processedName, thumbFile = thumbName) } else it }
+                            }
+                            if (!present) withContext(NonCancellable + Dispatchers.IO) { discardPageFiles(docId, dir, pageId) }
+                        } else appendPage(docId, page)
+                        page
+                    } finally {
+                        if (early) earlyLock.unlock()
+                    }
                 } catch (t: Throwable) {
+                    // (con vista rápida la página ya figuraba: se quita, como si no se hubiera añadido)
+                    if (early) withContext(NonCancellable) { runCatching { mutatePagesIfPresent(docId) { pages -> pages.filter { it.id != pageId } } } }
                     withContext(NonCancellable + Dispatchers.IO) { discardPageFiles(docId, dir, pageId) }
                     throw t
                 } finally {
@@ -385,6 +421,8 @@ class DocumentRepository(
                 }
             }
         }
+        PerfTrace.end(ps)
+        Log.i(TAG, "Página ${page.id}: ${PerfTrace.summary(12)}")
         JevCapture.suggestedFolder(capture)?.let { suggestCategory(docId, it) }
         enqueueOcr(docId, page.id)
         checkDuplicate(docId, page.id)
@@ -1356,6 +1394,7 @@ class DocumentRepository(
         pageW: Int,
         pageH: Int,
         progress: ProgressCallback? = null,
+        trace: PerfTrace.Session? = null,
     ): Pair<String, String> {
         val dir = docDir(docId)
         val processedName = processedName(pageId, edits)
@@ -1363,10 +1402,11 @@ class DocumentRepository(
         val workEdits = edits.quad?.let { q -> edits.copy(quad = toSpace(q, pageW, pageH, original.width, original.height)) } ?: edits
         // Cajas de foto de la maquetación guardada (PP-DocLayoutV3): "Color natural" las conserva como foto
         val photos = if (edits.filter == FilterType.NATURAL) layoutPhotoBoxes(docId, pageId, edits) else emptyList()
-        val rendered = processor.render(original, workEdits, progress, photos, jev = jevHook(dir, pageId, edits))
+        val rendered = PerfTrace.within(trace) { PerfTrace.stage("render") { processor.render(original, workEdits, progress, photos, jev = jevHook(dir, pageId, edits)) } }
         try {
             currentCoroutineContext().ensureActive()
-            val thumb = BitmapIO.thumbnail(rendered, THUMB_SIDE)
+            val thumb = timed(trace, "miniatura") { BitmapIO.thumbnail(rendered, THUMB_SIDE) }
+            val tSave = System.nanoTime()
             try {
                 withContext(Dispatchers.IO) {
                     checkAlive(docId)
@@ -1383,6 +1423,7 @@ class DocumentRepository(
                         saveJpegAtomic(thumb, File(dir, thumbName), THUMB_QUALITY)
                     }
                 }
+                trace?.add("codificación y guardado", System.nanoTime() - tSave)
             } finally {
                 if (thumb !== rendered && thumb !== original) thumb.recycle()
             }
@@ -1390,6 +1431,33 @@ class DocumentRepository(
             if (rendered !== original) rendered.recycle()
         }
         return processedName to thumbName
+    }
+
+    /**
+     * Vista rápida de una página nueva ([addPageFromFile]): render de vista previa a [THUMB_SIDE] (mismas decisiones que el
+     * final, a ~1 MP: una fracción del tiempo) guardado como su miniatura, y la página se añade ya sin procesado. true si
+     * se añadió.
+     */
+    private suspend fun quickPage(
+        docId: String, pageId: String, bmp: Bitmap, edits: PageEdits, pageW: Int, pageH: Int, originalName: String,
+        issues: List<String>?, ps: PerfTrace.Session,
+    ): Boolean {
+        val dir = docDir(docId)
+        val thumbName = thumbName(pageId, edits)
+        val workEdits = edits.quad?.let { q -> edits.copy(quad = toSpace(q, pageW, pageH, bmp.width, bmp.height)) } ?: edits
+        val pv = PerfTrace.within(ps) { PerfTrace.stage("vista rápida") { processor.quickPreview(bmp, workEdits, THUMB_SIDE) } }
+        try {
+            withContext(Dispatchers.IO) {
+                checkAlive(docId)
+                File(dir, THUMB_DIR).mkdirs()
+                saveJpegAtomic(pv, File(dir, thumbName), THUMB_QUALITY)
+            }
+        } finally {
+            pv.recycle()
+        }
+        appendPage(docId, Page(id = pageId, originalFile = originalName, processedFile = null, thumbFile = thumbName,
+            width = pageW, height = pageH, edits = edits, issues = issues))
+        return true
     }
 
     /**
@@ -1957,19 +2025,22 @@ class DocumentRepository(
     // ------------------------------------------------------------------ utilidades internas
 
     /** Permiso de [heavy] del trabajo en curso; se puede soltar antes de terminar (E/S lenta tras el render). */
-    private class HeavyPermit(private val sem: Semaphore) : AbstractCoroutineContextElement(HeavyPermit) {
+    private class HeavyPermit(private val sem: Semaphore, private val n: Int) : AbstractCoroutineContextElement(HeavyPermit) {
         companion object Key : CoroutineContext.Key<HeavyPermit>
         private val released = AtomicBoolean(false)
         fun release() {
-            if (released.compareAndSet(false, true)) sem.release()
+            if (released.compareAndSet(false, true)) repeat(n) { sem.release() }
         }
     }
 
     private suspend fun <T> heavyWork(block: suspend () -> T): T {
         activeHeavy.update { it + 1 }
         try {
-            heavy.acquire()
-            val permit = HeavyPermit(heavy)
+            // Con una sola página a la vez (modo o memoria) se toman los dos permisos; con dos, uno
+            val n = if (DevicePerf.parallelPages >= 2 && heavyPermits() >= 2) 1 else HEAVY_SLOTS
+            // (de una en una bajo [heavyAcquire]: dos trabajos con un permiso cada uno nunca se esperan mutuamente)
+            heavyAcquire.withLock { repeat(n) { heavy.acquire() } }
+            val permit = HeavyPermit(heavy, n)
             try {
                 return withContext(permit) { block() }
             } finally {
@@ -1980,14 +2051,22 @@ class DocumentRepository(
         }
     }
 
+    /**
+     * Renders completos a la vez: los decide [DevicePerf] (2 si caben dos picos de memoria con margen y hay núcleos de sobra,
+     * según el modo de Ajustes › Rendimiento). Dentro de cada render los bucles ya se reparten entre los núcleos ([Par]);
+     * dos páginas a la vez aprovechan además las etapas en serie de cada una (ráfagas de capturas, importación).
+     */
     private fun heavyPermits(): Int {
-        if (!DeviceProfiler.isHighEnd(tier)) return 1
         val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return 1
         val mi = ActivityManager.MemoryInfo()
         am.getMemoryInfo(mi)
-        val totalGb = mi.totalMem / (1024.0 * 1024.0 * 1024.0)
-        return if (totalGb >= 6.0 && !mi.lowMemory) 2 else 1
+        if (mi.lowMemory) return 1
+        return DevicePerf.parallelPages.coerceIn(1, 2)
     }
+
+    /** Etapa [name] de la página ([PerfTrace]) con la prioridad alta de [DevicePerf] (bloque SIN suspensiones). */
+    private inline fun <T> timed(ps: PerfTrace.Session?, name: String, block: () -> T): T =
+        PerfTrace.within(ps) { PerfTrace.stage(name) { DevicePerf.boost(block) } }
 
     /** Lanza si el documento fue borrado (evita recrear su carpeta desde un trabajo en curso). */
     private fun checkAlive(docId: String) {
@@ -2030,6 +2109,8 @@ class DocumentRepository(
 
         /** Solo para originales GENERADOS (DNI compuesto); las fotos de cámara/galería se mueven sin recodificar. */
         private const val ORIGINAL_QUALITY = 100
+        /** Plazas del limitador de renders ([heavyWork]: 1 o 2 por trabajo según [DevicePerf.parallelPages]). */
+        private const val HEAVY_SLOTS = 2
         /** El procesado se codifica una única vez con pérdida; la reducción de tamaño ocurre solo al exportar. */
         private const val PROCESSED_QUALITY = 95
         private const val THUMB_QUALITY = 90

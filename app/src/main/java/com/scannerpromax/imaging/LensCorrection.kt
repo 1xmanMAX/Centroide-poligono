@@ -174,26 +174,31 @@ internal object LensCorrection {
             val win = bag.mat()
             Imgproc.createHanningWindow(win, Size(tile.toDouble(), tile.toDouble()), CvType.CV_32F)
             val nx = w / tile; val ny = h / tile
-            val gG = bag.mat(); val gR = bag.mat(); val gB = bag.mat()
-            for (ty in 0 until ny) for (tx in 0 until nx) {
+            // Teselas en paralelo ([Par], búferes por hilo); las observaciones se añaden en el orden de siempre
+            class G { val gG = Mat(); val gR = Mat(); val gB = Mat(); fun close() { gG.release(); gR.release(); gB.release() } }
+            val res = Par.map(ny * nx, { G() }, { it.close() }) { gb, idx ->
+                val ty = idx / nx; val tx = idx % nx
                 val x0 = tx * tile; val y0 = ty * tile
                 val tcx = x0 + tile / 2.0 - cx; val tcy = y0 + tile / 2.0 - cy
                 val rr = hypot(tcx, tcy) / rMax
-                if (rr < 0.45) continue
+                if (rr < 0.45) return@map null
                 val roi = Rect(x0, y0, tile, tile)
+                val gG = gb.gG; val gR = gb.gR; val gB = gb.gB
                 grad(chans[1].submat(roi), gG)
                 // Teselas sin bordes fuertes (papel liso): fuera
                 val mean = Core.mean(gG).`val`[0]
-                if (mean < 6.0) continue
+                if (mean < 6.0) return@map null
                 grad(chans[0].submat(roi), gR)
                 grad(chans[2].submat(roi), gB)
                 val respR = DoubleArray(1); val respB = DoubleArray(1)
                 val sR = Imgproc.phaseCorrelate(gG, gR, win, respR)
                 val sB = Imgproc.phaseCorrelate(gG, gB, win, respB)
                 // Desplazamiento de R respecto de G (px) frente al vector radial del centro de la tesela
-                if (respR[0] > 0.15 && abs(sR.x) < 6 && abs(sR.y) < 6) obsR += doubleArrayOf(tcx, tcy, sR.x, sR.y, respR[0])
-                if (respB[0] > 0.15 && abs(sB.x) < 6 && abs(sB.y) < 6) obsB += doubleArrayOf(tcx, tcy, sB.x, sB.y, respB[0])
+                val oR = if (respR[0] > 0.15 && abs(sR.x) < 6 && abs(sR.y) < 6) doubleArrayOf(tcx, tcy, sR.x, sR.y, respR[0]) else null
+                val oB = if (respB[0] > 0.15 && abs(sB.x) < 6 && abs(sB.y) < 6) doubleArrayOf(tcx, tcy, sB.x, sB.y, respB[0]) else null
+                oR to oB
             }
+            for (r in res) { r ?: continue; r.first?.let { obsR += it }; r.second?.let { obsB += it } }
         }
         val fr = fitRadial(obsR) ?: return null
         val fb = fitRadial(obsB) ?: return null

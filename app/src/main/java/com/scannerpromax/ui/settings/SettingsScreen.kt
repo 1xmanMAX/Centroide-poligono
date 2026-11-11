@@ -69,7 +69,7 @@ import kotlinx.coroutines.launch
 private enum class Picker { FILTER, PAGE_SIZE, QUALITY, PDF_TEXT, ID_CARD_SIZE }
 
 /** Subpantallas de Ajustes (navegación interna, sin rutas nuevas). */
-internal enum class SettingsPage { MAIN, EXPORT, APPEARANCE, INTEGRATION, ABOUT }
+internal enum class SettingsPage { MAIN, EXPORT, APPEARANCE, INTEGRATION, PERFORMANCE, ABOUT }
 
 /** Datos del dispositivo para "Acerca de" (se calculan fuera para poder usar datos falsos en las capturas). */
 @Immutable
@@ -106,6 +106,7 @@ fun SettingsScreen(
     SettingsContent(
         settings = settings,
         about = about,
+        perfInfo = { com.scannerpromax.imaging.DevicePerf.diagnostics() },
         onUpdate = { transform -> scope.launch { runCatching { container.settings.update(transform) } } },
         onBack = onBack,
         onOpenAiModels = onOpenAiModels,
@@ -123,6 +124,8 @@ internal fun SettingsContent(
     onOpenAiModels: () -> Unit,
     onOpenCloudAi: () -> Unit,
     initialPage: SettingsPage = SettingsPage.MAIN,
+    /** Diagnóstico de Ajustes › Rendimiento (procesador, núcleos, hilos, aceleradores, tiempos de la última página). */
+    perfInfo: () -> List<Pair<String, String>> = { emptyList() },
 ) {
     val ui = MaterialTheme.ui
     val perf = LocalPerf.current
@@ -256,6 +259,15 @@ internal fun SettingsContent(
                             iconTint = SystemTeal,
                             value = settings.attachAnyFormat.name.let { if (it == "PDF") "PDF" else "JPG" },
                             onClick = { page = SettingsPage.INTEGRATION },
+                        )
+                    }
+                    item {
+                        NavigationRow(
+                            "Rendimiento",
+                            icon = AppIcons.Speed,
+                            iconTint = SystemOrange,
+                            value = settings.perfMode.label,
+                            onClick = { page = SettingsPage.PERFORMANCE },
                         )
                     }
                     item {
@@ -404,6 +416,39 @@ internal fun SettingsContent(
                 }
             }
 
+            SettingsPage.PERFORMANCE -> SettingsPageScaffold(title = "Rendimiento", backLabel = "Ajustes", onBack = { page = SettingsPage.MAIN }) {
+                InsetGroup(
+                    header = "Velocidad del procesado",
+                    separatorInset = SeparatorInsetPlain,
+                    footer = "Máximo usa todos los núcleos del procesador con prioridad alta y pide frecuencias altas mientras " +
+                        "procesas (la foto sale antes; gasta algo más de batería en ese momento). Equilibrado usa los núcleos " +
+                        "rápidos. Ahorro de batería procesa en segundo plano con pocos hilos. El resultado es el mismo en los tres.",
+                ) {
+                    com.scannerpromax.imaging.PerfMode.entries.forEach { m ->
+                        item {
+                            CheckRow(
+                                title = m.label,
+                                selected = settings.perfMode == m,
+                                onClick = { onUpdate { it.copy(perfMode = m) } },
+                            )
+                        }
+                    }
+                }
+                // (se vuelve a leer al cambiar el modo: hilos y prioridad dependen de él)
+                val diag = remember(settings.perfMode) { perfInfo() }
+                if (diag.isNotEmpty()) {
+                    InsetGroup(
+                        header = "Diagnóstico",
+                        footer = "Procesador y grupos de núcleos detectados (grandes, medios y pequeños), hilos elegidos, " +
+                            "aceleradores (GPU y NPU) y el tiempo de cada etapa de la última página procesada.",
+                    ) {
+                        diag.forEach { (k, v) ->
+                            item { InfoRow(k, v, icon = AppIcons.Chip, iconTint = SystemGreen, stacked = true) }
+                        }
+                    }
+                }
+            }
+
             SettingsPage.ABOUT -> SettingsPageScaffold(title = "Acerca de", backLabel = "Ajustes", onBack = { page = SettingsPage.MAIN }) {
                 InsetGroup(header = "ESCÁNER PRO MAX") {
                     item { InfoRow("Versión", about.version, icon = AppIcons.Info, iconTint = SystemGray) }
@@ -528,7 +573,7 @@ private fun aboutInfo(container: AppContainer, context: Context): AboutInfo {
         version = version,
         device = "${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL} · Android ${Build.VERSION.RELEASE}",
         performance = if (tier.isLowRam) "Gama baja · modo ligero activado (procesado optimizado)" else "Gama media/alta · máxima calidad",
-        processor = "${tier.cores} núcleos · $memoryClass MB por app",
+        processor = com.scannerpromax.imaging.DevicePerf.soc.let { soc -> "${soc.name} · ${soc.clustersText()} · $memoryClass MB por app" },
         workingResolution = String.format(SpanishLocale, "%.1f MP", tier.maxWorkingPixels / 1_000_000f),
     )
 }

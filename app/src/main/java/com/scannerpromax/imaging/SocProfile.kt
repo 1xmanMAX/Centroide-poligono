@@ -221,7 +221,7 @@ data class SocProfile(
                 c.contains("zumapro") -> "Tensor G4"; c.contains("zuma") -> "Tensor G3"; c.contains("gs201") -> "Tensor G2"; c.contains("gs101") -> "Tensor G1"
                 else -> null
             }
-            Vendor.SAMSUNG -> Regex("(exynos|s5e)\\s*(\\d{4})").find(c)?.let { "Exynos " + it.groupValues[2].let { d -> mapOf("9925" to "2200", "9840" to "2100", "9830" to "990", "9820" to "980", "9815" to "1380", "8835" to "1380", "8825" to "1280", "9945" to "2400").getOrElse(d) { d } } }
+            Vendor.SAMSUNG -> Regex("(exynos|s5e)\\s*(\\d{3,4})").find(c)?.let { "Exynos " + it.groupValues[2].let { d -> mapOf("9925" to "2200", "9840" to "2100", "9830" to "990", "9820" to "980", "9815" to "1380", "8835" to "1380", "8825" to "1280", "9945" to "2400").getOrElse(d) { d } } }
             Vendor.HISILICON -> Regex("kirin\\s*(\\d{3,4}[a-z]*)").find(c)?.let { "Kirin " + it.groupValues[1].uppercase() }
             Vendor.MEDIATEK -> mapOf(
                 "mt6985" to "Dimensity 9200", "mt6989" to "Dimensity 9300", "mt6983" to "Dimensity 9000", "mt6895" to "Dimensity 8100",
@@ -288,7 +288,7 @@ data class PerfPolicy(
             }
             val ort = when (mode) {
                 PerfMode.MAX -> fast.coerceIn(1, 8)
-                PerfMode.BALANCED -> (if (soc.homogeneous) min(total, 2) else soc.bigCores).coerceIn(1, 4)
+                PerfMode.BALANCED -> (if (soc.homogeneous) min(total, 2) else max(min(2, perf), soc.bigCores)).coerceIn(1, 4)
                 PerfMode.SAVER -> 1
             }
             val peak = workingPixels.toLong() * RENDER_BYTES_PER_PIXEL

@@ -87,6 +87,17 @@ class NeuralCorners(
         }
     }
 
+    /**
+     * Precarga la sesión (y, la primera vez en este teléfono, la elección del acelerador) fuera del camino de la captura:
+     * la llama el arranque en un hilo de fondo. No hace nada si está desactivado o ya cargado.
+     */
+    @Synchronized
+    fun prewarm() {
+        if (!enabled || failed || session != null || !ortReady()) return
+        val bytes = runCatching { modelBytes() }.getOrNull() ?: return
+        session = runCatching { Session(bytes, threads) }.onFailure { Log.w(TAG, "precarga del encuadre", it) }.getOrNull()
+    }
+
     /** Libera la sesión (≈10 MB nativos); se recarga sola al siguiente uso. */
     @Synchronized
     override fun close() {
@@ -101,12 +112,11 @@ class NeuralCorners(
     /** Sesión ORT aislada en su clase: nada de ai.onnxruntime se toca antes de [ortReady] (ver OrtNative). */
     private class Session(bytes: ByteArray, threads: Int) : Closeable {
         private val env = ai.onnxruntime.OrtEnvironment.getEnvironment()
-        private val sess: ai.onnxruntime.OrtSession = ai.onnxruntime.OrtSession.SessionOptions().use { o ->
-            o.setIntraOpNumThreads(threads)
-            o.setInterOpNumThreads(1)
-            o.setOptimizationLevel(ai.onnxruntime.OrtSession.SessionOptions.OptLevel.ALL_OPT)
-            env.createSession(bytes, o)
-        }
+        // Proveedor más rápido y correcto de este teléfono (CPU, XNNPACK o NNAPI), medido una vez ([OrtAccel])
+        private val sess: ai.onnxruntime.OrtSession = com.scannerpromax.ai.parts.OrtAccel.session(
+            "encuadre", threads, load = { o -> env.createSession(bytes, o) },
+            probe = com.scannerpromax.ai.parts.OrtAccel.imageProbe(env, longArrayOf(1, 3, SIZE.toLong(), SIZE.toLong())),
+        )
         private val inputName = sess.inputNames.first()
 
         fun run(x: FloatArray): FloatArray {

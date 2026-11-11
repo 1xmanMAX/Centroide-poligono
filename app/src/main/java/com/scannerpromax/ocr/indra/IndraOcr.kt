@@ -68,7 +68,13 @@ class IndraOcr(dir: File, threads: Int = 4, private val orientMin: Float = ORIEN
         // Sin arena: con lotes de forma cambiante crecía sin parar (pipeline.py, ORT 1.31).
         setCPUArenaAllocator(false)
     }
-    private val det: OrtSession = env.createSession(File(dir, "det.onnx").path, opts)
+    // Detección (forma fija por página): proveedor más rápido y correcto del teléfono (CPU, XNNPACK o NNAPI), medido una
+    // vez ([com.scannerpromax.ai.parts.OrtAccel]); el reconocimiento (entradas int64 y lotes variables) en CPU con [opts]
+    private val det: OrtSession = com.scannerpromax.ai.parts.OrtAccel.session(
+        "indra-det", threads, load = { o -> env.createSession(File(dir, "det.onnx").path, o) },
+        probe = com.scannerpromax.ai.parts.OrtAccel.imageProbe(env) { axis -> if (axis == 0) 1L else 640L },
+        base = { it.setCPUArenaAllocator(false) },
+    )
     private val rec: OrtSession = env.createSession(File(dir, "rec.onnx").path, opts)
     private val order: OrtSession? = File(dir, "order.onnx").takeIf { it.isFile }?.let { env.createSession(it.path, opts) }
     private val orient: OrtSession? = File(dir, "orient.onnx").takeIf { it.isFile }?.let { env.createSession(it.path, opts) }
