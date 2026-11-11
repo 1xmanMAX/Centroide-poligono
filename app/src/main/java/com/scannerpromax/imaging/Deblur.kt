@@ -207,10 +207,19 @@ internal object Deblur {
         val stats = Array(nty) { arrayOfNulls<TileStat>(ntx) }
         // Con muchas teselas basta la mitad (tablero de ajedrez): el campo se ajusta con una superficie suave
         val sparse = nty * ntx > 48
-        for (ty in 0 until nty) for (tx in 0 until ntx) {
-            if (sparse && (ty + tx) % 2 == 1) continue
-            val (m, inner) = load(ty, tx)
-            val st = tileStat(m, inner, ns, buf, bag)
+        // Estadística de cada tesela en paralelo ([Par]; búferes por hilo, cada tesela escribe solo su casilla)
+        val bufLen = (ceil(th) + 2 * TILE_MARGIN + 2).toInt() * (ceil(tw) + 2 * TILE_MARGIN + 2).toInt()
+        class TBuf { val bb = MatBag(); val sb = StatBuffers(bufLen); val tf = bb.mat() }
+        Par.forEach(nty * ntx, { TBuf() }, { it.bb.close() }) { tb, idx ->
+            val ty = idx / ntx; val tx = idx % ntx
+            if (sparse && (ty + tx) % 2 == 1) return@forEach
+            val r0 = (ty * th).roundToInt(); val r1 = min(h, ((ty + 1) * th).roundToInt())
+            val c0 = (tx * tw).roundToInt(); val c1 = min(w, ((tx + 1) * tw).roundToInt())
+            val a0 = max(0, r0 - TILE_MARGIN); val a1 = min(h, r1 + TILE_MARGIN)
+            val b0 = max(0, c0 - TILE_MARGIN); val b1 = min(w, c1 + TILE_MARGIN)
+            val roi = y8.submat(a0, a1, b0, b1)
+            roi.convertTo(tb.tf, CvType.CV_32F); roi.release()
+            val st = tileStat(tb.tf, intArrayOf(r0 - a0, r1 - a0, c0 - b0, c1 - b0), ns, tb.sb, tb.bb)
             if (st.total >= MIN_EDGES && st.iso().isFinite()) stats[ty][tx] = st
         }
         val okIdx = (0 until nty * ntx).filter { stats[it / ntx][it % ntx] != null }
@@ -334,20 +343,32 @@ internal object Deblur {
         val rr = 2 * ceil(0.5 * sMax).toInt() + 1
         val kClamp = Cv.kernel(Imgproc.MORPH_RECT, rr)
         val k3 = Cv.kernel(Imgproc.MORPH_RECT, 3)
-        val gainCache = HashMap<Long, Mat>()
-        val yIn = bag.mat(); val yf = bag.mat(); val spec = bag.mat(); val prod = bag.mat(); val inv = bag.mat()
-        val acc = bag.mat(); val wb = bag.mat(); val tmp = bag.mat(); val gate = bag.mat(); val lo = bag.mat(); val hi = bag.mat()
-        val gxm = bag.mat(); val gym = bag.mat(); val ys = bag.mat(); val f3 = bag.mat(); val d3 = bag.mat()
         val t1 = max(1.5 * ns, 1.5); val t2 = 3 * t1
-        try {
-            // Franjas de altura IGUAL (la última se solapa con la anterior); en cada franja sólo las columnas de las
-            // teselas que necesitan deconvolución (con una tesela de margen por la mezcla)
+        // Búferes por hilo: las franjas se procesan en paralelo ([Par]); cada una escribe solo sus filas de [rgb] y lee la
+        // luminancia [y8] (que no cambia): resultado idéntico al de la pasada en serie
+        class Buf {
+            val bb = MatBag()
+            val gainCache = HashMap<Long, Mat>()
+            val yIn = bb.mat(); val yf = bb.mat(); val spec = bb.mat(); val prod = bb.mat(); val inv = bb.mat()
+            val acc = bb.mat(); val wb = bb.mat(); val tmp = bb.mat(); val gate = bb.mat(); val lo = bb.mat(); val hi = bb.mat()
+            val gxm = bb.mat(); val gym = bb.mat(); val ys = bb.mat(); val f3 = bb.mat(); val d3 = bb.mat()
+            fun close() { for (g in gainCache.values) g.release(); gainCache.clear(); bb.close() }
+        }
+        // Franjas de altura IGUAL (la última se solapa con la anterior); en cada franja sólo las columnas de las
+        // teselas que necesitan deconvolución (con una tesela de margen por la mezcla)
+        val bands = ArrayList<IntArray>()
+        run {
             var next = 0
             while (next < h) {
                 val b1 = min(h, next + bandH)
                 val b0 = max(0, b1 - bandH)
-                val wFrom = next - b0          // primera fila de la franja aún no escrita
+                bands.add(intArrayOf(b0, b1, next - b0))   // (inicio, fin, primera fila aún no escrita)
                 next = b1
+            }
+        }
+        Par.forEach(bands.size, { Buf() }, { it.close() }) { bf, bi ->
+            val b0 = bands[bi][0]; val b1 = bands[bi][1]; val wFrom = bands[bi][2]
+            with(bf) {
                 val ty0 = max(0, (b0 / th).toInt() - 1); val ty1 = min(nty - 1, ((b1 - 1) / th).toInt() + 1)
                 val present = BooleanArray(nCls)
                 var tx0 = ntx; var tx1 = -1
@@ -355,7 +376,7 @@ internal object Deblur {
                     val c = cls[ty * ntx + tx]
                     if (c >= 0) { present[c] = true; tx0 = min(tx0, tx); tx1 = max(tx1, tx) }
                 }
-                if (tx1 < 0) continue
+                if (tx1 < 0) return@forEach
                 val c0 = max(0, ((tx0 - 1) * tw).toInt()); val c1 = min(w, ((tx1 + 2) * tw).toInt() + 1)
                 val bw = c1 - c0; val bh = b1 - b0
                 // Luminancia con margen (la de la propia imagen donde la hay; reflejada en los bordes)
@@ -408,7 +429,7 @@ internal object Deblur {
                 val loR = lo.submat(e8, e8 + bh, e8, e8 + bw); val hiR = hi.submat(e8, e8 + bh, e8, e8 + bw)
                 Core.add(acc, yBand, acc)                                   // Y restaurada
                 if (p.clampDark > 0 || p.clampBright > 0) {
-                    val rng = bag.mat(); Core.subtract(hiR, loR, rng)
+                    val rng = Mat(); Core.subtract(hiR, loR, rng)
                     Core.scaleAdd(rng, -p.clampDark, loR, tmp); Core.max(acc, tmp, acc)
                     Core.scaleAdd(rng, p.clampBright, hiR, tmp); Core.min(acc, tmp, acc)
                     rng.release()
@@ -426,8 +447,6 @@ internal object Deblur {
                 f3.convertTo(rgbBand, CvType.CV_8UC3)
                 rgbBand.release(); yBand.release(); dNew.release()
             }
-        } finally {
-            for (g in gainCache.values) g.release()
         }
     }
 

@@ -109,9 +109,10 @@ internal object Deghost {
             val bg8 = bag.add(background(y8))
             val kers = arrayOfNulls<DoubleArray>(nz)
             val widths = DoubleArray(nz) { Double.NaN }
-            val solver = CgFft(r, bag)
-            val buf = TileBuffers(p.tile, r, bag)
-            fun analyze(i: Int) {
+            // Búferes por hilo: las zonas se analizan en paralelo ([Par]); cada una escribe solo su núcleo (mismo resultado)
+            class Work(val bag: MatBag) { val solver = CgFft(r, bag); val buf = TileBuffers(p.tile, r, bag) }
+            fun analyze(wk: Work, i: Int) {
+                val solver = wk.solver; val buf = wk.buf
                 val zy = i / nzx; val zx = i % nzx
                 val y0 = (zy * zh).roundToInt(); val y1 = min(h, ((zy + 1) * zh).roundToInt())
                 val x0 = (zx * zw).roundToInt(); val x1 = min(w, ((zx + 1) * zw).roundToInt())
@@ -135,7 +136,7 @@ internal object Deghost {
                 kers[i] = k; widths[i] = DeghostMath.width(k, r)
             }
             // 1-2) Núcleo de cada zona; referencia = el cuarto más nítido
-            for (i in 0 until nz) analyze(i)
+            Par.forEach(nz, { Work(MatBag()) }, { it.bag.close() }) { wk, i -> analyze(wk, i) }
             val ok = (0 until nz).filter { kers[it] != null }
             if (ok.size < 3) return none()
             val sorted = ok.sortedBy { widths[it] }
@@ -178,10 +179,16 @@ internal object Deghost {
             }
             val bh = by1 - by0; val bw = bx1 - bx0
             val delta = bag.add(Mat.zeros(bh, bw, CvType.CV_32F))
-            for (i in todo) {
+            // Restauración de cada zona en paralelo; la suma en [delta] en el orden de siempre
+            val restored = Par.map(todo.size) { q ->
+                val i = todo[q]
+                val (a0, a1) = span(i / nzx, zh, nzy, h); val (b0, b1) = span(i % nzx, zw, nzx, w)
+                restoreZone(y8, a0, a1, b0, b1, kers[i]!!, kRef, r, p)
+            }
+            for ((q, i) in todo.withIndex()) {
                 val zy = i / nzx; val zx = i % nzx
                 val (a0, a1) = span(zy, zh, nzy, h); val (b0, b1) = span(zx, zw, nzx, w)
-                val d = restoreZone(y8, a0, a1, b0, b1, kers[i]!!, kRef, r, p)
+                val d = restored[q]
                 val wy = Mat(a1 - a0, 1, CvType.CV_32F); wy.put(0, 0, FloatArray(a1 - a0) { (DeghostMath.partition(a0 + it + 0.5, zy, zh, nzy) * wt[i]).toFloat() })
                 val wx = Mat(1, b1 - b0, CvType.CV_32F); wx.put(0, 0, FloatArray(b1 - b0) { DeghostMath.partition(b0 + it + 0.5, zx, zw, nzx).toFloat() })
                 val wb = Mat(); Core.gemm(wy, wx, 1.0, Mat(), 0.0, wb); wy.release(); wx.release()

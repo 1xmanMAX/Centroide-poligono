@@ -371,7 +371,7 @@ internal object PrintedPage {
         val natural = style == TextRegions.Style.NATURAL
         // Fondo (papel + iluminación) a baja resolución
         val bgPre = bag.mat()
-        val bg = bag.add(ShadowDebug.time("bgPP") { Cv.estimateBackground(rgb, if (fast) 256 else 384, refine = true, refineSide = if (fast) 320 else 1024, preShadow = bgPre) })
+        val bg = bag.add(PerfTrace.stage("fondo (papel)") { ShadowDebug.time("bgPP") { Cv.estimateBackground(rgb, if (fast) 256 else 384, refine = true, refineSide = if (fast) 320 else 1024, preShadow = bgPre) } })
         // Estadística global (papel, ruido, tinta), fondo ajeno y bloques de imagen sobre la imagen normalizada reducida:
         // igual en todas las franjas. Con el fondo ANTERIOR a la re-iluminación de las sombras: las decisiones globales
         // (punto negro y blanco, ruido) no cambian por ella; la sombra sólo se trata en su zona, al renderizar las franjas.
@@ -437,8 +437,8 @@ internal object PrintedPage {
             val cands = blocks.map { PhotoBoxRefine.Cand(it, PhotoBoxRefine.SRC_COLOR) } +
                 (if (TEXTURE_PHOTOS) textureBlocks(smNz, pm, ow, oh, bag).map { PhotoBoxRefine.Cand(it, PhotoBoxRefine.SRC_TEX) } else emptyList()) +
                 NaturalColor.layoutRects(layoutImages, ow, oh).map { PhotoBoxRefine.Cand(it, PhotoBoxRefine.SRC_LAYOUT) }
-            val found = runCatching { PhotoBoxRefine.refine(smNz, pm, cands, ow, oh, full = rgb, verdicts = photoVerdicts(layoutImages)) }
-                .onFailure { if (Cv.isOutOfMemory(it)) throw it }.getOrDefault(emptyList())
+            val found = PerfTrace.stage("fotos (recuadro exacto)") { runCatching { PhotoBoxRefine.refine(smNz, pm, cands, ow, oh, full = rgb, verdicts = photoVerdicts(layoutImages)) }
+                .onFailure { if (Cv.isOutOfMemory(it)) throw it }.getOrDefault(emptyList()) }
             onPhotoBoxes?.invoke(cands, found, ow, oh)
             PhotoBoxRefine.photos(found)
         }
@@ -483,91 +483,119 @@ internal object PrintedPage {
         val sharpSigma = max(0.7, lh * 0.06)
         val margin = max(win, (sharpSigma * 4).roundToInt() + 2) + 2   // filas de contexto (px de salida)
         val stripH = max(32, STRIP_PIXELS / max(1, ow))
-        val tmp = bag.mat(); val nS = bag.mat(); val big = bag.mat()
-        var y0 = 0
-        while (y0 < oh) {
-            val y1 = min(oh, y0 + stripH)
-            // Filas de entrada con contexto
-            val ey0 = max(0, y0 - margin); val ey1 = min(oh, y1 + margin)
-            val sy0 = max(0, kotlin.math.floor(ey0 / f).toInt() - 2); val sy1 = min(h, kotlin.math.ceil(ey1 / f).toInt() + 2)
-            val sRoi = rgb.submat(sy0, sy1, 0, w); val bRoi = bg.submat(sy0, sy1, 0, w)
-            Cv.divideByBackground(sRoi, bRoi, nS)
-            sRoi.release(); bRoi.release()
-            if (liftOn) {
-                val lr0 = (sy0.toDouble() / h * lift.rows()); val lr1 = (sy1.toDouble() / h * lift.rows())
-                val la = kotlin.math.floor(lr0).toInt().coerceIn(0, lift.rows() - 1); val lb = kotlin.math.ceil(lr1).toInt().coerceIn(la + 1, lift.rows())
-                val lRoi = lift.submat(la, lb, 0, lift.cols())
-                val lf = bag.mat(); Imgproc.resize(lRoi, lf, Size(w.toDouble(), ((lb - la).toDouble() / lift.rows() * h).roundToInt().coerceAtLeast(1).toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR)
-                lRoi.release()
-                // filas de [lf] que corresponden a sy0..sy1
-                val off = (sy0 - la.toDouble() / lift.rows() * h).roundToInt().coerceIn(0, max(0, lf.rows() - 1))
-                val take = min(sy1 - sy0, lf.rows() - off)
-                if (take > 0) {
-                    val l3 = bag.mat(); val lsub = lf.submat(off, off + take, 0, w)
-                    Core.merge(listOf(lsub, lsub, lsub), l3); lsub.release()
-                    val part = nS.submat(0, take, 0, w)
-                    Core.multiply(part, l3, part, 1.0, nS.type())
-                    part.release(); l3.release()
-                }
-                lf.release()
+        val tmp = bag.mat()
+        val tStrips = System.nanoTime()
+        // Franjas de salida [y0, y1): independientes (leen la foto y el fondo, escriben solo sus filas de [out] / [natBuf]).
+        // La geometría de cada franja (filas de entrada, avance) se calcula antes; luego se renderizan en paralelo ([Par])
+        // con búferes propios. El des-ruido de la sombra mide su ruido UNA vez (la primera franja con zona de sombra
+        // suficiente, [shadowSigma]): hasta entonces las franjas van en orden, como siempre. Salida idéntica.
+        val strips = ArrayList<IntArray>()
+        run {
+            var y0 = 0
+            while (y0 < oh) {
+                val y1 = min(oh, y0 + stripH)
+                val ey0 = max(0, y0 - margin); val ey1 = min(oh, y1 + margin)
+                val sy0 = max(0, kotlin.math.floor(ey0 / f).toInt() - 2); val sy1 = min(h, kotlin.math.ceil(ey1 / f).toInt() + 2)
+                val rows: Int; val oy: Int
+                if (f > 1.0) { rows = ((sy1 - sy0) * f).roundToInt(); oy = (sy0 * f).roundToInt() } else { rows = sy1 - sy0; oy = sy0 }
+                val a0 = (y0 - oy).coerceIn(0, rows); val a1 = (y1 - oy).coerceIn(a0, rows)
+                strips.add(intArrayOf(y0, y1))
+                if (a1 <= a0) break
+                y0 += (a1 - a0)
             }
-            // Sombra: des-ruido de la zona (el grano amplificado por la división) y croma de la tinta ([Shadows])
-            if (shadow != null) {
-                ShadowDebug.time("treatZone") { Shadows.treatZone(nS, shadow, sy0, h, sigmaMemo = shadowSigma) }
-            }
-            // Ampliación de calidad de la franja (bicúbica; el realce posterior recupera el borde)
-            val work: Mat
-            val oy: Int   // fila de salida correspondiente a la primera fila de [work]
-            if (f > 1.0) {
-                val bh = ((sy1 - sy0) * f).roundToInt()
-                Imgproc.resize(nS, big, Size(ow.toDouble(), bh.toDouble()), 0.0, 0.0, Imgproc.INTER_CUBIC)
-                work = big; oy = (sy0 * f).roundToInt()
-            } else { work = nS; oy = sy0 }
-            val a0 = (y0 - oy).coerceIn(0, work.rows()); val a1 = (y1 - oy).coerceIn(a0, work.rows())
-            val res = if (color) colorStrip(work, levels, satLut, sharpSigma, noise, lh, bag) else bwStrip(work, levels, win, sharpSigma, noise, lh, bag)
-            val src = res.submat(a0, a1, 0, ow)
-            val dst = out.submat(y0, y0 + (a1 - a0), 0, ow)
-            src.copyTo(dst); src.release(); dst.release()
-            if (natBuf != null && a1 > a0) {
-                val ws = work.submat(a0, a1, 0, ow); val nd = natBuf.submat(y0, y0 + (a1 - a0), 0, ow)
-                ws.copyTo(nd); ws.release(); nd.release()
-            }
-            // Bloques de imagen dentro de la franja: niveles en gris del normalizado (sin binarizar)
-            for (b in images) {
-                val iy0 = max(b.y, y0); val iy1 = min(b.y + b.height, y0 + (a1 - a0))
-                if (iy1 <= iy0) continue
-                val gRoi = work.submat(iy0 - oy, iy1 - oy, b.x, b.x + b.width)
-                val gg = bag.add(Cv.gray(gRoi)); gRoi.release()
-                val o = out.submat(iy0, iy1, b.x, b.x + b.width)
-                Core.LUT(gg, levels, o); o.release()
-            }
-            // Fondo ajeno -> blanco (después de los bloques de imagen: un relleno oscuro de la mesa no es un logo)
-            if (outsideFull != null && a1 > a0) {
-                val oRoi = outsideFull.submat(y0, y0 + (a1 - a0), 0, ow)
-                val dRoi = out.submat(y0, y0 + (a1 - a0), 0, ow)
-                val m = bag.mat(); Imgproc.threshold(oRoi, m, 127.0, 255.0, Imgproc.THRESH_BINARY)
-                dRoi.setTo(Scalar.all(255.0), m)
-                oRoi.release(); dRoi.release(); m.release()
-            }
-            res.release()
-            if (a1 <= a0) break
-            y0 += (a1 - a0)
         }
+        class StripBuf { val nS = Mat(); val big = Mat(); fun close() { nS.release(); big.release() } }
+        fun renderStrip(sb: StripBuf, y0: Int, y1: Int) = MatBag().use { bag ->
+            val nS = sb.nS; val big = sb.big
+                // Filas de entrada con contexto
+                val ey0 = max(0, y0 - margin); val ey1 = min(oh, y1 + margin)
+                val sy0 = max(0, kotlin.math.floor(ey0 / f).toInt() - 2); val sy1 = min(h, kotlin.math.ceil(ey1 / f).toInt() + 2)
+                val sRoi = rgb.submat(sy0, sy1, 0, w); val bRoi = bg.submat(sy0, sy1, 0, w)
+                Cv.divideByBackground(sRoi, bRoi, nS)
+                sRoi.release(); bRoi.release()
+                if (liftOn) {
+                    val lr0 = (sy0.toDouble() / h * lift.rows()); val lr1 = (sy1.toDouble() / h * lift.rows())
+                    val la = kotlin.math.floor(lr0).toInt().coerceIn(0, lift.rows() - 1); val lb = kotlin.math.ceil(lr1).toInt().coerceIn(la + 1, lift.rows())
+                    val lRoi = lift.submat(la, lb, 0, lift.cols())
+                    val lf = bag.mat(); Imgproc.resize(lRoi, lf, Size(w.toDouble(), ((lb - la).toDouble() / lift.rows() * h).roundToInt().coerceAtLeast(1).toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR)
+                    lRoi.release()
+                    // filas de [lf] que corresponden a sy0..sy1
+                    val off = (sy0 - la.toDouble() / lift.rows() * h).roundToInt().coerceIn(0, max(0, lf.rows() - 1))
+                    val take = min(sy1 - sy0, lf.rows() - off)
+                    if (take > 0) {
+                        val l3 = bag.mat(); val lsub = lf.submat(off, off + take, 0, w)
+                        Core.merge(listOf(lsub, lsub, lsub), l3); lsub.release()
+                        val part = nS.submat(0, take, 0, w)
+                        Core.multiply(part, l3, part, 1.0, nS.type())
+                        part.release(); l3.release()
+                    }
+                    lf.release()
+                }
+                // Sombra: des-ruido de la zona (el grano amplificado por la división) y croma de la tinta ([Shadows])
+                if (shadow != null) {
+                    ShadowDebug.time("treatZone") { Shadows.treatZone(nS, shadow, sy0, h, sigmaMemo = shadowSigma) }
+                }
+                // Ampliación de calidad de la franja (bicúbica; el realce posterior recupera el borde)
+                val work: Mat
+                val oy: Int   // fila de salida correspondiente a la primera fila de [work]
+                if (f > 1.0) {
+                    val bh = ((sy1 - sy0) * f).roundToInt()
+                    Imgproc.resize(nS, big, Size(ow.toDouble(), bh.toDouble()), 0.0, 0.0, Imgproc.INTER_CUBIC)
+                    work = big; oy = (sy0 * f).roundToInt()
+                } else { work = nS; oy = sy0 }
+                val a0 = (y0 - oy).coerceIn(0, work.rows()); val a1 = (y1 - oy).coerceIn(a0, work.rows())
+                val res = if (color) colorStrip(work, levels, satLut, sharpSigma, noise, lh, bag) else bwStrip(work, levels, win, sharpSigma, noise, lh, bag)
+                val src = res.submat(a0, a1, 0, ow)
+                val dst = out.submat(y0, y0 + (a1 - a0), 0, ow)
+                src.copyTo(dst); src.release(); dst.release()
+                if (natBuf != null && a1 > a0) {
+                    val ws = work.submat(a0, a1, 0, ow); val nd = natBuf.submat(y0, y0 + (a1 - a0), 0, ow)
+                    ws.copyTo(nd); ws.release(); nd.release()
+                }
+                // Bloques de imagen dentro de la franja: niveles en gris del normalizado (sin binarizar)
+                for (b in images) {
+                    val iy0 = max(b.y, y0); val iy1 = min(b.y + b.height, y0 + (a1 - a0))
+                    if (iy1 <= iy0) continue
+                    val gRoi = work.submat(iy0 - oy, iy1 - oy, b.x, b.x + b.width)
+                    val gg = bag.add(Cv.gray(gRoi)); gRoi.release()
+                    val o = out.submat(iy0, iy1, b.x, b.x + b.width)
+                    Core.LUT(gg, levels, o); o.release()
+                }
+                // Fondo ajeno -> blanco (después de los bloques de imagen: un relleno oscuro de la mesa no es un logo)
+                if (outsideFull != null && a1 > a0) {
+                    val oRoi = outsideFull.submat(y0, y0 + (a1 - a0), 0, ow)
+                    val dRoi = out.submat(y0, y0 + (a1 - a0), 0, ow)
+                    val m = bag.mat(); Imgproc.threshold(oRoi, m, 127.0, 255.0, Imgproc.THRESH_BINARY)
+                    dRoi.setTo(Scalar.all(255.0), m)
+                    oRoi.release(); dRoi.release(); m.release()
+                }
+                res.release()
+        }
+        var si = 0
+        if (shadow != null) {
+            val sb = StripBuf()
+            try {
+                while (si < strips.size && shadowSigma[0] == 0.0) { renderStrip(sb, strips[si][0], strips[si][1]); si++ }
+            } finally { sb.close() }
+        }
+        val first = si
+        Par.forEach(strips.size - first, { StripBuf() }, { it.close() }) { sb, k -> renderStrip(sb, strips[first + k][0], strips[first + k][1]) }
+        PerfTrace.current?.add("franjas (binarización)", System.nanoTime() - tStrips)
         levels.release(); satLut.release(); tmp.release()
         log?.invoke("render ${style} ${w}x$h -> ${ow}x$oh f=%.2f lh=%.1f win=$win black=%.0f white=%.0f noise=%.1f images=${images.size} satK=%.2f".format(f, lh, black, white, noise, satK))
         val base = if (natBuf != null && bridgeBw) {
             // B/N: continuidad del trazo (los bloques de imagen y el fondo ajeno no se tocan)
-            runCatching { NaturalColor.bridge(out, natBuf, lh, 0.0, outsideFull, images) }.onFailure { if (Cv.isOutOfMemory(it)) throw it }
+            PerfTrace.stage("continuidad del trazo") { runCatching { NaturalColor.bridge(out, natBuf, lh, 0.0, outsideFull, images) }.onFailure { if (Cv.isOutOfMemory(it)) throw it } }
             out
         } else if (natBuf != null) {
             try {
-                NaturalColor.compose(NaturalColor.Inputs(out, natBuf, lh, 0.0, exclude = outsideFull, excludeForeign = true, orig = rgb, photoMode = photoMode,
-                    soft = if (NaturalColor.SOFT_INKS) NaturalColor.inkRects(layoutImages, ow, oh) else emptyList()))
+                PerfTrace.stage("color natural") { NaturalColor.compose(NaturalColor.Inputs(out, natBuf, lh, 0.0, exclude = outsideFull, excludeForeign = true, orig = rgb, photoMode = photoMode,
+                    soft = if (NaturalColor.SOFT_INKS) NaturalColor.inkRects(layoutImages, ow, oh) else emptyList())) }
             } finally { out.release() }
         } else out
         // capa de fotos: quien llama la pega al final (tras sus retoques de la capa base) o, sin él, aquí
         if (photoSink != null) photoSink(photos, photoWhite)
-        else if (photos.isNotEmpty() && PHOTO_LAYER) PhotoLayer.paste(base, rgb, photos, photoWhite)
+        else if (photos.isNotEmpty() && PHOTO_LAYER) PerfTrace.stage("capa de fotos") { PhotoLayer.paste(base, rgb, photos, photoWhite) }
         base
     }
 

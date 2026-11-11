@@ -263,9 +263,18 @@ tasks.withType<Test>().configureEach {
         "oriBench" to "ori.bench", "oriModel" to "ori.model",
         // CardOrientationBenchTest (orientación de las caras del DNI, sintético): -PcardOriBench=salida.md
         "cardOriBench" to "card.ori.bench",
+        // PipelineBenchTest (banco de rendimiento de la cadena completa): -PperfBench=DIR [-PperfLabel=antes] [-PperfReps=2]
+        // [-PperfOnly=texto] [-PperfGolden=reset]
+        "perfBench" to "perf.bench", "perfLabel" to "perf.label", "perfReps" to "perf.reps", "perfOnly" to "perf.only",
+        "perfGolden" to "perf.golden", "perfCfg" to "perf.cfg",
     ).forEach { (p, sp) ->
         (project.findProperty(p) as String?)?.let { systemProperty(sp, it) }
     }
+}
+
+// Perfil JFR del banco de rendimiento: -PperfJfr=/ruta/salida.jfr (muestras de Java y de código nativo de OpenCV por llamada).
+tasks.withType<Test>().configureEach {
+    (project.findProperty("perfJfr") as String?)?.let { jvmArgs("-XX:StartFlightRecording=filename=$it,settings=profile", "-XX:FlightRecorderOptions=stackdepth=96") }
 }
 
 // Las capturas de pantalla (Robolectric, lentas y con descarga de android-all la primera vez) NO forman parte de

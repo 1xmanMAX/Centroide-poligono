@@ -49,10 +49,29 @@ class PageProcessor(val tier: DeviceTier) {
         jev: ((Mat) -> com.scannerpromax.ai.jev.JevRenderHints?)? = null,
     ): Bitmap {
         progress?.invoke(0f)
+        val out = renderMat(PerfTrace.stage("bitmap→mat") { Cv.toRgba(original) }, edits, progress, layoutImages, tableHints, jev)
+        try {
+            val bmp = PerfTrace.stage("mat→bitmap") { Cv.toBitmap(out) }
+            progress?.invoke(1f)
+            return bmp
+        } finally {
+            out.release()
+        }
+    }
+
+    /**
+     * Núcleo de [render] sobre Mats (sin Bitmap: también lo usa el banco de rendimiento de la JVM). [input] RGBA 8UC4 (se
+     * libera). Devuelve el Mat final (8UC3 u 8UC1) ya girado.
+     */
+    internal fun renderMat(
+        input: Mat, edits: PageEdits, progress: ProgressCallback? = null, layoutImages: List<FloatArray> = emptyList(),
+        tableHints: List<FloatArray> = emptyList(),
+        jev: ((Mat) -> com.scannerpromax.ai.jev.JevRenderHints?)? = null,
+    ): Mat {
         // Giro de 90° pedido DESPUÉS de procesar ([PageEdits.geoRotation]): todo se calcula en el marco de la geometría y
         // el resultado se gira al final sin pérdidas (girar la página = girar el procesado, ver [PageRotation])
         val d = PageRotation.delta(edits)
-        val geo = geometryFull(original, PageRotation.geoOnly(edits), maxSide = 0)
+        val geo = PerfTrace.stage("geometría") { geometryFullMat(input, PageRotation.geoOnly(edits), maxSide = 0) }
         // (el callback de progreso puede lanzar para cancelar un render en segundo plano: nada queda sin liberar)
         try { progress?.invoke(0.3f) } catch (e: Throwable) { geo.release(); throw e }
         // las cajas de la maquetación son del procesado FINAL: al marco de la geometría
@@ -63,14 +82,8 @@ class PageProcessor(val tier: DeviceTier) {
         val tables = hints?.let { tablesGeo + it.tables } ?: tablesGeo
         val fe = finishEdits(edits, d, geo)
         var out = finish(geo, fe, ImageEnhancer.Options.of(tier, fast = false).copy(layoutImages = photos, tableHints = tables), progress)
-        try {
-            if (d != 0) { val r = PageRotation.rotateMat(out, d); out.release(); out = r }
-            val bmp = Cv.toBitmap(out)
-            progress?.invoke(1f)
-            return bmp
-        } finally {
-            out.release()
-        }
+        if (d != 0) { val r = PageRotation.rotateMat(out, d); out.release(); out = r }
+        return out
     }
 
     /** Ediciones para [finish] en el marco de la geometría [geo] (trazos de borrado girados de vuelta si hay giro final [d]). */
@@ -201,20 +214,20 @@ class PageProcessor(val tier: DeviceTier) {
             if (edits.autoDewarp || edits.autoDeskew) {
                 val side = if (edits.autoDewarp) GridDewarp.EST_SIDE else 1000
                 // La foto reducida sirve para la imagen de estimación y, si hace falta, para el plano ampliado de los cantos
-                val small = shrunk(src, quad, side)
-                val red = reducedRectified(small, w, h, quad, rot, side)
+                val small = PerfTrace.stage("reducción") { shrunk(src, quad, side) }
+                val red = PerfTrace.stage("reducción") { reducedRectified(small, w, h, quad, rot, side) }
                 try {
                     // Recorte a mano: se respeta exacto (sin cantos de la hoja buscados fuera de él)
                     val manual = edits.manualQuad == true
                     val key = quadKey(quad, w, h)?.let { if (manual) it + 1 else it }
-                    val est = if (edits.autoDewarp) dewarpModel(red, key, rot, cacheable = !preview) {
+                    val est = if (edits.autoDewarp) PerfTrace.stage("curvatura (estimación)") { dewarpModel(red, key, rot, cacheable = !preview) {
                         if (quad != null && !manual) borderInput(small, w, h, quad, rot, side, red.cols(), red.rows()) else null
-                    } else null
+                    } } else null
                     model = est?.model
                     // Ángulo: renglones + márgenes del texto si son coherentes; si no, perfiles de proyección
                     if (model == null && edits.autoDeskew) {
                         align = est?.align?.takeIf { it.act }
-                        angle = align?.angle ?: est?.skew ?: Cleanup.estimateSkew(red)
+                        angle = align?.angle ?: est?.skew ?: PerfTrace.stage("enderezado (estimación)") { Cleanup.estimateSkew(red) }
                     }
                 } finally {
                     red.release(); small.release()
@@ -255,7 +268,7 @@ class PageProcessor(val tier: DeviceTier) {
             }
             if (model != null) {
                 // Perspectiva + rotación + hoja curvada: un único remap desde el original (por franjas)
-                val out = GridDewarp.remapComposed(src, model, ow, oh, inv3(mTot), interp)
+                val out = PerfTrace.stage("remap") { GridDewarp.remapComposed(src, model, ow, oh, inv3(mTot), interp) }
                 src.release(); rgba = null
                 val rgb = Mat()
                 try {
@@ -263,11 +276,11 @@ class PageProcessor(val tier: DeviceTier) {
                 } finally {
                     out.release()
                 }
-                if (quad != null && maxSide == 0) restoreSharpness(rgb, inv3(mTot), w, h, edits)
-                else if (maxSide == 0) edgeSharpen(rgb, inv3(mTot), w, h, edits)
+                if (quad != null && maxSide == 0) PerfTrace.stage("nitidez (deblur)") { restoreSharpness(rgb, inv3(mTot), w, h, edits) }
+                else if (maxSide == 0) PerfTrace.stage("nitidez (bordes)") { edgeSharpen(rgb, inv3(mTot), w, h, edits) }
                 // Con el modelo por los cantos la salida ya es la hoja (sin cuñas de fondo): la limpieza de cuñas sólo
                 // podría tomar por fondo una franja de la propia hoja (margen de otro tono, tapa de un cuaderno)
-                if (quad != null && !model.beyond) cleanWedges(rgb, edits)
+                if (quad != null && !model.beyond) PerfTrace.stage("cuñas") { cleanWedges(rgb, edits) }
                 sheetExact.set(if (model.beyond) model.sheetSides else 0)
                 return rgb
             }
@@ -292,17 +305,17 @@ class PageProcessor(val tier: DeviceTier) {
             }
             val m = Mat(3, 3, CvType.CV_64F); m.put(0, 0, *mTot)
             val out = Mat(oh, ow, src.type())
-            Imgproc.warpPerspective(src, out, m, Size(ow.toDouble(), oh.toDouble()), interp, Core.BORDER_REPLICATE)
+            PerfTrace.stage("warp") { Imgproc.warpPerspective(src, out, m, Size(ow.toDouble(), oh.toDouble()), interp, Core.BORDER_REPLICATE) }
             m.release()
             src.release(); rgba = null
             val rgb = Mat()
             Imgproc.cvtColor(out, rgb, Imgproc.COLOR_RGBA2RGB)
             out.release()
-            if (quad != null && maxSide == 0) restoreSharpness(rgb, inv3(mTot), w, h, edits)
-            else if (maxSide == 0) edgeSharpen(rgb, inv3(mTot), w, h, edits)
+            if (quad != null && maxSide == 0) PerfTrace.stage("nitidez (deblur)") { restoreSharpness(rgb, inv3(mTot), w, h, edits) }
+            else if (maxSide == 0) PerfTrace.stage("nitidez (bordes)") { edgeSharpen(rgb, inv3(mTot), w, h, edits) }
             // Esquinas que el enderezado deja fuera del documento -> color del papel (no la mesa del fondo)
             if (rd != null) fillOutsideRotated(rgb, rd, preW, preH)
-            if (quad != null) cleanWedges(rgb, edits)
+            if (quad != null) PerfTrace.stage("cuñas") { cleanWedges(rgb, edits) }
             return rgb
         } finally {
             rgba?.release()
@@ -660,11 +673,11 @@ class PageProcessor(val tier: DeviceTier) {
             .let { o -> classifyRef.get()?.let { o.copy(classify = it) } ?: o }
         // AUTO se clasifica una sola vez (a 256 px) y se usa tanto para el filtro como para decidir la limpieza
         val analysis = if (edits.filter == FilterType.AUTO) {
-            runCatching { ImageEnhancer.analyzeMat(geo) }.getOrNull()?.let { ImageEnhancer.withAiHint(it, edits.aiHint) }
+            PerfTrace.stage("auto (clasificación)") { runCatching { ImageEnhancer.analyzeMat(geo) }.getOrNull() }?.let { ImageEnhancer.withAiHint(it, edits.aiHint) }
         } else null
         val effective = ImageEnhancer.effectiveFilter(edits.filter, analysis)
         var cur = try {
-            ImageEnhancer.applyMat(geo, edits.filter, edits.adjustments, opt.copy(keepRuling = edits.keepRuling, photoMode = edits.photoMode ?: 0), analysis)
+            PerfTrace.stage("filtro") { ImageEnhancer.applyMat(geo, edits.filter, edits.adjustments, opt.copy(keepRuling = edits.keepRuling, photoMode = edits.photoMode ?: 0), analysis) }
         } finally {
             geo.release()
         }
@@ -673,7 +686,7 @@ class PageProcessor(val tier: DeviceTier) {
         try {
             progress?.invoke(0.65f)
             if (edits.autoRemoveLines) {
-                val r = Cleanup.removeLinesMat(cur)
+                val r = PerfTrace.stage("quitar rayas") { Cleanup.removeLinesMat(cur) }
                 cur.release(); cur = r
             }
             progress?.invoke(0.8f)
@@ -681,7 +694,7 @@ class PageProcessor(val tier: DeviceTier) {
             if (edits.autoDenoise && effective != FilterType.ORIGINAL && effective != FilterType.VIVID &&
                 !ImageEnhancer.isSegmented(edits.filter, analysis)
             ) {
-                val r = Cleanup.denoiseMat(cur)
+                val r = PerfTrace.stage("motas") { Cleanup.denoiseMat(cur) }
                 cur.release(); cur = r
             }
             progress?.invoke(0.9f)

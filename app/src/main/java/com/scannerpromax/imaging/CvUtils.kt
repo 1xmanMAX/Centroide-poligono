@@ -564,14 +564,17 @@ internal object Cv {
     }
 
     /**
-     * Hilos de OpenCV según el equipo: en gama baja se deja un núcleo libre para que la interfaz (hilo
-     * principal + RenderThread) siga a 60 fps mientras se procesa. Idempotente.
+     * Hilos de OpenCV. Con [DevicePerf] iniciado (la app) los decide su política según el procesador y el modo de
+     * Ajustes › Rendimiento ([DevicePerf.setCameraActive] con la cámara abierta). Sin él (tests JVM, banco), el
+     * criterio anterior: en gama baja se deja un núcleo libre. Idempotente.
      */
     @Volatile private var threadsConfigured = -1
     @Volatile private var lastTier: DeviceTier? = null
     @Volatile private var cameraActive = false
+    @Volatile private var policyThreads = false
     fun configureThreads(tier: DeviceTier) {
         lastTier = tier
+        if (policyThreads) return
         val cores = max(1, tier.cores)
         val lowEnd = tier.isLowRam || cores <= 4
         NaturalColor.lowEnd = lowEnd
@@ -584,9 +587,22 @@ internal object Cv {
         try { Core.setNumThreads(n) } catch (_: Throwable) { }
     }
 
+    /** Hilos de OpenCV fijados por la política de [DevicePerf] (a partir de aquí [configureThreads] no los cambia). */
+    fun setThreads(n: Int) {
+        policyThreads = true
+        val v = max(1, n)
+        if (threadsConfigured == v) return
+        threadsConfigured = v
+        try { Core.setNumThreads(v) } catch (_: Throwable) { }
+    }
+
+    /** Hilos de OpenCV ahora mismo (diagnóstico). */
+    val threadsNow: Int get() = threadsConfigured
+
     /** La pantalla de cámara avisa al abrirse/cerrarse; en gama baja limita los hilos de OpenCV mientras tanto. */
     fun setCameraActive(active: Boolean, tier: DeviceTier) {
         cameraActive = active
+        if (policyThreads) { DevicePerf.setCameraActive(active); return }
         configureThreads(lastTier ?: tier)
     }
 

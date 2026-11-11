@@ -522,7 +522,7 @@ object ImageEnhancer {
      * tiene el tamaño de la entrada (x2 con super-resolución).
      */
     private fun segmented(rgb: Mat, opt: Options, style: TextRegions.Style): Mat = MatBag().use { bag ->
-        val stats = runCatching { PrintedPage.analyze(rgb, opt.classify) }.getOrNull()
+        val stats = PerfTrace.stage("página (análisis)") { runCatching { PrintedPage.analyze(rgb, opt.classify) }.getOrNull() }
         var base = rgb
         // Sin anti-muaré: la cuadrícula azul de un cuaderno es periódica y cromática y el detector de muaré la
         // confundía con una pantalla (el des-tramado emborronaba la escritura). La segmentación ya deja el fondo
@@ -530,23 +530,29 @@ object ImageEnhancer {
         if (!opt.fast && !opt.preview && max(base.cols(), base.rows()) < SR_MAX_SIDE &&
             base.total() <= (if (opt.lowEnd) 900_000L else 2_000_000L) && base.total() * 4 <= opt.maxPixels.toLong()
         ) {
-            base = bag.add(SuperResolution.upscale2x(base, lowEnd = !opt.highEnd, maxPixels = opt.maxPixels))
+            base = bag.add(PerfTrace.stage("superresolución") { SuperResolution.upscale2x(base, lowEnd = !opt.highEnd, maxPixels = opt.maxPixels) })
         }
         if (stats != null && stats.printed) {
             val k = base.cols().toDouble() / max(1, rgb.cols())
             val st = if (k != 1.0) stats.scaled(k) else stats
             // capa base (render normal + bordes + líneas de tabla) y, encima, la capa de fotos ([PhotoLayer])
             var photos: List<Rect> = emptyList(); var white: DoubleArray? = null
-            return@use PrintedPage.render(base, style, opt.fast, opt.maxPixels, st, sheetSides = opt.sheetSides, layoutImages = opt.layoutImages, photoMode = opt.photoMode,
-                photoSink = { p, w -> photos = p; white = w }).also {
-                cleanEdges(it, base, opt.sheetSides)
-                if (opt.keepRuling) restoreTableLines(it, base, st, opt, photos)
-                if (photos.isNotEmpty() && PrintedPage.PHOTO_LAYER) PhotoLayer.paste(it, base, photos, white)
+            // Análisis de las líneas de tabla (solo depende de la página) EN PARALELO con el render ([Par.async])
+            val tables = if (opt.keepRuling) Par.async { PerfTrace.stage("tablas (análisis)") { prepareTables(base, st, opt) } } else null
+            return@use try { PerfTrace.stage("página (render)") { PrintedPage.render(base, style, opt.fast, opt.maxPixels, st, sheetSides = opt.sheetSides, layoutImages = opt.layoutImages, photoMode = opt.photoMode,
+                photoSink = { p, w -> photos = p; white = w }) }.also {
+                PerfTrace.stage("bordes") { cleanEdges(it, base, opt.sheetSides) }
+                if (tables != null) PerfTrace.stage("tablas") { restoreTableLines(it, base, st, opt, photos, tables.await()) }
+                if (photos.isNotEmpty() && PrintedPage.PHOTO_LAYER) PerfTrace.stage("capa de fotos") { PhotoLayer.paste(it, base, photos, white) }
+            } } catch (e: Throwable) {
+                // (el análisis en paralelo no debe quedar suelto con sus Mats)
+                runCatching { tables?.join(); tables?.await()?.close() }
+                throw e
             }
         }
         // Si la segmentación de cuaderno falla con una imagen atípica (no por memoria), la ruta que conserva todo
         try {
-            TextRegions.render(base, style, opt.fast, opt.keepRuling, opt.layoutImages, opt.photoMode)
+            PerfTrace.stage("recuadros de texto") { TextRegions.render(base, style, opt.fast, opt.keepRuling, opt.layoutImages, opt.photoMode) }
         } catch (e: Exception) {
             if (Cv.isOutOfMemory(e)) throw e
             val k = base.cols().toDouble() / max(1, rgb.cols())
@@ -562,12 +568,19 @@ object ImageEnhancer {
      * Líneas de tabla limpias y continuas en su sitio ([TableLines]); con "Conservar cuadrícula / renglones"
      * ([Options.keepRuling]), igual que la cuadrícula del cuaderno. Nada sobre las fotos de la página.
      */
-    private fun restoreTableLines(out: Mat, src: Mat, st: PrintedPage.Stats, opt: Options, photos: List<Rect> = emptyList()) {
+    /** Análisis de [TableLines.prepare] para [restoreTableLines] (null si falla: entonces se analiza allí, como siempre). */
+    private fun prepareTables(src: Mat, st: PrintedPage.Stats, opt: Options): TableLines.Prepared? =
+        runCatching { TableLines.prepare(src, st.letterHeight, tableHintsOf(opt)) }.onFailure { if (Cv.isOutOfMemory(it)) throw it }.getOrNull()
+
+    private fun tableHintsOf(opt: Options) =
+        opt.tableHints.map { b -> TableLines.Hint(DoubleArray(4) { b[it].toDouble() }, hLines = b.getOrElse(4) { 1f } > 0.5f, vLines = b.getOrElse(5) { 1f } > 0.5f) }
+
+    private fun restoreTableLines(out: Mat, src: Mat, st: PrintedPage.Stats, opt: Options, photos: List<Rect> = emptyList(), prepared: TableLines.Prepared? = null) {
         runCatching {
             // (fotografías: las de la capa de fotos, que tapa lo de debajo; sin ellas, las cajas de siempre)
             val avoid = st.pictures + opt.layoutImages.filter { !NaturalColor.isVerdict(it) && !NaturalColor.isInk(it) }.map { b -> DoubleArray(4) { b[it].toDouble() } } +
                 photos.map { r -> doubleArrayOf(r.x.toDouble() / out.cols(), r.y.toDouble() / out.rows(), (r.x + r.width).toDouble() / out.cols(), (r.y + r.height).toDouble() / out.rows()) }
-            TableLines.restore(out, src, st.letterHeight, avoid, opt.tableHints.map { b -> TableLines.Hint(DoubleArray(4) { b[it].toDouble() }, hLines = b.getOrElse(4) { 1f } > 0.5f, vLines = b.getOrElse(5) { 1f } > 0.5f) })
+            TableLines.restore(out, src, st.letterHeight, avoid, tableHintsOf(opt), prepared)
         }.onFailure { if (Cv.isOutOfMemory(it)) throw it }
     }
 

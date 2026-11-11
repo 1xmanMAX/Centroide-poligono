@@ -53,127 +53,174 @@ internal object TableLines {
      * la página que se renderizó). [letterHeight] en px de [src] (0 = desconocida). [avoid] = recuadros relativos
      * (x0, y0, x1, y1 en 0..1) de fotos/figuras donde no se dibuja. Devuelve el número de líneas dibujadas.
      */
-    fun restore(out: Mat, src: Mat, letterHeight: Double, avoid: List<DoubleArray> = emptyList(), hints: List<Hint> = emptyList()): Int = MatBag().use { bag ->
-        if (!ENABLED || src.empty() || out.empty() || src.channels() < 3) return@use 0
+    fun restore(out: Mat, src: Mat, letterHeight: Double, avoid: List<DoubleArray> = emptyList(), hints: List<Hint> = emptyList(), prepared: Prepared? = null): Int {
+        if (!ENABLED || src.empty() || out.empty() || src.channels() < 3) { prepared?.close(); return 0 }
+        val pr = prepared ?: prepare(src, letterHeight, hints) ?: return 0
+        return pr.use { draw(out, src, avoid, it) }
+    }
+
+    /**
+     * Análisis de [restore] que solo depende de la página [src] (no de la salida): candidatas a línea de tabla y su
+     * seguimiento a resolución completa. Se puede calcular EN PARALELO con el render de la página ([ImageEnhancer]) y pasar
+     * a [restore]. null = nada que hacer. Hay que cerrarlo (lo hace [restore]).
+     */
+    fun prepare(src: Mat, letterHeight: Double, hints: List<Hint> = emptyList()): Prepared? {
+        if (!ENABLED || src.empty() || src.channels() < 3) return null
         val w = src.cols(); val h = src.rows()
-        if (min(w, h) < 200) return@use 0
+        if (min(w, h) < 200) return null
+        val bag = MatBag()
+        try {
         val side = max(w, h)
-        val lh = if (letterHeight > 0) letterHeight else side / 250.0
-        // canal mínimo a resolución completa (la línea de color también oscurece)
-        val t0 = System.nanoTime()
-        val ch = ArrayList<Mat>(3); Core.split(src, ch); for (c in ch) bag.add(c)
-        val vFull = bag.mat(); Core.min(ch[0], ch[1], vFull); Core.min(vFull, ch[2], vFull)
-        // análisis
-        val vs = bag.mat(); val s = Cv.downscale(vFull, vs, ANALYSIS_SIDE)
-        val bgS = bag.add(Cv.estimateBackground(vs, 256))
-        val glare = if (hints.isEmpty()) null else Glare(bgS, s)
-        val nv = bag.mat(); Cv.divideByBackground(vs, bgS, nv)
-        val hist = Cv.histogram(nv)
-        val (noise, pm) = Cv.paperStats(hist)
-        // contraste de la tinta de la página (texto): papel - percentil 0.5 %
-        val inkRef = max(40.0, pm - Cv.percentile(hist, 0.005))
-        // grosor máximo de una línea de tabla: fina respecto de la letra (el núcleo transversal del black-hat debe ser
-        // menor que la altura de letra: si no, las letras enteras responden como "estructura fina")
-        val maxThick = max(3.0, min(0.0035 * side, 0.3 * lh))
-        val lhA = lh * s
-        val kt = Cv.odd(max((0.4 * lhA).roundToInt().coerceIn(5, 21), (2 * maxThick * s + 1).roundToInt()))
-        val lo = Cv.odd(max(9, (1.2 * lhA).roundToInt()))
-        val gap = Cv.odd(max(9, (2.0 * lhA).roundToInt()))
-        val thr = max(8.0, 3.0 * noise)
-        val cands = ArrayList<TableLinesMath.Cand>()
-        // candidatas de la 2.ª pasada (umbral bajo): solo valen en zona deslumbrada
-        val faint = java.util.IdentityHashMap<TableLinesMath.Cand, Boolean>()
-        val nvB = ByteArray(nv.total().toInt()); nv.get(0, 0, nvB)
-        val prm = TableLinesMath.Params(
-            search = ceil(2.0 / s).toInt() + 2,
-            paperExtra = max(4, (0.6 * lh).roundToInt()),
-            noiseAbs = max(6.0, 3.0 * noise * 0.8),
-            maxThick = maxThick,
-            gapMax = max((2.5 * lh).roundToInt(), (0.02 * side).roundToInt()),
-        )
-        val avoidRects = avoid.map { r -> doubleArrayOf(r[0] * w, r[1] * h, r[2] * w, r[3] * h) }
-        // tablas indicadas (Jev): px de la página con margen de ~1 letra / en px de análisis
-        val zones = hints.map { z ->
-            doubleArrayOf(z.box[0] * w - lh, z.box[1] * h - lh, z.box[2] * w + lh, z.box[3] * h + lh, if (z.hLines) 1.0 else 0.0, if (z.vLines) 1.0 else 0.0)
-        }
-        val zonesA = zones.map { z -> DoubleArray(6) { if (it < 4) z[it] * s else z[it] } }
-        val t1 = System.nanoTime()
-        var tTrack = 0L; var tMorph = 0L
-        for (hor in booleanArrayOf(true, false)) {
-            val tm0 = System.nanoTime()
-            val bh = bag.mat()
-            Imgproc.morphologyEx(nv, bh, Imgproc.MORPH_BLACKHAT, if (hor) Cv.kernel(Imgproc.MORPH_RECT, 1, kt) else Cv.kernel(Imgproc.MORPH_RECT, kt, 1))
-            // 2.ª pasada sólo dentro de las tablas indicadas ([Hint]): umbral más bajo (líneas tenues o quemadas por la luz)
-            val zonesO = zonesA.filter { it[if (hor) 4 else 5] > 0.5 }
-            for (pass in 0 until (if (zonesO.isEmpty()) 1 else 2)) {
-            val m = bag.mat(); Imgproc.threshold(bh, m, if (pass == 0) thr else max(4.0, HINT_THR_K * thr), 255.0, Imgproc.THRESH_BINARY)
-            if (pass == 1) {
-                val roi = bag.add(Mat.zeros(m.size(), m.type()))
-                for (z in zonesO) Imgproc.rectangle(roi, org.opencv.core.Point(z[0], z[1]), org.opencv.core.Point(z[2], z[3]), Scalar(255.0), -1)
-                Core.bitwise_and(m, roi, m)
+            val lh = if (letterHeight > 0) letterHeight else side / 250.0
+            // canal mínimo a resolución completa (la línea de color también oscurece)
+            val t0 = System.nanoTime()
+            val ch = ArrayList<Mat>(3); Core.split(src, ch); for (c in ch) bag.add(c)
+            val vFull = bag.mat(); Core.min(ch[0], ch[1], vFull); Core.min(vFull, ch[2], vFull)
+            // análisis
+            val vs = bag.mat(); val s = Cv.downscale(vFull, vs, ANALYSIS_SIDE)
+            val bgS = bag.add(Cv.estimateBackground(vs, 256))
+            val glare = if (hints.isEmpty()) null else Glare(bgS, s)
+            val nv = bag.mat(); Cv.divideByBackground(vs, bgS, nv)
+            val hist = Cv.histogram(nv)
+            val (noise, pm) = Cv.paperStats(hist)
+            // contraste de la tinta de la página (texto): papel - percentil 0.5 %
+            val inkRef = max(40.0, pm - Cv.percentile(hist, 0.005))
+            // grosor máximo de una línea de tabla: fina respecto de la letra (el núcleo transversal del black-hat debe ser
+            // menor que la altura de letra: si no, las letras enteras responden como "estructura fina")
+            val maxThick = max(3.0, min(0.0035 * side, 0.3 * lh))
+            val lhA = lh * s
+            val kt = Cv.odd(max((0.4 * lhA).roundToInt().coerceIn(5, 21), (2 * maxThick * s + 1).roundToInt()))
+            val lo = Cv.odd(max(9, (1.2 * lhA).roundToInt()))
+            val gap = Cv.odd(max(9, (2.0 * lhA).roundToInt()))
+            val thr = max(8.0, 3.0 * noise)
+            val cands = ArrayList<TableLinesMath.Cand>()
+            // candidatas de la 2.ª pasada (umbral bajo): solo valen en zona deslumbrada
+            val faint = java.util.IdentityHashMap<TableLinesMath.Cand, Boolean>()
+            val nvB = ByteArray(nv.total().toInt()); nv.get(0, 0, nvB)
+            val prm = TableLinesMath.Params(
+                search = ceil(2.0 / s).toInt() + 2,
+                paperExtra = max(4, (0.6 * lh).roundToInt()),
+                noiseAbs = max(6.0, 3.0 * noise * 0.8),
+                maxThick = maxThick,
+                gapMax = max((2.5 * lh).roundToInt(), (0.02 * side).roundToInt()),
+            )
+            // tablas indicadas (Jev): px de la página con margen de ~1 letra / en px de análisis
+            val zones = hints.map { z ->
+                doubleArrayOf(z.box[0] * w - lh, z.box[1] * h - lh, z.box[2] * w + lh, z.box[3] * h + lh, if (z.hLines) 1.0 else 0.0, if (z.vLines) 1.0 else 0.0)
             }
-            // puntos/trazos de una línea punteada o rota: cierre corto a lo largo antes de la apertura
-            Imgproc.morphologyEx(m, m, Imgproc.MORPH_CLOSE, if (hor) Cv.kernel(Imgproc.MORPH_RECT, 5, 1) else Cv.kernel(Imgproc.MORPH_RECT, 1, 5))
-            Imgproc.morphologyEx(m, m, Imgproc.MORPH_OPEN, if (hor) Cv.kernel(Imgproc.MORPH_RECT, lo, 1) else Cv.kernel(Imgproc.MORPH_RECT, 1, lo))
-            Imgproc.morphologyEx(m, m, Imgproc.MORPH_CLOSE, if (hor) Cv.kernel(Imgproc.MORPH_RECT, gap, 1) else Cv.kernel(Imgproc.MORPH_RECT, 1, gap))
-            debug?.invoke(if (hor) "mH" else "mV", m); debug?.invoke(if (hor) "bhH" else "bhV", bh)
-            val labels = bag.mat(); val stats = bag.mat(); val cents = bag.mat()
-            tMorph += System.nanoTime() - tm0
-            val nc = Imgproc.connectedComponentsWithStats(m, labels, stats, cents, 8, CvType.CV_32S)
-            val st = IntArray(max(0, nc) * 5); if (nc > 0) stats.get(0, 0, st)
-            val aw = nv.cols(); val ah = nv.rows()
-            val minLenA = (if (hor) max(4.0 * lhA, 0.05 * aw) else max(2.5 * lhA, 0.025 * ah)) * (if (pass == 1) 0.5 else 1.0)
-            // banda de la imagen completa para el seguimiento (filas para horizontales, columnas para verticales)
-            val nAlong = if (hor) w else h; val nAcrossAll = if (hor) h else w
-            for (c in 1 until nc) {
-                val x = st[c * 5]; val y = st[c * 5 + 1]; val bw = st[c * 5 + 2]; val bhh = st[c * 5 + 3]; val area = st[c * 5 + 4]
-                val ext = if (hor) bw else bhh; val thin = if (hor) bhh else bw
-                if (ext < minLenA || area.toDouble() / ext > maxThick * s + 2 || thin > ext * 0.08 + maxThick * s * 2 + 4) continue
-                // semilla: recta por los centros de la componente (media por columna)
-                val seed = seedLine(labels, c, x, y, bw, bhh, hor, s) ?: continue
-                val a0 = floor(((if (hor) x else y) + 0.5) / s - 0.5).toInt(); val a1 = ceil(((if (hor) x + bw else y + bhh) - 0.5) / s - 0.5).toInt()
-                // banda transversal que cubre la semilla + búsqueda + papel
-                val ys = doubleArrayOf(seed.at(a0.toDouble()), seed.at(a1.toDouble()), seed.at((a0 + a1) / 2.0))
-                val pad = prm.search + prm.paperExtra + 3 + (0.03 * (a1 - a0)).roundToInt() + 8
-                val c0 = max(0, floor(ys.min()).toInt() - pad); val c1 = min(nAcrossAll, ceil(ys.max()).toInt() + pad + 1)
-                if (c1 - c0 < 8) continue
-                val band = bag.add(if (hor) vFull.submat(c0, c1, 0, w).clone() else vFull.submat(0, h, c0, c1).clone())
-                val bb = ByteArray((band.total()).toInt()); band.get(0, 0, bb); band.release()
-                val across = c1 - c0
-                val at = if (hor) TableLinesMath.Band { i, j -> bb[j * w + i].toInt() and 0xFF } else TableLinesMath.Band { i, j -> bb[i * across + j].toInt() and 0xFF }
-                val seedB = TableLinesMath.Poly(seed.c0 - c0, seed.c1, seed.c2, seed.mid, seed.scale)
-                for (tr in TableLinesMath.trackAll(at, across, nAlong, seedB, a0, a1, prm)) {
-                // de la banda a coordenadas de la página
-                val centers = DoubleArray(tr.centers.size) { tr.centers[it] + c0 }
-                // objetos oscuros que CRUZAN la línea (barras de un gráfico, columnas sombreadas): oscuro a ambos lados
-                // en la imagen normalizada, a ~0.3 letras del centro
-                val dA = max(2.0, 0.3 * lhA + tr.thick * s)
-                fun crossing(k: Double) = BooleanArray(centers.size) { q ->
-                    val ia = ((tr.a0 + q + 0.5) * s - 0.5).roundToInt(); val ca = (centers[q] + 0.5) * s - 0.5
-                    fun dark(off: Double): Boolean {
-                        val j = (ca + off).roundToInt()
-                        val x = if (hor) ia else j; val y = if (hor) j else ia
-                        if (x < 0 || y < 0 || x >= aw || y >= ah) return false
-                        return (nvB[y * aw + x].toInt() and 0xFF) < pm - k * inkRef
+            val zonesA = zones.map { z -> DoubleArray(6) { if (it < 4) z[it] * s else z[it] } }
+            val t1 = System.nanoTime()
+            var tTrack = 0L; var tMorph = 0L
+            for (hor in booleanArrayOf(true, false)) {
+                val tm0 = System.nanoTime()
+                val bh = bag.mat()
+                Imgproc.morphologyEx(nv, bh, Imgproc.MORPH_BLACKHAT, if (hor) Cv.kernel(Imgproc.MORPH_RECT, 1, kt) else Cv.kernel(Imgproc.MORPH_RECT, kt, 1))
+                // 2.ª pasada sólo dentro de las tablas indicadas ([Hint]): umbral más bajo (líneas tenues o quemadas por la luz)
+                val zonesO = zonesA.filter { it[if (hor) 4 else 5] > 0.5 }
+                for (pass in 0 until (if (zonesO.isEmpty()) 1 else 2)) {
+                val m = bag.mat(); Imgproc.threshold(bh, m, if (pass == 0) thr else max(4.0, HINT_THR_K * thr), 255.0, Imgproc.THRESH_BINARY)
+                if (pass == 1) {
+                    val roi = bag.add(Mat.zeros(m.size(), m.type()))
+                    for (z in zonesO) Imgproc.rectangle(roi, org.opencv.core.Point(z[0], z[1]), org.opencv.core.Point(z[2], z[3]), Scalar(255.0), -1)
+                    Core.bitwise_and(m, roi, m)
+                }
+                // puntos/trazos de una línea punteada o rota: cierre corto a lo largo antes de la apertura
+                Imgproc.morphologyEx(m, m, Imgproc.MORPH_CLOSE, if (hor) Cv.kernel(Imgproc.MORPH_RECT, 5, 1) else Cv.kernel(Imgproc.MORPH_RECT, 1, 5))
+                Imgproc.morphologyEx(m, m, Imgproc.MORPH_OPEN, if (hor) Cv.kernel(Imgproc.MORPH_RECT, lo, 1) else Cv.kernel(Imgproc.MORPH_RECT, 1, lo))
+                Imgproc.morphologyEx(m, m, Imgproc.MORPH_CLOSE, if (hor) Cv.kernel(Imgproc.MORPH_RECT, gap, 1) else Cv.kernel(Imgproc.MORPH_RECT, 1, gap))
+                debug?.invoke(if (hor) "mH" else "mV", m); debug?.invoke(if (hor) "bhH" else "bhV", bh)
+                val labels = bag.mat(); val stats = bag.mat(); val cents = bag.mat()
+                tMorph += System.nanoTime() - tm0
+                val nc = Imgproc.connectedComponentsWithStats(m, labels, stats, cents, 8, CvType.CV_32S)
+                val st = IntArray(max(0, nc) * 5); if (nc > 0) stats.get(0, 0, st)
+                val aw = nv.cols(); val ah = nv.rows()
+                val minLenA = (if (hor) max(4.0 * lhA, 0.05 * aw) else max(2.5 * lhA, 0.025 * ah)) * (if (pass == 1) 0.5 else 1.0)
+                // banda de la imagen completa para el seguimiento (filas para horizontales, columnas para verticales)
+                val nAlong = if (hor) w else h; val nAcrossAll = if (hor) h else w
+                // componentes candidatas (filtro barato) y, en paralelo, su seguimiento a resolución completa ([Par]): cada una
+                // es independiente; los resultados se añaden en el orden de siempre (salida idéntica)
+                val comps = (1 until nc).filter { c ->
+                    val bw = st[c * 5 + 2]; val bhh = st[c * 5 + 3]; val area = st[c * 5 + 4]
+                    val ext = if (hor) bw else bhh; val thin = if (hor) bhh else bw
+                    !(ext < minLenA || area.toDouble() / ext > maxThick * s + 2 || thin > ext * 0.08 + maxThick * s * 2 + 4)
+                }
+                val found = Par.map(comps.size) { ci ->
+                    val c = comps[ci]
+                    val res = ArrayList<TableLinesMath.Cand>(1)
+                    val x = st[c * 5]; val y = st[c * 5 + 1]; val bw = st[c * 5 + 2]; val bhh = st[c * 5 + 3]
+                    run comp@{
+                    // semilla: recta por los centros de la componente (media por columna)
+                    val seed = seedLine(labels, c, x, y, bw, bhh, hor, s) ?: return@comp
+                    val a0 = floor(((if (hor) x else y) + 0.5) / s - 0.5).toInt(); val a1 = ceil(((if (hor) x + bw else y + bhh) - 0.5) / s - 0.5).toInt()
+                    // banda transversal que cubre la semilla + búsqueda + papel
+                    val ys = doubleArrayOf(seed.at(a0.toDouble()), seed.at(a1.toDouble()), seed.at((a0 + a1) / 2.0))
+                    val pad = prm.search + prm.paperExtra + 3 + (0.03 * (a1 - a0)).roundToInt() + 8
+                    val c0 = max(0, floor(ys.min()).toInt() - pad); val c1 = min(nAcrossAll, ceil(ys.max()).toInt() + pad + 1)
+                    if (c1 - c0 < 8) return@comp
+                    val sub = if (hor) vFull.submat(c0, c1, 0, w) else vFull.submat(0, h, c0, c1)
+                    val band = sub.clone(); sub.release()
+                    val bb = ByteArray((band.total()).toInt()); band.get(0, 0, bb); band.release()
+                    val across = c1 - c0
+                    val at = if (hor) TableLinesMath.Band { i, j -> bb[j * w + i].toInt() and 0xFF } else TableLinesMath.Band { i, j -> bb[i * across + j].toInt() and 0xFF }
+                    val seedB = TableLinesMath.Poly(seed.c0 - c0, seed.c1, seed.c2, seed.mid, seed.scale)
+                    for (tr in TableLinesMath.trackAll(at, across, nAlong, seedB, a0, a1, prm)) {
+                    // de la banda a coordenadas de la página
+                    val centers = DoubleArray(tr.centers.size) { tr.centers[it] + c0 }
+                    // objetos oscuros que CRUZAN la línea (barras de un gráfico, columnas sombreadas): oscuro a ambos lados
+                    // en la imagen normalizada, a ~0.3 letras del centro
+                    val dA = max(2.0, 0.3 * lhA + tr.thick * s)
+                    fun crossing(k: Double) = BooleanArray(centers.size) { q ->
+                        val ia = ((tr.a0 + q + 0.5) * s - 0.5).roundToInt(); val ca = (centers[q] + 0.5) * s - 0.5
+                        fun dark(off: Double): Boolean {
+                            val j = (ca + off).roundToInt()
+                            val x = if (hor) ia else j; val y = if (hor) j else ia
+                            if (x < 0 || y < 0 || x >= aw || y >= ah) return false
+                            return (nvB[y * aw + x].toInt() and 0xFF) < pm - k * inkRef
+                        }
+                        dark(-dA) && dark(dA)
                     }
-                    dark(-dA) && dark(dA)
+                    // oscuro (no se pinta encima) / algo oscuro (barras claras: cuentan para reconocer un gráfico)
+                    val crossed = crossing(0.5)
+                    val (cf, cr) = TableLinesMath.crossedRuns(crossing(0.3), max(3, (0.4 * lh).roundToInt()))
+                    val nd = (tr.noDraw ?: BooleanArray(centers.size)).copyOf()
+                    val dil = ceil(tr.thick).toInt() + 2
+                    for (q in crossed.indices) if (crossed[q]) for (z in max(0, q - dil)..min(nd.size - 1, q + dil)) nd[z] = true
+                    val t2 = TableLinesMath.Track(tr.a0, tr.a1, centers, tr.thick, tr.amp, tr.inkFrac, tr.maxGap, tr.dashed, tr.rms, tr.embedded, tr.touching, tr.maxRun, tr.irregular, nd, cf, cr)
+                    res.add(TableLinesMath.Cand(hor, tr.a0.toDouble(), tr.a1.toDouble(), t2.mean, t2))
+                    }
+                    }
+                    res
                 }
-                // oscuro (no se pinta encima) / algo oscuro (barras claras: cuentan para reconocer un gráfico)
-                val crossed = crossing(0.5)
-                val (cf, cr) = TableLinesMath.crossedRuns(crossing(0.3), max(3, (0.4 * lh).roundToInt()))
-                val nd = (tr.noDraw ?: BooleanArray(centers.size)).copyOf()
-                val dil = ceil(tr.thick).toInt() + 2
-                for (q in crossed.indices) if (crossed[q]) for (z in max(0, q - dil)..min(nd.size - 1, q + dil)) nd[z] = true
-                val t2 = TableLinesMath.Track(tr.a0, tr.a1, centers, tr.thick, tr.amp, tr.inkFrac, tr.maxGap, tr.dashed, tr.rms, tr.embedded, tr.touching, tr.maxRun, tr.irregular, nd, cf, cr)
-                val cd = TableLinesMath.Cand(hor, tr.a0.toDouble(), tr.a1.toDouble(), t2.mean, t2)
-                cands.add(cd); if (pass == 1) faint[cd] = true
+                for (list in found) for (cd in list) { cands.add(cd); if (pass == 1) faint[cd] = true }
                 }
             }
-            }
+            val t2 = System.nanoTime()
+            log?.invoke("tiempos: prep=%.0f morf=%.0f seguimiento=%.0f ms".format((t1 - t0) / 1e6, tMorph / 1e6, (t2 - t1 - tMorph) / 1e6))
+            return Prepared(bag, w, h, lh, maxThick, inkRef, cands, faint, zones, glare, vFull, kt, lo, gap, thr, noise)
+        } catch (e: Throwable) {
+            bag.close(); throw e
         }
+    }
+
+    /** Resultado de [prepare] (dueño de sus Mats: [close]). */
+    class Prepared internal constructor(
+        internal val bag: MatBag, internal val w: Int, internal val h: Int, internal val lh: Double, internal val maxThick: Double,
+        internal val inkRef: Double, internal val cands: ArrayList<TableLinesMath.Cand>,
+        internal val faint: java.util.IdentityHashMap<TableLinesMath.Cand, Boolean>, internal val zones: List<DoubleArray>,
+        internal val glare: Glare?, internal val vFull: Mat, internal val kt: Int, internal val lo: Int, internal val gap: Int,
+        internal val thr: Double, internal val noise: Double,
+    ) : AutoCloseable {
+        override fun close() = bag.close()
+    }
+
+    /** Parte de [restore] que dibuja en [out] las líneas aceptadas de [pr]. */
+    private fun draw(out: Mat, src: Mat, avoid: List<DoubleArray>, pr: Prepared): Int {
+        val w = pr.w; val h = pr.h; val lh = pr.lh; val maxThick = pr.maxThick; val inkRef = pr.inkRef
+        val cands = pr.cands; val faint = pr.faint; val zones = pr.zones; val glare = pr.glare; val vFull = pr.vFull
+        val kt = pr.kt; val lo = pr.lo; val gap = pr.gap; val thr = pr.thr; val noise = pr.noise
         val t2 = System.nanoTime()
-        log?.invoke("tiempos: prep=%.0f morf=%.0f seguimiento=%.0f ms".format((t1 - t0) / 1e6, tMorph / 1e6, (t2 - t1 - tMorph) / 1e6))
-        if (cands.isEmpty()) return@use 0
+        val avoidRects = avoid.map { r -> doubleArrayOf(r[0] * w, r[1] * h, r[2] * w, r[3] * h) }
+        if (cands.isEmpty()) return 0
         if (faint.isNotEmpty()) {
             val f = faint.keys.toList(); markGlare(f, zones, glare)
             cands.removeAll { it in faint && !it.glare }
@@ -221,7 +268,7 @@ internal object TableLines {
         log?.invoke("fin %.0f ms".format((System.nanoTime() - t2) / 1e6))
         log?.invoke("tabla: candidatas=${cands.size} únicas=${kept.size} dibujadas=${drawn.size} kt=$kt lo=$lo gap=$gap thr=%.1f noise=%.1f lh=%.1f inkRef=%.0f".format(thr, noise, lh, inkRef))
         onDraw?.invoke(drawn)
-        drawn.size
+        return drawn.size
     }
 
     /**
@@ -250,7 +297,7 @@ internal object TableLines {
      * Deslumbramiento a gran escala: el FONDO estimado (sin tinta, suave) [bg] (escala [s] de la página) >= papel típico
      * (percentil 60 del fondo) + [GLARE_ABOVE_PAPER]. Los brillos finos de una hoja arrugada no llegan al fondo.
      */
-    private class Glare(bg: Mat, private val s: Double) {
+    internal class Glare(bg: Mat, private val s: Double) {
         private val w = bg.cols(); private val h = bg.rows()
         private val px = ByteArray(w * h).also { bg.get(0, 0, it) }
         val paper = Cv.percentile(Cv.histogram(bg), 0.6).toDouble()

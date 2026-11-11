@@ -1016,7 +1016,6 @@ object GridDewarp {
         coarse.put(0, 0, buf)
         val out = Mat(outH, outW, src.type())
         val hm = hinv?.let { Mat(3, 3, CvType.CV_64F).apply { put(0, 0, *it) } }
-        val strip = Mat(); val strip2 = Mat(); val aff = Mat(2, 3, CvType.CV_64F)
         val expanded = model.x0 < 0 || model.y0 < 0 || model.x1 > 1 || model.y1 > 1
         // Lo que cae fuera del plano rectificado (fuera de la hoja recortada: con la perspectiva sería la mesa de la
         // foto) se pinta del color del papel, se amplíe o no el lienzo
@@ -1024,15 +1023,19 @@ object GridDewarp {
         // fondo (no hoja) de la franja ampliada según la máscara del modelo; sin máscara, toda la franja es hoja
         val zone = if (expanded) Mat(outH, outW, CvType.CV_8UC1, Scalar(0.0)) else null
         val pm = if (expanded && model.paper != null) Mat(model.paperH, model.paperW, CvType.CV_8UC1).apply { put(0, 0, model.paper) } else null
-        val pmap = Mat(); val pz = Mat()
-        val inside = Mat()
         try {
             val rowsPer = max(16, 1_000_000 / max(1, outW))
             val kx = (model.gw - 1).toDouble() / max(1, outW - 1)
             val ky = (model.gh - 1).toDouble() / max(1, outH - 1)
-            var y0 = 0
-            while (y0 < outH) {
+            // Franjas independientes (cada una escribe solo sus filas de [out], [outside] y [zone]) -> en paralelo ([Par]),
+            // con búferes por hilo: mismo resultado que en serie
+            val nStrips = (outH + rowsPer - 1) / rowsPer
+            class SBuf { val strip = Mat(); val strip2 = Mat(); val aff = Mat(2, 3, CvType.CV_64F); val pmap = Mat(); val pz = Mat(); val inside = Mat()
+                fun close() { strip.release(); strip2.release(); aff.release(); pmap.release(); pz.release(); inside.release() } }
+            Par.forEach(nStrips, { SBuf() }, { it.close() }) { sb, si ->
+                val y0 = si * rowsPer
                 val rows = min(rowsPer, outH - y0)
+                val strip = sb.strip; val strip2 = sb.strip2; val aff = sb.aff; val pmap = sb.pmap; val pz = sb.pz; val inside = sb.inside
                 aff.put(0, 0, kx, 0.0, 0.0, 0.0, ky, y0 * ky)
                 Imgproc.warpAffine(
                     coarse, strip, aff, Size(outW.toDouble(), rows.toDouble()),
@@ -1059,7 +1062,6 @@ object GridDewarp {
                 val dst = out.submat(y0, y0 + rows, 0, outW)
                 Imgproc.remap(src, dst, m, Mat(), interp, Core.BORDER_REPLICATE)
                 dst.release()
-                y0 += rows
             }
             if (Core.countNonZero(outside) > 0) {
                 // Margen de 1 px (la interpolación del borde trae algo de lo que hay fuera de la hoja)
@@ -1078,7 +1080,7 @@ object GridDewarp {
         } catch (t: Throwable) {
             out.release(); throw t
         } finally {
-            coarse.release(); strip.release(); strip2.release(); aff.release(); hm?.release(); outside.release(); inside.release(); zone?.release(); pm?.release(); pmap.release(); pz.release()
+            coarse.release(); hm?.release(); outside.release(); zone?.release(); pm?.release()
         }
         return out
     }
