@@ -368,7 +368,8 @@ class DocumentRepository(
                     // aparece YA en la cámara y la revisión; el procesado completo sigue aquí y la sustituye. Mientras tanto
                     // el candado de la página hace esperar a quien pida el procesado (no se renderiza dos veces).
                     val earlyLock = pageLock("$docId/$pageId")
-                    if (DevicePerf.mode != com.scannerpromax.imaging.PerfMode.SAVER) {
+                    // (solo en «Máximo»: cuesta ~1/3 del render; en Equilibrado/Ahorro la página aparece al terminar, como antes)
+                    if (DevicePerf.mode == com.scannerpromax.imaging.PerfMode.MAX) {
                         earlyLock.lock()
                         try {
                             early = quickPage(docId, pageId, bmp, edits, pw, ph, originalName, issues, ps)

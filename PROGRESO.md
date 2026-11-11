@@ -325,3 +325,18 @@ Todo tras «Mejorar con Jev» (subopciones nuevas «Al escanear» y «Firmas y s
   VALIDACIÓN (otras semillas, mano, desenfoque) 55,5 % -> 96,1 %, ninguna cara derecha girada. Notas: /tmp/claude-0/bench/notes_dni2.md.
   Falta: probar en móvil (cámara de una cara, tiempos de doc_ori por cara, DNI reales).
 - 2026-11-10: FUSIONADO libre-dni2 (pantalla «Editar DNI» por cara, CardOrientation, hoja DNI excluida del giro automático). Libre 1.4.0 (versionCode 5), release firmada, 666 tests OK. Falta probar en móvil con DNI reales.
+- 2026-11-11: RENDIMIENTO (agente, rama `libre-rendimiento` desde `libre`, subida; SIN fusionar). Petición: "tarda mucho en
+  procesar, sobre todo en móviles no tan potentes; usar mejor CPU/GPU de cada procesador (Kirin, Exynos, Snapdragon,
+  Dimensity/Helio, Tensor, Unisoc)". Banco PipelineBenchTest (-PperfBench=DIR, escenas sintéticas 12 MP, doradas del código
+  anterior): la cadena era casi toda en serie y el trabajo pesado de la cámara (HeavyWork: lente, ráfaga, libro, DNI) corría en
+  prioridad BACKGROUND (núcleos pequeños). Hecho: Par (bucles paralelos deterministas: tablas —además solapadas con el render—,
+  Deghost, Deblur, franjas de PrintedPage, remap de la hoja curvada, lente, bordes; clasificación en paralelo con la nitidez):
+  salida IDÉNTICA (20/20 doradas, ParallelGoldenTest). SocProfile (Build.SOC_*, cpuinfo, cpufreq, cpu_capacity -> prime/grandes/
+  medios/pequeños) + PerfPolicy + DevicePerf: hilos de OpenCV/Par/NaturalColor/ONNX Runtime/pdfsqueeze, prioridad alta mientras
+  el usuario espera, PerformanceHint (Android 12+), modo sostenido en ráfagas de 3+ capturas, 2 páginas a la vez si sobra
+  memoria. OrtAccel: CPU/XNNPACK/NNAPI por modelo con prueba de velocidad y de exactitud frente a la CPU (encuadre IA, Indra det),
+  decisión guardada por equipo. «Vista rápida» (Máximo): la página aparece con una miniatura a 960 px antes del render completo.
+  Ajustes › Rendimiento: Máximo (defecto) / Equilibrado / Ahorro de batería + diagnóstico (SoC, núcleos, hilos, GPU/NPU, tiempos
+  de la última página). GPU: la OpenCV de Android no trae OpenCL (sin T-API); AGSL/Vulkan no compensan. Banco: combada NATURAL
+  3760 -> 2512 ms (-33 %), con OpenCV en 1 hilo 4167 -> 2924 ms; primera miniatura a ~1.4 s. 702 tests OK, assembleDebug OK.
+  Notas: /tmp/claude-0/bench/notes_rendimiento.md. Falta: probar en móvil (tiempos reales por SoC, NNAPI/XNNPACK elegidos).
