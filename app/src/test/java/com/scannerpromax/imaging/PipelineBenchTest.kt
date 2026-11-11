@@ -157,6 +157,11 @@ class PipelineBenchTest {
             val rgba = PerfTrace.stage("bitmap→mat") { Mat().also { Imgproc.cvtColor(rgb, it, Imgproc.COLOR_RGB2RGBA) } }
             rgb.release()
             val edits = PageEdits(quad = quad, filter = c.filter, rotation = rot)
+            // «vista rápida» (la app la muestra antes del render completo): tiempo hasta la primera miniatura
+            if (System.getProperty("perf.quick") != "0") {
+                PerfTrace.stage("vista rápida") { proc.previewMat(rgba, edits, 960).release() }
+                s.add("= hasta la vista rápida", (System.nanoTime() - s.startNs))
+            }
             val out = PerfTrace.stage("render") { proc.renderMat(rgba, edits) }
             val save = Mat()
             if (out.channels() == 3) Imgproc.cvtColor(out, save, Imgproc.COLOR_RGB2BGR) else out.copyTo(save)

@@ -89,16 +89,18 @@ internal object EdgeClean {
         val k = min(1.0, max(WORK.toDouble() / max(fw, fh), kotlin.math.sqrt(WORK_PIXELS / (fw.toDouble() * fh))))
         val ws = Size(max(1.0, (fw * k).roundToInt().toDouble()), max(1.0, (fh * k).roundToInt().toDouble()))
         fun pooled(thr: Double): Mat {
-            val m = bag.mat(); Imgproc.threshold(d, m, thr, 255.0, Imgproc.THRESH_BINARY)
-            val r = bag.mat(); Imgproc.resize(m, r, ws, 0.0, 0.0, Imgproc.INTER_AREA); m.release()
+            val m = Mat(); Imgproc.threshold(d, m, thr, 255.0, Imgproc.THRESH_BINARY)
+            val r = Mat(); Imgproc.resize(m, r, ws, 0.0, 0.0, Imgproc.INTER_AREA); m.release()
             // (cobertura >= 40 %: las letras vecinas no se funden al reducir; una raya fina de 1-2 px sigue entera)
             Imgproc.threshold(r, r, 100.0, 255.0, Imgproc.THRESH_BINARY)
             return r
         }
-        val weak = pooled(80.0)
-        val strong = pooled(130.0)
+        // (las tres pasadas a resolución completa son independientes: en paralelo, [Par])
+        val pools = Par.map(3) { i -> pooled(doubleArrayOf(80.0, 130.0, 20.0)[i]) }.onEach { bag.add(it) }
+        val weak = pools[0]
+        val strong = pools[1]
         // Cerca de la tinta (también su halo tenue): se excluye al medir si una zona es papel o fondo ajeno
-        val near = pooled(20.0)
+        val near = pools[2]
         Imgproc.dilate(near, near, Cv.kernel(Imgproc.MORPH_RECT, 5))
         d.release()
         val W = weak.cols(); val H = weak.rows()

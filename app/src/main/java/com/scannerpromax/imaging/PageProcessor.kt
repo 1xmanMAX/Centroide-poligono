@@ -341,6 +341,10 @@ class PageProcessor(val tier: DeviceTier) {
         // Gama baja: sin la deconvolución por zonas; sólo el realce radial ligero de los bordes de la foto
         if (tier.isLowRam) { edgeSharpen(rgb, hinv, photoW, photoH, edits); return }
         val pre = PrintedPage.reduceForAnalysis(rgb)
+        // La clasificación de la página ([PrintedPage.analyze]) con [pre] solo depende de [pre] y del TAMAÑO de [rgb]: se
+        // calcula a la vez que la restauración ([Par.async]) y el filtro la usa si se restauró (si no, se descarta: entonces
+        // el filtro clasifica la página final, como siempre)
+        val ahead = Par.async { runCatching { PrintedPage.analyze(rgb, pre) }.onFailure { if (Cv.isOutOfMemory(it)) throw it }.getOrNull() }
         // Primero la estela/imagen doble (núcleo no paramétrico, relativo a la zona más nítida); Deblur no repite lo ya
         // corregido
         var keep = false
@@ -350,9 +354,16 @@ class PageProcessor(val tier: DeviceTier) {
                 .onFailure { if (Cv.isOutOfMemory(it)) throw it }.getOrNull()
             keep = dg?.applied == true || db?.applied == true
         } finally {
-            if (keep) setClassify(pre) else pre.release()
+            ahead.join()   // (lee [pre]: antes de soltarlo)
+            if (keep) {
+                setClassify(pre)
+                statsRef.set(runCatching { ahead.await() }.getOrNull()?.let { it to max(rgb.cols(), rgb.rows()) })
+            } else pre.release()
         }
     }
+
+    /** Clasificación ya calculada de [classifyRef] (misma secuencia y hilo); null = calcularla en el filtro. */
+    private val statsRef = ThreadLocal<Pair<PrintedPage.Stats, Int>?>()
 
     /**
      * «Corregir distorsión de la lente»: la lente de un móvil emborrona más los bordes y las esquinas de la foto. Cuando
@@ -710,13 +721,14 @@ class PageProcessor(val tier: DeviceTier) {
 
     /** Página reducida ANTES de [restoreSharpness] (misma secuencia y hilo que [sheetExact]): la clasificación de [finish]. */
     private val classifyRef = ThreadLocal<Mat?>()
-    private fun setClassify(m: Mat?) { classifyRef.get()?.release(); classifyRef.set(m) }
+    private fun setClassify(m: Mat?) { classifyRef.get()?.release(); classifyRef.set(m); statsRef.set(null) }
 
     /** Libera [geo]; devuelve el Mat final (8UC3 u 8UC1). */
     private fun finish(geo: Mat, edits: PageEdits, opt0: ImageEnhancer.Options, progress: ProgressCallback?): Mat {
         // Contenido pegado al canto (cabecera de color, foto a sangre): con la salida recortada en los cantos no es fondo
         val opt = (sheetExact.get() ?: 0).let { if (it != 0) opt0.copy(sheetSides = it) else opt0 }
-            .let { o -> classifyRef.get()?.let { o.copy(classify = it) } ?: o }
+            .let { o -> classifyRef.get()?.let { o.copy(classify = it, classifyStats = statsRef.get()?.first, classifyStatsSide = statsRef.get()?.second ?: 0) } ?: o }
+        statsRef.set(null)
         // AUTO se clasifica una sola vez (a 256 px) y se usa tanto para el filtro como para decidir la limpieza
         val analysis = if (edits.filter == FilterType.AUTO) {
             PerfTrace.stage("auto (clasificación)") { runCatching { ImageEnhancer.analyzeMat(geo) }.getOrNull() }?.let { ImageEnhancer.withAiHint(it, edits.aiHint) }

@@ -50,6 +50,10 @@ object ImageEnhancer {
         val keepRuling: Boolean = true,
         /** Página reducida antes de la restauración de nitidez ([PrintedPage.reduceForAnalysis]) para clasificarla. */
         val classify: Mat? = null,
+        /** [PrintedPage.analyze] de [classify] ya calculada (en paralelo con la restauración de nitidez); null = calcularla. */
+        val classifyStats: PrintedPage.Stats? = null,
+        /** Lado largo de la página sobre la que se calculó [classifyStats]. */
+        val classifyStatsSide: Int = 0,
         /**
          * Vista previa con las decisiones del render ([PageProcessor.preview]): todo como en el render salvo la
          * super-resolución de páginas pequeñas (la previa a resolución de pantalla siempre lo sería; el render a
@@ -522,7 +526,9 @@ object ImageEnhancer {
      * tiene el tamaño de la entrada (x2 con super-resolución).
      */
     private fun segmented(rgb: Mat, opt: Options, style: TextRegions.Style): Mat = MatBag().use { bag ->
-        val stats = PerfTrace.stage("página (análisis)") { runCatching { PrintedPage.analyze(rgb, opt.classify) }.getOrNull() }
+        // (con la clasificación ya hecha en paralelo, solo si se hizo sobre la misma página: mismo tamaño que [rgb])
+        val stats = opt.classifyStats?.takeIf { opt.classifyStatsSide == max(rgb.cols(), rgb.rows()) && opt.classify != null }
+            ?: PerfTrace.stage("página (análisis)") { runCatching { PrintedPage.analyze(rgb, opt.classify) }.getOrNull() }
         var base = rgb
         // Sin anti-muaré: la cuadrícula azul de un cuaderno es periódica y cromática y el detector de muaré la
         // confundía con una pantalla (el des-tramado emborronaba la escritura). La segmentación ya deja el fondo
