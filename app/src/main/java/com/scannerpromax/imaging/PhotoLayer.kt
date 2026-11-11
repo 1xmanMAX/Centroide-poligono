@@ -115,7 +115,6 @@ object PhotoLayer {
      * rectificada, cualquier escala). Da lo mismo que el render completo con esas zonas ([compose]).
      */
     fun recompose(base: Mat, orig: Mat, auto: List<List<Float>>, zones: com.scannerpromax.domain.PhotoZones?, white: DoubleArray?) {
-        val w = base.cols(); val h = base.rows()
         val res = PhotoZoneMath.resolve(auto.filter { it.size >= 4 }.map { b -> floatArrayOf(b[0], b[1], b[2], b[3]) }, zones)
         if (!res.isEmpty) pasteZones(base, orig, res, white)
     }
